@@ -66,6 +66,9 @@ public class WalBasicTests : IDisposable
                             FieldId = 1,
                             OpKind = 1,
                             KeyEpoch = 0,
+                            Wall = 100,
+                            Logical = 0,
+                            AuthorNodeId = Id(1),
                             Value = "hello"u8.ToArray()
                         }
                     ]

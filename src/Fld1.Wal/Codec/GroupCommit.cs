@@ -3,17 +3,19 @@ using Fld1.Wal.Format;
 
 namespace Fld1.Wal.Codec;
 
-/// <summary>One field mutation inside GROUP_COMMIT.</summary>
+/// <summary>One field mutation inside GROUP_COMMIT (durable HLC + author for replay).</summary>
 public sealed class WalFieldMutation
 {
     public required byte[] RecordId { get; init; } // 16
     public required ushort FieldId { get; init; }
     public required byte OpKind { get; init; }
     public required ushort KeyEpoch { get; init; }
+    public required ulong Wall { get; init; }
+    public required uint Logical { get; init; }
+    public required byte[] AuthorNodeId { get; init; } // 16
     public required byte[] Value { get; init; }
 }
 
-/// <summary>One mutation request in the group.</summary>
 public sealed class WalMutation
 {
     public required byte[] ClientInstanceId { get; init; } // 16
@@ -47,7 +49,10 @@ public sealed class GroupCommitPayload
     public required List<WalProvenance> Provenance { get; init; }
 }
 
-/// <summary>Encode/decode GROUP_COMMIT payload. Spec §5.4.</summary>
+/// <summary>
+/// Encode/decode GROUP_COMMIT payload.
+/// Field frame: RecordId16 | FieldId | OpKind | Flags | KeyEpoch | Wall | Logical | Author16 | ValLen | Value
+/// </summary>
 public static class GroupCommitCodec
 {
     public static byte[] Encode(GroupCommitPayload p)
@@ -63,7 +68,7 @@ public static class GroupCommitCodec
         WriteU32(ms, (uint)p.Mutations.Count);
         WriteU32(ms, (uint)p.Results.Count);
         WriteU32(ms, (uint)p.Provenance.Count);
-        WriteU32(ms, 0); // Reserved
+        WriteU32(ms, 1); // format version of payload body (1 = HLC+author on fields)
 
         foreach (var m in p.Mutations)
         {
@@ -75,12 +80,16 @@ public static class GroupCommitCodec
             foreach (var f in m.Fields)
             {
                 if (f.RecordId.Length != 16) throw new ArgumentException("RecordId");
+                if (f.AuthorNodeId.Length != 16) throw new ArgumentException("AuthorNodeId");
                 if (f.Value.Length > WalConstants.MaxValLen) throw new ArgumentException("ValLen");
                 ms.Write(f.RecordId);
                 WriteU16(ms, f.FieldId);
                 ms.WriteByte(f.OpKind);
                 ms.WriteByte(0); // Flags
                 WriteU16(ms, f.KeyEpoch);
+                WriteU64(ms, f.Wall);
+                WriteU32(ms, f.Logical);
+                ms.Write(f.AuthorNodeId);
                 WriteU32(ms, (uint)f.Value.Length);
                 ms.Write(f.Value);
             }
@@ -105,7 +114,7 @@ public static class GroupCommitCodec
             ms.Write(pr.SenderPeer);
             WriteU16(ms, pr.Ns);
             ms.WriteByte(pr.IsFirst);
-            ms.WriteByte(0); // Reserved
+            ms.WriteByte(0);
         }
 
         var bytes = ms.ToArray();
@@ -120,8 +129,8 @@ public static class GroupCommitCodec
         uint mutCount = ReadU32(payload, ref pos);
         uint resCount = ReadU32(payload, ref pos);
         uint provCount = ReadU32(payload, ref pos);
-        uint reserved = ReadU32(payload, ref pos);
-        if (reserved != 0) throw new InvalidDataException("GROUP_COMMIT reserved nonzero");
+        uint bodyVer = ReadU32(payload, ref pos);
+        if (bodyVer != 1) throw new InvalidDataException($"unsupported GROUP_COMMIT body ver={bodyVer}");
         if (mutCount > WalConstants.MaxMutations || resCount > WalConstants.MaxResults
             || provCount > WalConstants.MaxProvenance)
             throw new InvalidDataException("count limit");
@@ -142,13 +151,17 @@ public static class GroupCommitCodec
                 byte flags = payload[pos++];
                 if (flags != 0) throw new InvalidDataException("field flags nonzero");
                 ushort keyEpoch = ReadU16(payload, ref pos);
+                ulong wall = ReadU64(payload, ref pos);
+                uint logical = ReadU32(payload, ref pos);
+                var author = ReadBytes(payload, ref pos, 16);
                 uint valLen = ReadU32(payload, ref pos);
                 if (valLen > WalConstants.MaxValLen) throw new InvalidDataException("ValLen");
                 var val = ReadBytes(payload, ref pos, (int)valLen);
                 fields.Add(new WalFieldMutation
                 {
                     RecordId = rid, FieldId = fid, OpKind = op,
-                    KeyEpoch = keyEpoch, Value = val
+                    KeyEpoch = keyEpoch, Wall = wall, Logical = logical,
+                    AuthorNodeId = author, Value = val
                 });
             }
             mutations.Add(new WalMutation
@@ -217,24 +230,19 @@ public static class GroupCommitCodec
     }
     private static ushort ReadU16(ReadOnlySpan<byte> p, ref int pos)
     {
-        var v = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(pos));
-        pos += 2; return v;
+        var v = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(pos)); pos += 2; return v;
     }
     private static uint ReadU32(ReadOnlySpan<byte> p, ref int pos)
     {
-        var v = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(pos));
-        pos += 4; return v;
+        var v = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(pos)); pos += 4; return v;
     }
     private static ulong ReadU64(ReadOnlySpan<byte> p, ref int pos)
     {
-        var v = BinaryPrimitives.ReadUInt64LittleEndian(p.Slice(pos));
-        pos += 8; return v;
+        var v = BinaryPrimitives.ReadUInt64LittleEndian(p.Slice(pos)); pos += 8; return v;
     }
     private static byte[] ReadBytes(ReadOnlySpan<byte> p, ref int pos, int n)
     {
         if (pos + n > p.Length) throw new InvalidDataException("truncated");
-        var a = p.Slice(pos, n).ToArray();
-        pos += n;
-        return a;
+        var a = p.Slice(pos, n).ToArray(); pos += n; return a;
     }
 }

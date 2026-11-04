@@ -20,7 +20,7 @@ Implements [FLD KERNEL SPECIFICATION v1.5.8-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.8.m
 | `Fld1.Run` | STATE run builder/reader/verify (+ ArrayPool digest) |
 | `Fld1.Wal` | Micro-WAL v2 |
 | `Fld1.Manifest` | Binary manifest + atomic store |
-| `Fld1.Engine` | Single-process DB: overlay, WAL commit, checkpoint→run, get |
+| `Fld1.Engine` | Single-process DB: overlay, WAL commit+replay, checkpoint→run, get |
 
 ## Engine (current)
 
@@ -32,7 +32,11 @@ db.Checkpoint();   // seal overlay → immutable .fld1 + manifest
 db.TryGet(recordId, fieldId, out var span);
 ```
 
-Optimizations in this path: span get, run byte[] cache, LWW overlay dictionary keyed by value-type `MemFieldKey`, pooled BLAKE3 input in RunBuilder.
+Optimizations: span get, run byte[] cache, value-type `MemFieldKey`, pooled BLAKE3 input.
+
+Crash recovery: WAL GROUP_COMMIT fields carry HLC+author; Open replays CommitSeq > last sealed run into overlay.
+
+Rough micro-timing (Release, single field/rec hot path): Put ~1.5M ops/s, overlay Get ~7M ops/s, run Get ~0.7M ops/s.
 
 ## Build
 

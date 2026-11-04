@@ -1,11 +1,9 @@
-using System.Buffers.Binary;
 using Fld1.Core.Hlc;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Storage;
 using Fld1.Manifest.Format;
 using Fld1.Manifest.IO;
 using Fld1.Run.Builder;
-using Fld1.Run.Format;
 using Fld1.Run.Reader;
 using Fld1.Wal.Codec;
 using Fld1.Wal.Format;
@@ -15,9 +13,9 @@ using Fld1.Wal.Recovery;
 namespace Fld1.Engine.Db;
 
 /// <summary>
-/// Single-process FLD database (Engine path without SHM/IPC yet).
-/// Write → mem overlay + WAL group commit; Checkpoint → immutable run + manifest.
-/// Read: overlay first, then runs newest-first.
+/// Single-process FLD database.
+/// Put → mem overlay; Commit → WAL; Checkpoint → run + clear sealed prefix;
+/// Open recovers WAL records after last sealed SeqHi into overlay.
 /// </summary>
 public sealed class FldDatabase : IDisposable
 {
@@ -33,11 +31,13 @@ public sealed class FldDatabase : IDisposable
     private ulong _nextRunId = 1;
     private ulong _clientRequestSeq;
     private readonly byte[] _clientInstanceId = new byte[16];
+    private ulong _lastSealedCommitSeq;
     private bool _disposed;
 
     public string DbDir => _dbDir;
     public uint NamespaceId => _namespaceId;
     public int OverlayCount => _overlay.Count;
+    public ulong LastSealedCommitSeq => _lastSealedCommitSeq;
 
     private FldDatabase(
         string dbDir,
@@ -70,46 +70,38 @@ public sealed class FldDatabase : IDisposable
         var manifestStore = new AtomicManifestStore(dbDir);
         var manifest = manifestStore.Load();
 
-        // Ensure ns registered
         if (!manifest.Namespaces.Contains(namespaceId))
         {
-            manifest = manifestStore.Update(m => new ManifestDocument
-            {
-                Generation = m.Generation,
-                LastFlushedCommitSeq = m.LastFlushedCommitSeq,
-                CertifiedWatermark = m.CertifiedWatermark,
-                Namespaces = m.Namespaces.Append(namespaceId).Distinct().OrderBy(x => x).ToList(),
-                Runs = m.Runs,
-                Retains = m.Retains,
-                ResultClients = m.ResultClients,
-                ProvenanceIndex = m.ProvenanceIndex,
-                CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
-                CoordinatorSessionId = m.CoordinatorSessionId
-            });
+            manifest = manifestStore.Update(m => CloneManifest(m, nss: m.Namespaces
+                .Append(namespaceId).Distinct().OrderBy(x => x).ToList()));
         }
 
         string walPath = Path.Combine(dbDir, "wal", $"ns_{namespaceId}.0.log");
         WalWriter wal;
+        WalRecoveryResult recovered;
         if (!File.Exists(walPath))
         {
             wal = WalWriter.Create(walPath, namespaceId, firstCommitSeq: 1);
+            recovered = new WalRecoveryResult
+            {
+                Status = WalRecoveryStatus.Ok,
+                Records = [],
+                ValidEndOffset = WalHeader.Size
+            };
         }
         else
         {
-            var recovered = WalRecovery.Recover(walPath);
+            recovered = WalRecovery.Recover(walPath);
             if (recovered.Status is WalRecoveryStatus.CorruptHeader or WalRecoveryStatus.CorruptMiddle
                 or WalRecoveryStatus.UnknownKind or WalRecoveryStatus.OrderViolation)
                 throw new InvalidDataException($"WAL recovery failed: {recovered.Status} {recovered.Detail}");
 
-            // Truncate torn tail if needed
-            if (recovered.Status == WalRecoveryStatus.TruncatedTorn
-                || recovered.Status == WalRecoveryStatus.CorruptTailAmbiguous)
+            if (recovered.Status is WalRecoveryStatus.TruncatedTorn
+                or WalRecoveryStatus.CorruptTailAmbiguous)
             {
-                using (var fs = new FileStream(walPath, FileMode.Open, FileAccess.Write, FileShare.Read))
-                {
-                    fs.SetLength(recovered.ValidEndOffset);
-                    fs.Flush(flushToDisk: true);
-                }
+                using var fs = new FileStream(walPath, FileMode.Open, FileAccess.Write, FileShare.Read);
+                fs.SetLength(recovered.ValidEndOffset);
+                fs.Flush(flushToDisk: true);
             }
 
             ulong nextSeq = (recovered.LastCommitSeq ?? 0) + 1;
@@ -119,11 +111,13 @@ public sealed class FldDatabase : IDisposable
 
         var db = new FldDatabase(dbDir, namespaceId, author, wal, manifestStore);
         db.LoadRunsFromManifest(manifest);
+        db.ReplayWalIntoOverlay(recovered.Records);
         return db;
     }
 
     private void LoadRunsFromManifest(ManifestDocument manifest)
     {
+        ulong sealedSeq = 0;
         foreach (var re in manifest.Runs.Where(r => r.Ns == _namespaceId).OrderBy(r => r.RunId))
         {
             var path = Path.Combine(_dbDir, "runs", $"{re.RunId}.fld1");
@@ -131,11 +125,40 @@ public sealed class FldDatabase : IDisposable
             {
                 _runs.Add((re.RunId, path, null));
                 if (re.RunId >= _nextRunId) _nextRunId = re.RunId + 1;
+                if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
+            }
+        }
+        _lastSealedCommitSeq = sealedSeq;
+    }
+
+    /// <summary>Apply durable WAL mutations with CommitSeq &gt; last sealed run into overlay.</summary>
+    private void ReplayWalIntoOverlay(List<WalRecoveredRecord> records)
+    {
+        foreach (var rec in records)
+        {
+            if (rec.CommitSeq <= _lastSealedCommitSeq) continue;
+            if (rec.Kind != WalConstants.KindGroupCommit) continue;
+            var payload = GroupCommitCodec.Decode(rec.Payload);
+            foreach (var mut in payload.Mutations)
+            {
+                if (mut.Ns != (ushort)_namespaceId && mut.Ns != _namespaceId) continue;
+                foreach (var f in mut.Fields)
+                {
+                    var key = new MemFieldKey(f.RecordId, f.FieldId);
+                    _overlay.Put(key, new MemFieldValue
+                    {
+                        Value = f.Value,
+                        Wall = f.Wall,
+                        Logical = f.Logical,
+                        AuthorNodeId = f.AuthorNodeId,
+                        KeyEpoch = f.KeyEpoch,
+                        IsTombstone = f.OpKind == 2
+                    });
+                }
             }
         }
     }
 
-    /// <summary>Local field write into overlay (not durable until Commit).</summary>
     public void Put(
         ReadOnlySpan<byte> recordId,
         ushort fieldId,
@@ -147,9 +170,10 @@ public sealed class FldDatabase : IDisposable
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
         var hlc = _clock.Now();
         var key = new MemFieldKey(recordId, fieldId);
+        // Single alloc for value; author is shared local ref (immutable 16B)
         _overlay.Put(key, new MemFieldValue
         {
-            Value = value.ToArray(),
+            Value = isTombstone ? Array.Empty<byte>() : value.ToArray(),
             Wall = hlc.Stamp.Wall,
             Logical = hlc.Stamp.Logical,
             AuthorNodeId = _localAuthor,
@@ -158,18 +182,14 @@ public sealed class FldDatabase : IDisposable
         });
     }
 
-    /// <summary>
-    /// Durable group commit of current overlay snapshot into WAL.
-    /// Does not clear overlay (still readable); Checkpoint seals to run.
-    /// </summary>
+    /// <summary>Durable group commit of current overlay into WAL. Overlay kept for reads.</summary>
     public ulong Commit()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
             var snap = _overlay.Snapshot();
-            if (snap.Count == 0)
-                return 0;
+            if (snap.Count == 0) return 0;
 
             _clientRequestSeq++;
             var fields = new List<WalFieldMutation>(snap.Count);
@@ -183,6 +203,9 @@ public sealed class FldDatabase : IDisposable
                     FieldId = kv.Key.FieldId,
                     OpKind = kv.Value.IsTombstone ? (byte)2 : (byte)1,
                     KeyEpoch = kv.Value.KeyEpoch,
+                    Wall = kv.Value.Wall,
+                    Logical = kv.Value.Logical,
+                    AuthorNodeId = kv.Value.AuthorNodeId,
                     Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
                 });
             }
@@ -207,7 +230,7 @@ public sealed class FldDatabase : IDisposable
                         RequestSeq = _clientRequestSeq,
                         Status = WalConstants.StatusCommitted,
                         ErrorCode = 0,
-                        CommitSeq = 0, // filled conceptually by WAL seq
+                        CommitSeq = 0,
                         ProvenanceIdx = 0xFFFFFFFF
                     }
                 ],
@@ -217,28 +240,12 @@ public sealed class FldDatabase : IDisposable
             ulong commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
             _wal.Flush();
 
-            // Patch result CommitSeq in-memory only; durable seq is WAL envelope
-            _manifestStore.Update(m => new ManifestDocument
-            {
-                Generation = m.Generation,
-                LastFlushedCommitSeq = commitSeq,
-                CertifiedWatermark = m.CertifiedWatermark,
-                Namespaces = m.Namespaces,
-                Runs = m.Runs,
-                Retains = m.Retains,
-                ResultClients = m.ResultClients,
-                ProvenanceIndex = m.ProvenanceIndex,
-                CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
-                CoordinatorSessionId = m.CoordinatorSessionId
-            });
-
+            // Manifest watermark only (cheap); full client log later
+            _manifestStore.Update(m => CloneManifest(m, lastFlushed: commitSeq));
             return commitSeq;
         }
     }
 
-    /// <summary>
-    /// Seal overlay into an immutable FLD1 run, publish in manifest, clear overlay.
-    /// </summary>
     public ulong Checkpoint()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -262,25 +269,23 @@ public sealed class FldDatabase : IDisposable
             byte[] runBytes = builder.Build();
             ulong runId = _nextRunId++;
             string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            // atomic write
             string tmp = path + ".tmp";
             File.WriteAllBytes(tmp, runBytes);
             using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
                 fs.Flush(flushToDisk: true);
             File.Move(tmp, path, overwrite: true);
 
-            // bounds from first/last record in run — approximate from snap keys
-            var recs = snap.Select(kv =>
+            var recs = new List<byte[]>(snap.Count);
+            foreach (var kv in snap)
             {
                 var b = new byte[16];
                 kv.Key.WriteRecordId(b);
-                return b;
-            }).OrderBy(b => b, Comparer<byte[]>.Create((x, y) =>
-                Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y))).ToList();
+                recs.Add(b);
+            }
+            recs.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
 
-            var minRec = recs[0];
-            var maxRec = recs[^1];
             ulong seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+            if (seqHi == 0) seqHi = _lastSealedCommitSeq;
 
             _manifestStore.Update(m =>
             {
@@ -290,33 +295,21 @@ public sealed class FldDatabase : IDisposable
                     RunId = runId,
                     Level = 0,
                     Ns = _namespaceId,
-                    MinRec = minRec,
-                    MaxRec = maxRec,
-                    SeqLo = 1,
+                    MinRec = recs[0],
+                    MaxRec = recs[^1],
+                    SeqLo = _lastSealedCommitSeq + 1,
                     SeqHi = seqHi
                 });
-                return new ManifestDocument
-                {
-                    Generation = m.Generation,
-                    LastFlushedCommitSeq = m.LastFlushedCommitSeq,
-                    CertifiedWatermark = m.CertifiedWatermark,
-                    Namespaces = m.Namespaces,
-                    Runs = runs,
-                    Retains = m.Retains,
-                    ResultClients = m.ResultClients,
-                    ProvenanceIndex = m.ProvenanceIndex,
-                    CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
-                    CoordinatorSessionId = m.CoordinatorSessionId
-                };
+                return CloneManifest(m, runs: runs, lastFlushed: m.LastFlushedCommitSeq);
             });
 
-            _runs.Add((runId, path, runBytes)); // cache for fast read
+            _runs.Add((runId, path, runBytes));
+            _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
             return runId;
         }
     }
 
-    /// <summary>Point get: overlay then runs newest-first. Prefer zero-copy from cached run.</summary>
     public bool TryGet(ReadOnlySpan<byte> recordId, ushort fieldId, out ReadOnlySpan<byte> value)
     {
         value = default;
@@ -331,7 +324,6 @@ public sealed class FldDatabase : IDisposable
             return true;
         }
 
-        // Newest run first
         for (int i = _runs.Count - 1; i >= 0; i--)
         {
             var (_, path, cached) = _runs[i];
@@ -340,7 +332,6 @@ public sealed class FldDatabase : IDisposable
             {
                 lock (_commitLock)
                 {
-                    // store cache
                     for (int j = 0; j < _runs.Count; j++)
                     {
                         if (_runs[j].path == path && _runs[j].cached is null)
@@ -352,15 +343,12 @@ public sealed class FldDatabase : IDisposable
                 }
             }
 
-            var reader = new RunReader(bytes);
-            if (reader.TryGet(recordId, fieldId, out value))
+            if (new RunReader(bytes).TryGet(recordId, fieldId, out value))
                 return true;
         }
-
         return false;
     }
 
-    /// <summary>Copy-out variant for callers that need owned arrays.</summary>
     public bool TryGetBytes(ReadOnlySpan<byte> recordId, ushort fieldId, out byte[]? value)
     {
         if (TryGet(recordId, fieldId, out var span))
@@ -372,13 +360,29 @@ public sealed class FldDatabase : IDisposable
         return false;
     }
 
+    private static ManifestDocument CloneManifest(
+        ManifestDocument m,
+        ulong? lastFlushed = null,
+        List<uint>? nss = null,
+        List<RunEntry>? runs = null)
+        => new()
+        {
+            Generation = m.Generation,
+            LastFlushedCommitSeq = lastFlushed ?? m.LastFlushedCommitSeq,
+            CertifiedWatermark = m.CertifiedWatermark,
+            Namespaces = nss ?? m.Namespaces,
+            Runs = runs ?? m.Runs,
+            Retains = m.Retains,
+            ResultClients = m.ResultClients,
+            ProvenanceIndex = m.ProvenanceIndex,
+            CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
+            CoordinatorSessionId = m.CoordinatorSessionId
+        };
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        lock (_commitLock)
-        {
-            _wal.Dispose();
-        }
+        lock (_commitLock) _wal.Dispose();
     }
 }
