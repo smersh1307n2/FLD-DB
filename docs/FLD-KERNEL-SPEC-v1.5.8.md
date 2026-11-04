@@ -3,9 +3,10 @@
 
 **Статус:** NORMATIVE DESIGN DRAFT (pre-FINAL FREEZE)
 **Формат:** FLD1 (magic `46 4C 44 31`, binaryVersion 1)
-**Целевой рантайм:** C# 12+ / .NET 9 (FLD1 Core), .NET 10 (BinSync.Net integration)
-**Совместимость:** BIN-SYNC CORE v2.3.6 + addendum v2.3.7 (errata E-1…E-13)
-**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–8; все errata вшиты в тело
+**Целевой рантайм:** C# 12+ / .NET 10 (FLD1 Core + BinSync.Net integration)
+**Совместимость (протокол):** BIN-SYNC CORE **v2.3.6** + addendum/errata **v2.3.7** (E-1…E-13) — без изменения wire-нормы
+**Совместимость (пакет):** `BinSync.Core` **≥ 2.6.5** (типизированные `NodeId`/`RecordId`/`Digest16`, outbox compact); SemVer пакета ≠ версия протокола
+**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–8; все errata вшиты в тело; **v1.5.8+compat-2.6.5**
 **Правило чтения:** PART I–VI — обязательства; PART VII — ADR без обязательств; PART VIII — приёмка; PART IX — реализационные заметки.
 **Конвенция:** диапазоны inclusive; байтовые индексы перечисляются явно.
 
@@ -347,3 +348,36 @@ CRC32C from System.IO.Hashing; BLAKE3 pluggable; 8B alignment valuesLen/footerOf
 ## PART X. CHANGELOG (v1.5.8)
 
 v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serialized append; RequestSlot SessionGeneration u64; FinalizedThroughSeq contiguous; WAL rotation fsync-first; SPSC single Consumer + exclusive lock.
+
+
+---
+
+## PART XI. COMPAT с BinSync.Core 2.6.5 (2026-11-04)
+
+### Разделение версий
+| Слой | Версия | Смысл |
+|------|--------|--------|
+| Протокол / спека | CORE **v2.3.6** + errata **v2.3.7** | Wire, HLC µs, LWW, digests, E-1…E-13 |
+| NuGet `BinSync.Core` | **2.6.5** | API surface, perf, typed ids, outbox compact |
+
+Пакет 2.3→2.6 **не** поднимал нормативную версию протокола в `BIN-SYNC-SPECIFICATION.txt`.
+
+### Что не ломает FLD storage
+- HLC wall = **микросекунды** UTC (совпадает)
+- Durable author = bare **16 B** `nodeId` (E-1)
+- Wire digests на стороне BIN-SYNC: **Digest16** (BLAKE3 truncated); FLD `rootDigest` run = **BLAKE3-256** (локальный Run StateDigest) — разные роли, см. PART IV
+- RecordId / NodeId на wire — 16 B; FLD RecordId sort = **unsigned BE** (UUIDv7/PGM)
+
+### Обязательное выравнивание LWW author
+**[A-CMP-AUTHOR-NODEID]** Сравнение `authorNodeId` для LWW / HLC tie-break / intern ASC авторов =
+порядок **BinSync.NodeId**: сначала `Lo = UInt64LE(bytes[0..7])`, затем `Hi = UInt64LE(bytes[8..15])`.
+**Не** использовать BE memcmp для author (он остаётся только для RecordId).
+
+### Outbox (интеграция Engine)
+- At-least-once + wire-dedup по ChangeId
+- **CompactOutbox** (2.6.5): после ACK можно удалять записи, acked всеми interested peers; peers без PeerState удерживают entry (relay-safe)
+- Self-echo: self-authored уже в storage не re-queue ([E-ECHO] / E-13)
+- FLD `SafeOutboxSeq` / `AcknowledgeOutbox` должны сохранять **OutboxSeqRef** continuity после restart (CursorEnd = gap-norm для новых peers)
+
+### Public API BinSync (2.2+)
+`Storage` / `Outbox` maps **internal** на `Node`; хост ходит через engine API / Outbox API FLD, не мутирует коллекции напрямую.

@@ -66,7 +66,7 @@ public readonly struct HlcFull : IComparable<HlcFull>, IEquatable<HlcFull>
     {
         int c = Stamp.CompareTo(other.Stamp);
         if (c != 0) return c;
-        return ByteUtil.CompareUnsigned16(AuthorNodeId.Span, other.AuthorNodeId.Span);
+        return ByteUtil.CompareAuthorNodeId(AuthorNodeId.Span, other.AuthorNodeId.Span);
     }
 
     public bool Equals(HlcFull other)

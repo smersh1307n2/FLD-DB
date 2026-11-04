@@ -73,7 +73,7 @@ public sealed class RunBuilder
             .ToList();
 
         // Intern authors ASC
-        var authorSet = new SortedSet<IdKey>(IdKeyComparer.Instance);
+        var authorSet = new SortedSet<IdKey>(AuthorIdComparer.Instance);
         foreach (var w in winners.Values)
             authorSet.Add(new IdKey(w.AuthorNodeId));
         var authors = authorSet.ToList();
@@ -468,7 +468,7 @@ public sealed class RunBuilder
         if (c != 0) return c;
         c = a.Logical.CompareTo(b.Logical);
         if (c != 0) return c;
-        return ByteUtil.CompareUnsigned16(a.AuthorNodeId, b.AuthorNodeId);
+        return ByteUtil.CompareAuthorNodeId(a.AuthorNodeId, b.AuthorNodeId);
     }
 
     private static (ulong Wall, uint Logical, uint InternId) ComputeMode(
@@ -529,6 +529,15 @@ public sealed class RunBuilder
     {
         public static readonly IdKeyComparer Instance = new();
         public int Compare(IdKey x, IdKey y) => x.CompareTo(y);
+        public bool Equals(IdKey x, IdKey y) => ByteUtil.Equals16(x.Bytes, y.Bytes);
+        public int GetHashCode(IdKey obj) => obj.GetHashCode();
+    }
+
+    /// <summary>AuthorNodeId order = BinSync.NodeId (LE limbs).</summary>
+    private sealed class AuthorIdComparer : IComparer<IdKey>, IEqualityComparer<IdKey>
+    {
+        public static readonly AuthorIdComparer Instance = new();
+        public int Compare(IdKey x, IdKey y) => ByteUtil.CompareAuthorNodeId(x.Bytes, y.Bytes);
         public bool Equals(IdKey x, IdKey y) => ByteUtil.Equals16(x.Bytes, y.Bytes);
         public int GetHashCode(IdKey obj) => obj.GetHashCode();
     }
