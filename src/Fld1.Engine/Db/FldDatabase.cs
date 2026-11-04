@@ -32,6 +32,8 @@ public sealed class FldDatabase : IDisposable
     private ulong _clientRequestSeq;
     private readonly byte[] _clientInstanceId = new byte[16];
     private ulong _lastSealedCommitSeq;
+    private ulong _pendingFlushedCommitSeq; // deferred manifest watermark
+    private bool _manifestDirty;
     private bool _disposed;
 
     public string DbDir => _dbDir;
@@ -240,8 +242,9 @@ public sealed class FldDatabase : IDisposable
             ulong commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
             _wal.Flush();
 
-            // Manifest watermark only (cheap); full client log later
-            _manifestStore.Update(m => CloneManifest(m, lastFlushed: commitSeq));
+            // Defer manifest disk write — WAL is source of truth until Checkpoint/FlushManifest
+            _pendingFlushedCommitSeq = commitSeq;
+            _manifestDirty = true;
             return commitSeq;
         }
     }
@@ -284,7 +287,9 @@ public sealed class FldDatabase : IDisposable
             }
             recs.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
 
-            ulong seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+            ulong seqHi = _pendingFlushedCommitSeq;
+            if (seqHi == 0)
+                seqHi = _manifestStore.Load().LastFlushedCommitSeq;
             if (seqHi == 0) seqHi = _lastSealedCommitSeq;
 
             _manifestStore.Update(m =>
@@ -300,8 +305,10 @@ public sealed class FldDatabase : IDisposable
                     SeqLo = _lastSealedCommitSeq + 1,
                     SeqHi = seqHi
                 });
-                return CloneManifest(m, runs: runs, lastFlushed: m.LastFlushedCommitSeq);
+                return CloneManifest(m, runs: runs, lastFlushed: seqHi);
             });
+            _manifestDirty = false;
+            _pendingFlushedCommitSeq = seqHi;
 
             _runs.Add((runId, path, runBytes));
             _lastSealedCommitSeq = seqHi;
@@ -379,10 +386,109 @@ public sealed class FldDatabase : IDisposable
             CoordinatorSessionId = m.CoordinatorSessionId
         };
 
+    /// <summary>Persist deferred LastFlushedCommitSeq to manifest (fsync).</summary>
+    public void FlushManifest()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            if (!_manifestDirty) return;
+            _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq));
+            _manifestDirty = false;
+        }
+    }
+
+    /// <summary>
+    /// Scan all live fields for a record: overlay wins, else newest run that has the field.
+    /// Values from runs are owned copies (safe after callback returns).
+    /// </summary>
+    public void ScanRecord(ReadOnlySpan<byte> recordId, Action<ushort, byte[]> onField)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (recordId.Length != 16) return;
+
+        var seen = new HashSet<ushort>();
+        // Overlay first
+        var snap = _overlay.Snapshot();
+        Span<byte> recBuf = stackalloc byte[16];
+        foreach (var kv in snap)
+        {
+            kv.Key.WriteRecordId(recBuf);
+            if (!recBuf.SequenceEqual(recordId)) continue;
+            seen.Add(kv.Key.FieldId);
+            if (!kv.Value.IsTombstone)
+                onField(kv.Key.FieldId, kv.Value.Value);
+        }
+
+        // Runs newest-first; skip fieldIds already decided by overlay (incl. tombstones)
+        for (int i = _runs.Count - 1; i >= 0; i--)
+        {
+            var bytes = EnsureRunCached(i);
+            new RunReader(bytes).ScanRecord(recordId, (fid, val) =>
+            {
+                if (!seen.Add(fid)) return;
+                onField(fid, val.ToArray());
+            });
+        }
+    }
+
+    /// <summary>Enumerate distinct RecordIds from overlay + all runs (BE order not guaranteed).</summary>
+    public void ScanRecordIds(Action<byte[]> onRecordId)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var ids = new HashSet<(ulong, ulong)>();
+
+        foreach (var kv in _overlay.Snapshot())
+        {
+            if (ids.Add((kv.Key.RecLo, kv.Key.RecHi)))
+            {
+                var b = new byte[16];
+                kv.Key.WriteRecordId(b);
+                onRecordId(b);
+            }
+        }
+        for (int i = 0; i < _runs.Count; i++)
+        {
+            var bytes = EnsureRunCached(i);
+            new RunReader(bytes).ScanRecordIds(rid =>
+            {
+                ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid);
+                ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid.Slice(8));
+                if (ids.Add((lo, hi)))
+                    onRecordId(rid.ToArray());
+            });
+        }
+    }
+
+    private byte[] EnsureRunCached(int index)
+    {
+        var (runId, path, cached) = _runs[index];
+        if (cached is not null) return cached;
+        var bytes = File.ReadAllBytes(path);
+        lock (_commitLock)
+        {
+            if (_runs[index].cached is null)
+                _runs[index] = (runId, path, bytes);
+            return _runs[index].cached!;
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
-        lock (_commitLock) _wal.Dispose();
+        lock (_commitLock)
+        {
+            if (_manifestDirty)
+            {
+                try
+                {
+                    _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq));
+                    _manifestDirty = false;
+                }
+                catch { /* best-effort on dispose */ }
+            }
+            _disposed = true;
+            _wal.Dispose();
+        }
     }
 }
