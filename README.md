@@ -12,31 +12,44 @@ Implements [FLD KERNEL SPECIFICATION v1.5.8-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.8.m
 
 **Target:** .NET 10 / C# 13+
 
+## Roadmap (API)
+
+1. **Now — imperative field API** (`FldDatabase`): Put / Delete / batch / Commit / Checkpoint / Get / Scan — fast, explicit, optimizable.
+2. **Later — convenience layer** (LINQ-style / typed records): built *on top* of the same engine, not instead of it.
+
 ## Status
 
 | Module | Status |
 |--------|--------|
-| `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes, Ids |
-| `Fld1.Run` | STATE run builder/reader/verify (+ ArrayPool digest) |
-| `Fld1.Wal` | Micro-WAL v2 |
-| `Fld1.Manifest` | Binary manifest + atomic store |
-| `Fld1.Engine` | Single-process DB: overlay, WAL commit+replay, checkpoint→run, get |
+| `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes |
+| `Fld1.Run` | Builder / reader / verify / scan |
+| `Fld1.Wal` | Micro-WAL v2 + HLC fields |
+| `Fld1.Manifest` | Atomic store + commit-result query |
+| `Fld1.Engine` | Single-process DB + simple write API |
 
-## Engine (current)
+## Simple API
 
 ```csharp
-using var db = FldDatabase.Open("/path/to/db", namespaceId: 0);
-db.Put(recordId, fieldId, value);
-db.Commit();       // durable WAL group commit
-db.Checkpoint();   // seal overlay → immutable .fld1 + manifest
-db.TryGet(recordId, fieldId, out var span);
+using var db = FldDatabase.Open(new FldOpenOptions
+{
+    Path = "/data/mydb",
+    NamespaceId = 0,
+    AutoCheckpointOverlayFields = 10_000, // optional
+});
+
+var rec = FldDatabase.NewRecordId();
+db.Apply(new FldWriteBatch()
+    .Put(rec, fieldId: 1, "hello"u8.ToArray())
+    .Put(rec, fieldId: 2, "world"u8.ToArray()));
+db.Commit();           // durable WAL
+db.Checkpoint();       // seal to immutable .fld1 (or auto)
+
+db.TryGet(rec, 1, out ReadOnlySpan<byte> v);
+db.Delete(rec, 2);
+db.ScanRecord(rec, (fieldId, value) => { /* ... */ });
 ```
 
-Optimizations: span get, run byte[] cache, value-type `MemFieldKey`, pooled BLAKE3 input.
-
-Crash recovery: WAL GROUP_COMMIT fields carry HLC+author; Open replays CommitSeq > last sealed run into overlay.
-
-Rough micro-timing (Release, single field/rec hot path): Put ~1.5M ops/s, overlay Get ~7M ops/s, run Get ~0.7M ops/s.
+Durability: **Commit** = WAL fsync (manifest watermark deferred). **Checkpoint** = immutable run + manifest.
 
 ## Build
 

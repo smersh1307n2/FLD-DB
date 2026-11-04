@@ -34,19 +34,23 @@ public sealed class FldDatabase : IDisposable
     private ulong _lastSealedCommitSeq;
     private ulong _pendingFlushedCommitSeq; // deferred manifest watermark
     private bool _manifestDirty;
+    private readonly int _autoCheckpointOverlayFields;
     private bool _disposed;
 
     public string DbDir => _dbDir;
     public uint NamespaceId => _namespaceId;
     public int OverlayCount => _overlay.Count;
     public ulong LastSealedCommitSeq => _lastSealedCommitSeq;
+    public ulong PendingFlushedCommitSeq => _pendingFlushedCommitSeq;
+    public ReadOnlySpan<byte> LocalAuthor => _localAuthor;
 
     private FldDatabase(
         string dbDir,
         uint namespaceId,
         byte[] localAuthor,
         WalWriter wal,
-        AtomicManifestStore manifestStore)
+        AtomicManifestStore manifestStore,
+        int autoCheckpointOverlayFields = 0)
     {
         _dbDir = dbDir;
         _namespaceId = namespaceId;
@@ -54,12 +58,22 @@ public sealed class FldDatabase : IDisposable
         _clock = new HlcClock(localAuthor);
         _wal = wal;
         _manifestStore = manifestStore;
+        _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
         Uuid7.NewUuid7(_clientInstanceId);
     }
 
     public static FldDatabase Open(string dbDir, uint namespaceId = 0, byte[]? localAuthor = null)
+        => Open(new FldOpenOptions { Path = dbDir, NamespaceId = namespaceId, LocalAuthor = localAuthor });
+
+    public static FldDatabase Open(FldOpenOptions options)
     {
-        if (namespaceId > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(namespaceId));
+        ArgumentNullException.ThrowIfNull(options);
+        string dbDir = options.Path;
+        uint namespaceId = options.NamespaceId;
+        byte[]? localAuthor = options.LocalAuthor;
+        if (namespaceId > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(options.NamespaceId));
+        if (options.AutoCheckpointOverlayFields < 0)
+            throw new ArgumentOutOfRangeException(nameof(options.AutoCheckpointOverlayFields));
         Directory.CreateDirectory(dbDir);
         Directory.CreateDirectory(Path.Combine(dbDir, "wal"));
         Directory.CreateDirectory(Path.Combine(dbDir, "runs"));
@@ -111,7 +125,7 @@ public sealed class FldDatabase : IDisposable
             wal = WalWriter.OpenForAppend(walPath, namespaceId, (ulong)recovered.ValidEndOffset, nextSeq);
         }
 
-        var db = new FldDatabase(dbDir, namespaceId, author, wal, manifestStore);
+        var db = new FldDatabase(dbDir, namespaceId, author, wal, manifestStore, options.AutoCheckpointOverlayFields);
         db.LoadRunsFromManifest(manifest);
         db.ReplayWalIntoOverlay(recovered.Records);
         return db;
@@ -184,6 +198,56 @@ public sealed class FldDatabase : IDisposable
         });
     }
 
+    /// <summary>Put taking ownership of <paramref name="value"/> (no extra copy).</summary>
+    public void PutOwned(ReadOnlySpan<byte> recordId, ushort fieldId, byte[] value, ushort keyEpoch = 0)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (recordId.Length != 16) throw new ArgumentException("RecordId");
+        ArgumentNullException.ThrowIfNull(value);
+        var hlc = _clock.Now();
+        _overlay.Put(new MemFieldKey(recordId, fieldId), new MemFieldValue
+        {
+            Value = value,
+            Wall = hlc.Stamp.Wall,
+            Logical = hlc.Stamp.Logical,
+            AuthorNodeId = _localAuthor,
+            KeyEpoch = keyEpoch,
+            IsTombstone = false
+        });
+    }
+
+    /// <summary>Tombstone field (soft delete). Visible as miss on TryGet.</summary>
+    public void Delete(ReadOnlySpan<byte> recordId, ushort fieldId, ushort keyEpoch = 0)
+        => Put(recordId, fieldId, ReadOnlySpan<byte>.Empty, keyEpoch, isTombstone: true);
+
+    /// <summary>Apply batch into overlay (not durable until Commit).</summary>
+    public void Apply(FldWriteBatch batch)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(batch);
+        foreach (var e in batch.Entries)
+        {
+            if (e.Tombstone)
+                Delete(e.RecordId, e.FieldId);
+            else
+                PutOwned(e.RecordId, e.FieldId, e.Value);
+        }
+    }
+
+    /// <summary>Allocate a new UUIDv7 record id into <paramref name="dest"/> (16 bytes).</summary>
+    public static void NewRecordId(Span<byte> dest)
+    {
+        if (dest.Length != 16) throw new ArgumentException("need 16 bytes");
+        Uuid7.NewUuid7(dest);
+    }
+
+    public static byte[] NewRecordId()
+    {
+        var id = new byte[16];
+        Uuid7.NewUuid7(id);
+        return id;
+    }
+
     /// <summary>Durable group commit of current overlay into WAL. Overlay kept for reads.</summary>
     public ulong Commit()
     {
@@ -245,6 +309,12 @@ public sealed class FldDatabase : IDisposable
             // Defer manifest disk write — WAL is source of truth until Checkpoint/FlushManifest
             _pendingFlushedCommitSeq = commitSeq;
             _manifestDirty = true;
+            bool autoCkpt = _autoCheckpointOverlayFields > 0
+                            && _overlay.Count >= _autoCheckpointOverlayFields;
+            if (!autoCkpt)
+                return commitSeq;
+            // Checkpoint under same lock (no re-entry)
+            CheckpointUnderLock();
             return commitSeq;
         }
     }
@@ -253,7 +323,11 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
-        {
+            return CheckpointUnderLock();
+    }
+
+    private ulong CheckpointUnderLock()
+    {
             var snap = _overlay.Snapshot();
             if (snap.Count == 0) return 0;
 
@@ -314,7 +388,6 @@ public sealed class FldDatabase : IDisposable
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
             return runId;
-        }
     }
 
     public bool TryGet(ReadOnlySpan<byte> recordId, ushort fieldId, out ReadOnlySpan<byte> value)
