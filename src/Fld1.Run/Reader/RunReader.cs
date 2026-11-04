@@ -7,6 +7,35 @@ using Fld1.Run.Verify;
 
 namespace Fld1.Run.Reader;
 
+/// <summary>Resolved field from a run (for LWW merge across layers).</summary>
+public readonly struct RunFieldState
+{
+    public readonly bool Found;
+    public readonly bool IsTombstone;
+    public readonly ushort FieldId;
+    public readonly ushort KeyEpoch;
+    public readonly ulong Wall;
+    public readonly uint Logical;
+    public readonly ReadOnlyMemory<byte> AuthorNodeId;
+    public readonly ReadOnlyMemory<byte> Value;
+
+    public RunFieldState(
+        bool found, bool isTombstone, ushort fieldId, ushort keyEpoch,
+        ulong wall, uint logical, ReadOnlyMemory<byte> author, ReadOnlyMemory<byte> value)
+    {
+        Found = found;
+        IsTombstone = isTombstone;
+        FieldId = fieldId;
+        KeyEpoch = keyEpoch;
+        Wall = wall;
+        Logical = logical;
+        AuthorNodeId = author;
+        Value = value;
+    }
+
+    public static RunFieldState NotFound => default;
+}
+
 /// <summary>
 /// Zero-copy reader over an immutable FLD1 run buffer.
 /// </summary>
@@ -44,6 +73,23 @@ public readonly struct RunReader
         int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
         ulong dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
         return TryGetFromCluster(file, (int)dataOffset, fieldId, out value);
+    }
+
+    /// <summary>
+    /// Get field including HLC/author/tombstone for cross-run LWW.
+    /// </summary>
+    public bool TryGetField(ReadOnlySpan<byte> recordId, ushort fieldId, out RunFieldState state)
+    {
+        state = RunFieldState.NotFound;
+        if (recordId.Length != 16 || IsEmpty) return false;
+        var file = _file.Span;
+        int clusterIdx = FindCluster(file, recordId);
+        if (clusterIdx < 0) return false;
+
+        ulong slotOff = RunHeader.ReadSlotOff(file);
+        int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
+        ulong dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
+        return TryGetFieldFromCluster(file, (int)dataOffset, fieldId, out state);
     }
 
     private static int FindCluster(ReadOnlySpan<byte> file, ReadOnlySpan<byte> recordId)
@@ -192,6 +238,109 @@ public readonly struct RunReader
         value = file.Slice(payloadBase + payloadOrRef, valLen);
         return true;
     }
+
+    private bool TryGetFieldFromCluster(
+        ReadOnlySpan<byte> file, int clusterOff, ushort fieldId, out RunFieldState state)
+    {
+        state = RunFieldState.NotFound;
+        ushort numFields = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(clusterOff + 16, 2));
+        ulong modeWall = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(clusterOff + 20, 8));
+        uint modeLogical = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(clusterOff + 28, 4));
+        uint modeIntern = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(clusterOff + 32, 4));
+
+        int descBase = clusterOff + RunConstants.ClusterHeaderSize;
+        int lo = 0, hi = numFields - 1, found = -1;
+        while (lo <= hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            int d = descBase + mid * RunConstants.FieldDescSize;
+            ushort fid = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(d, 2));
+            int cmp = fid.CompareTo(fieldId);
+            if (cmp == 0) { found = mid; break; }
+            if (cmp < 0) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        if (found < 0) return false;
+
+        int desc = descBase + found * RunConstants.FieldDescSize;
+        ushort valLen = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc + 2, 2));
+        byte flags = file[desc + 4];
+        bool tomb = (flags & (byte)FieldDescFlags.Tombstone) != 0;
+        ushort payloadOrRef = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc + 6, 2));
+
+        ulong wall = modeWall;
+        uint logical = modeLogical;
+        uint internId = modeIntern;
+        ushort keyEpoch = 0;
+
+        int overrideCount = 0;
+        for (int i = 0; i < numFields; i++)
+        {
+            int d = descBase + i * RunConstants.FieldDescSize;
+            if ((file[d + 4] & (byte)FieldDescFlags.HasHlcOverride) != 0)
+                overrideCount++;
+        }
+        int ovBase = descBase + numFields * RunConstants.FieldDescSize;
+        if ((flags & (byte)FieldDescFlags.HasHlcOverride) != 0)
+        {
+            for (int oi = 0; oi < overrideCount; oi++)
+            {
+                int o = ovBase + oi * RunConstants.FieldHlcOverrideSize;
+                ushort idx2 = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(o, 2));
+                if (idx2 == found)
+                {
+                    keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(o + 2, 2));
+                    wall = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(o + 4, 8));
+                    logical = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(o + 12, 4));
+                    internId = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(o + 16, 4));
+                    break;
+                }
+            }
+        }
+
+        ReadOnlyMemory<byte> author = ReadOnlyMemory<byte>.Empty;
+        if (internId > 0)
+        {
+            ulong internOff = RunHeader.ReadInternOff(file);
+            uint internCount = RunHeader.ReadInternCount(file);
+            if (internId <= internCount)
+            {
+                int aoff = (int)internOff + (int)(internId - 1) * RunConstants.InternEntrySize;
+                author = _file.Slice(aoff, 16);
+            }
+        }
+
+        ReadOnlyMemory<byte> valueMem = ReadOnlyMemory<byte>.Empty;
+        if (!tomb)
+        {
+            if (valLen == RunConstants.ExternalValLen)
+            {
+                ulong valuesOff = RunHeader.ReadValuesOff(file);
+                int refPos = (int)valuesOff + payloadOrRef * RunConstants.ValueRefSize;
+                ulong dataOff = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(refPos, 8));
+                uint length = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(refPos + 8, 4));
+                uint crc = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(refPos + 12, 4));
+                if (length <= RunConstants.MaxBlobLen)
+                {
+                    var slice = _file.Slice((int)dataOff, (int)length);
+                    if (Hashes.Crc32C(slice.Span) == crc)
+                        valueMem = slice;
+                    else
+                        return false;
+                }
+            }
+            else
+            {
+                int payloadBase2 = ovBase + overrideCount * RunConstants.FieldHlcOverrideSize;
+                valueMem = _file.Slice(payloadBase2 + payloadOrRef, valLen);
+            }
+        }
+
+        state = new RunFieldState(true, tomb, fieldId, keyEpoch, wall, logical, author, valueMem);
+        return true;
+    }
+
+
 
 
     /// <summary>

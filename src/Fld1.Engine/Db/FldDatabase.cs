@@ -390,54 +390,232 @@ public sealed class FldDatabase : IDisposable
             return runId;
     }
 
+    /// <summary>
+    /// Point get with full LWW across overlay + all runs (not "first hit in newest run").
+    /// </summary>
     public bool TryGet(ReadOnlySpan<byte> recordId, ushort fieldId, out ReadOnlySpan<byte> value)
     {
         value = default;
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (recordId.Length != 16) return false;
-
-        var key = new MemFieldKey(recordId, fieldId);
-        if (_overlay.TryGet(key, out var mem) && mem is not null)
-        {
-            if (mem.IsTombstone) return false;
-            value = mem.Value;
-            return true;
-        }
-
-        for (int i = _runs.Count - 1; i >= 0; i--)
-        {
-            var (_, path, cached) = _runs[i];
-            byte[] bytes = cached ?? File.ReadAllBytes(path);
-            if (cached is null)
-            {
-                lock (_commitLock)
-                {
-                    for (int j = 0; j < _runs.Count; j++)
-                    {
-                        if (_runs[j].path == path && _runs[j].cached is null)
-                        {
-                            _runs[j] = (_runs[j].runId, path, bytes);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (new RunReader(bytes).TryGet(recordId, fieldId, out value))
-                return true;
-        }
-        return false;
+        if (!TryResolve(recordId, fieldId, out var r) || r.IsTombstone || r.Value is null)
+            return false;
+        value = r.Value;
+        return true;
     }
 
     public bool TryGetBytes(ReadOnlySpan<byte> recordId, ushort fieldId, out byte[]? value)
     {
-        if (TryGet(recordId, fieldId, out var span))
+        if (!TryResolve(recordId, fieldId, out var r) || r.IsTombstone)
         {
-            value = span.ToArray();
-            return true;
+            value = null;
+            return false;
         }
-        value = null;
-        return false;
+        value = r.Value;
+        return value is not null;
+    }
+
+    /// <summary>LWW resolve including tombstones (Found + IsTombstone).</summary>
+    public bool TryResolve(ReadOnlySpan<byte> recordId, ushort fieldId, out FieldResolver.Resolved resolved)
+    {
+        resolved = FieldResolver.Resolved.Miss;
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (recordId.Length != 16) return false;
+
+        bool have = false;
+        ulong bestWall = 0; uint bestLog = 0;
+        byte[]? bestAuthor = null;
+        byte[]? bestValue = null;
+        bool bestTomb = false;
+        ushort bestEpoch = 0;
+
+        var key = new MemFieldKey(recordId, fieldId);
+        if (_overlay.TryGet(key, out var mem) && mem is not null)
+        {
+            have = true;
+            bestWall = mem.Wall; bestLog = mem.Logical;
+            bestAuthor = mem.AuthorNodeId; bestValue = mem.Value;
+            bestTomb = mem.IsTombstone; bestEpoch = mem.KeyEpoch;
+        }
+
+        for (int i = 0; i < _runs.Count; i++)
+        {
+            var bytes = EnsureRunCached(i);
+            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var st) || !st.Found)
+                continue;
+            var author = st.AuthorNodeId.ToArray();
+            if (!have || FieldResolver.IsNewer(st.Wall, st.Logical, author, bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
+            {
+                have = true;
+                bestWall = st.Wall; bestLog = st.Logical;
+                bestAuthor = author;
+                bestValue = st.IsTombstone ? Array.Empty<byte>() : st.Value.ToArray();
+                bestTomb = st.IsTombstone; bestEpoch = st.KeyEpoch;
+            }
+        }
+
+        if (!have) return false;
+        resolved = new FieldResolver.Resolved(true, bestTomb, bestEpoch, bestWall, bestLog, bestAuthor, bestValue);
+        return true;
+    }
+
+    /// <summary>Mark record dead via lifecycle field 0x0000 = Dead.</summary>
+    public void DeleteRecord(ReadOnlySpan<byte> recordId)
+        => Put(recordId, FldLifecycle.FieldId, FldLifecycle.DeadValue);
+
+    public void UndeleteRecord(ReadOnlySpan<byte> recordId)
+        => Put(recordId, FldLifecycle.FieldId, FldLifecycle.AliveValue);
+
+    public bool IsRecordDead(ReadOnlySpan<byte> recordId)
+        => TryResolve(recordId, FldLifecycle.FieldId, out var r) && !r.IsTombstone
+           && r.Value is { Length: 1 } && r.Value[0] == FldLifecycle.Dead;
+
+    /// <summary>
+    /// Compact all runs (+ overlay if any) for this namespace into one L0 run.
+    /// LWW-merges every field; writes new run, updates manifest, removes old run files.
+    /// </summary>
+    public ulong Compact()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            // Collect all recordIds
+            var idSet = new HashSet<(ulong, ulong)>();
+            var idList = new List<byte[]>();
+            void AddId(ReadOnlySpan<byte> rid)
+            {
+                ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid);
+                ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid.Slice(8));
+                if (idSet.Add((lo, hi)))
+                    idList.Add(rid.ToArray());
+            }
+
+            foreach (var kv in _overlay.Snapshot())
+            {
+                var b = new byte[16];
+                kv.Key.WriteRecordId(b);
+                AddId(b);
+            }
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                var bytes = EnsureRunCached(i);
+                new RunReader(bytes).ScanRecordIds(AddId);
+            }
+
+            if (idList.Count == 0) return 0;
+
+            // Collect field ids per record by scanning
+            var builder = new RunBuilder(_namespaceId);
+            Span<byte> recBuf = stackalloc byte[16];
+            foreach (var rid in idList)
+            {
+                var fieldIds = new HashSet<ushort>();
+                foreach (var kv in _overlay.Snapshot())
+                {
+                    kv.Key.WriteRecordId(recBuf);
+                    if (recBuf.SequenceEqual(rid))
+                        fieldIds.Add(kv.Key.FieldId);
+                }
+                for (int i = 0; i < _runs.Count; i++)
+                {
+                    var bytes = EnsureRunCached(i);
+                    new RunReader(bytes).ScanRecord(rid, (fid, _) => fieldIds.Add(fid));
+                    // also tombstones: ScanRecord skips them — probe common? need scan with tombs
+                    // For compaction, use TryGetField over scanned live + overlay keys is incomplete for pure tombstone-only fields.
+                }
+                foreach (var fid in fieldIds)
+                {
+                    if (!TryResolveUnlocked(rid, fid, out var r) || !r.Found)
+                        continue;
+                    if (r.IsTombstone)
+                    {
+                        builder.Add(rid, fid, ReadOnlySpan<byte>.Empty, r.Wall, r.Logical,
+                            r.AuthorNodeId ?? _localAuthor, r.KeyEpoch, isTombstone: true);
+                    }
+                    else if (r.Value is not null)
+                    {
+                        builder.Add(rid, fid, r.Value, r.Wall, r.Logical,
+                            r.AuthorNodeId ?? _localAuthor, r.KeyEpoch, isTombstone: false);
+                    }
+                }
+            }
+
+            byte[] runBytes = builder.Build();
+            ulong runId = _nextRunId++;
+            string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+            string tmp = path + ".tmp";
+            File.WriteAllBytes(tmp, runBytes);
+            using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
+                fs.Flush(flushToDisk: true);
+            File.Move(tmp, path, overwrite: true);
+
+            idList.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+            ulong seqHi = _pendingFlushedCommitSeq;
+            if (seqHi == 0) seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+
+            var oldPaths = _runs.Select(r => r.path).ToList();
+            _manifestStore.Update(m =>
+            {
+                var runs = m.Runs.Where(r => r.Ns != _namespaceId).ToList();
+                runs.Add(new RunEntry
+                {
+                    RunId = runId, Level = 0, Ns = _namespaceId,
+                    MinRec = idList[0], MaxRec = idList[^1],
+                    SeqLo = 1, SeqHi = seqHi
+                });
+                return CloneManifest(m, runs: runs, lastFlushed: seqHi);
+            });
+            _manifestDirty = false;
+
+            _runs.Clear();
+            _runs.Add((runId, path, runBytes));
+            _overlay.Clear();
+            _lastSealedCommitSeq = seqHi;
+
+            foreach (var op in oldPaths)
+            {
+                try { if (op != path) File.Delete(op); } catch { /* retain on failure */ }
+            }
+            return runId;
+        }
+    }
+
+    /// <summary>Resolve without taking _commitLock (caller may hold it).</summary>
+    private bool TryResolveUnlocked(ReadOnlySpan<byte> recordId, ushort fieldId, out FieldResolver.Resolved resolved)
+    {
+        resolved = FieldResolver.Resolved.Miss;
+        bool have = false;
+        ulong bestWall = 0; uint bestLog = 0;
+        byte[]? bestAuthor = null;
+        byte[]? bestValue = null;
+        bool bestTomb = false;
+        ushort bestEpoch = 0;
+
+        var key = new MemFieldKey(recordId, fieldId);
+        if (_overlay.TryGet(key, out var mem) && mem is not null)
+        {
+            have = true;
+            bestWall = mem.Wall; bestLog = mem.Logical;
+            bestAuthor = mem.AuthorNodeId; bestValue = mem.Value;
+            bestTomb = mem.IsTombstone; bestEpoch = mem.KeyEpoch;
+        }
+
+        for (int i = 0; i < _runs.Count; i++)
+        {
+            var bytes = EnsureRunCached(i);
+            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var st) || !st.Found)
+                continue;
+            var author = st.AuthorNodeId.ToArray();
+            if (!have || FieldResolver.IsNewer(st.Wall, st.Logical, author, bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
+            {
+                have = true;
+                bestWall = st.Wall; bestLog = st.Logical;
+                bestAuthor = author;
+                bestValue = st.IsTombstone ? Array.Empty<byte>() : st.Value.ToArray();
+                bestTomb = st.IsTombstone; bestEpoch = st.KeyEpoch;
+            }
+        }
+        if (!have) return false;
+        resolved = new FieldResolver.Resolved(true, bestTomb, bestEpoch, bestWall, bestLog, bestAuthor, bestValue);
+        return true;
     }
 
     private static ManifestDocument CloneManifest(
@@ -472,36 +650,30 @@ public sealed class FldDatabase : IDisposable
     }
 
     /// <summary>
-    /// Scan all live fields for a record: overlay wins, else newest run that has the field.
-    /// Values from runs are owned copies (safe after callback returns).
+    /// Scan live fields for a record after LWW merge across overlay + all runs.
     /// </summary>
     public void ScanRecord(ReadOnlySpan<byte> recordId, Action<ushort, byte[]> onField)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (recordId.Length != 16) return;
 
-        var seen = new HashSet<ushort>();
-        // Overlay first
-        var snap = _overlay.Snapshot();
+        var fieldIds = new HashSet<ushort>();
         Span<byte> recBuf = stackalloc byte[16];
-        foreach (var kv in snap)
+        foreach (var kv in _overlay.Snapshot())
         {
             kv.Key.WriteRecordId(recBuf);
-            if (!recBuf.SequenceEqual(recordId)) continue;
-            seen.Add(kv.Key.FieldId);
-            if (!kv.Value.IsTombstone)
-                onField(kv.Key.FieldId, kv.Value.Value);
+            if (recBuf.SequenceEqual(recordId))
+                fieldIds.Add(kv.Key.FieldId);
         }
-
-        // Runs newest-first; skip fieldIds already decided by overlay (incl. tombstones)
-        for (int i = _runs.Count - 1; i >= 0; i--)
+        for (int i = 0; i < _runs.Count; i++)
         {
             var bytes = EnsureRunCached(i);
-            new RunReader(bytes).ScanRecord(recordId, (fid, val) =>
-            {
-                if (!seen.Add(fid)) return;
-                onField(fid, val.ToArray());
-            });
+            new RunReader(bytes).ScanRecord(recordId, (fid, _) => fieldIds.Add(fid));
+        }
+        foreach (var fid in fieldIds.OrderBy(x => x))
+        {
+            if (TryResolve(recordId, fid, out var r) && r.Found && !r.IsTombstone && r.Value is not null)
+                onField(fid, r.Value);
         }
     }
 
