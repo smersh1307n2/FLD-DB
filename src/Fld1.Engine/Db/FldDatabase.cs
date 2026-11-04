@@ -2,6 +2,7 @@ using Fld1.Core.Hlc;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Storage;
 using Fld1.Engine.Outbox;
+using Fld1.Engine.Sync;
 using Fld1.Manifest.Format;
 using Fld1.Manifest.IO;
 using Fld1.Run.Builder;
@@ -765,6 +766,49 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+
+
+    /// <summary>
+    /// Apply remote fields with LWW (remote HLC/author). Marks dirty for next Commit.
+    /// Transport/BIN-SYNC decode happens outside; this is the storage apply edge.
+    /// Returns number of fields that became the LWW winner in overlay.
+    /// </summary>
+    public int ApplyRemote(ReadOnlySpan<RemoteFieldWrite> writes)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        int applied = 0;
+        foreach (ref readonly var w in writes)
+        {
+            var key = new MemFieldKey(w.RecordId, w.FieldId);
+            bool win = true;
+            if (TryResolve(w.RecordId, w.FieldId, out var resolved) && resolved.Found)
+            {
+                win = FieldResolver.IsNewer(
+                    w.Wall, w.Logical, w.AuthorNodeId,
+                    resolved.Wall, resolved.Logical, resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty);
+            }
+            if (!win) continue;
+
+            _overlay.Put(key, new MemFieldValue
+            {
+                Value = w.IsTombstone ? Array.Empty<byte>() : w.Value.ToArray(),
+                Wall = w.Wall,
+                Logical = w.Logical,
+                AuthorNodeId = w.AuthorNodeId,
+                KeyEpoch = w.KeyEpoch,
+                IsTombstone = w.IsTombstone
+            });
+            lock (_commitLock) { _dirty.Add(key); }
+            applied++;
+        }
+        return applied;
+    }
+
+    public int CompactOutbox()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _outbox.Compact();
+    }
 
     public IReadOnlyList<OutboxEntry> ReadOutboxBatch(ulong afterSeq, int limit = 256)
     {

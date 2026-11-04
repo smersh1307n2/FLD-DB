@@ -1,0 +1,68 @@
+using Fld1.Engine.Db;
+using Fld1.Engine.Sync;
+using Xunit;
+
+namespace Fld1.Engine.Tests;
+
+public class SyncApplyTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "fld-sync-" + Guid.NewGuid().ToString("N"));
+    public SyncApplyTests() => Directory.CreateDirectory(_dir);
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private static byte[] Author(byte b)
+    {
+        var a = new byte[16];
+        a[15] = b;
+        return a;
+    }
+
+    [Fact]
+    public void ApplyRemote_wins_with_newer_hlc()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "local"u8);
+        db.Commit();
+        db.Checkpoint();
+
+        int n = db.ApplyRemote([
+            new RemoteFieldWrite(rec, 1, "remote"u8.ToArray(), wall: ulong.MaxValue / 2, logical: 0, Author(9))
+        ]);
+        Assert.Equal(1, n);
+        Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("remote"u8.ToArray()));
+    }
+
+    [Fact]
+    public void ApplyRemote_loses_to_newer_local()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "local-new"u8);
+        // remote with wall=1 loses to local HLC from clock
+        int n = db.ApplyRemote([
+            new RemoteFieldWrite(rec, 1, "old"u8.ToArray(), wall: 1, logical: 0, Author(1))
+        ]);
+        Assert.Equal(0, n);
+        Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("local-new"u8.ToArray()));
+    }
+
+    [Fact]
+    public void Outbox_compact_after_ack()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "a"u8);
+        db.Commit();
+        db.Put(rec, 2, "b"u8);
+        db.Commit();
+        var batch = db.ReadOutboxBatch(0, 10);
+        Assert.Equal(2, batch.Count);
+        db.AcknowledgeOutbox(batch[0].OutboxSeq);
+        int kept = db.CompactOutbox();
+        Assert.Equal(1, kept);
+        var rest = db.ReadOutboxBatch(0, 10);
+        Assert.Single(rest);
+        Assert.Equal(batch[1].OutboxSeq, rest[0].OutboxSeq);
+    }
+}

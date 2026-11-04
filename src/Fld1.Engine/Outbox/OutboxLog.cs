@@ -173,62 +173,67 @@ public sealed class OutboxLog : IDisposable
         lock (_lock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            ulong minSeq = Math.Max(afterSeq, _ackedThrough);
-            var result = new List<OutboxEntry>(Math.Min(limit, 64));
-            long pos = HeaderSize;
-            long len = _fs.Length;
-            int fixedLen = 8 + 8 + 16 + 16 + 2 + 1 + 1 + 16 + 8 + 4 + 2 + 2 + 4;
-            while (pos + fixedLen + 4 <= len && result.Count < limit)
-            {
-                _fs.Seek(pos, SeekOrigin.Begin);
-                var fixedPart = new byte[fixedLen];
-                _fs.ReadExactly(fixedPart);
-                ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart);
-                uint valLen = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(fixedLen - 4));
-                long recSize = fixedLen + valLen + 4;
-                if (pos + recSize > len) break;
-                var rec = new byte[recSize];
-                _fs.Seek(pos, SeekOrigin.Begin);
-                _fs.ReadExactly(rec);
-                uint stored = BinaryPrimitives.ReadUInt32LittleEndian(rec.AsSpan(rec.Length - 4));
-                if (Hashes.Crc32C(rec.AsSpan(0, rec.Length - 4)) != stored) break;
-
-                if (seq > minSeq)
-                {
-                    int o = 0;
-                    o += 8; // seq
-                    ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(rec.AsSpan(o)); o += 8;
-                    var changeId = rec.AsSpan(o, 16).ToArray(); o += 16;
-                    var recordId = rec.AsSpan(o, 16).ToArray(); o += 16;
-                    ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(rec.AsSpan(o)); o += 2;
-                    byte op = rec[o++]; o++;
-                    var author = rec.AsSpan(o, 16).ToArray(); o += 16;
-                    ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(rec.AsSpan(o)); o += 8;
-                    uint logical = BinaryPrimitives.ReadUInt32LittleEndian(rec.AsSpan(o)); o += 4;
-                    ushort keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(rec.AsSpan(o)); o += 2;
-                    o += 2;
-                    o += 4; // valLen already known
-                    var value = valLen == 0 ? Array.Empty<byte>() : rec.AsSpan(o, (int)valLen).ToArray();
-                    result.Add(new OutboxEntry
-                    {
-                        OutboxSeq = seq,
-                        CommitSeq = commitSeq,
-                        ChangeId = changeId,
-                        RecordId = recordId,
-                        FieldId = fieldId,
-                        OpKind = op,
-                        AuthorNodeId = author,
-                        Wall = wall,
-                        Logical = logical,
-                        KeyEpoch = keyEpoch,
-                        Value = value
-                    });
-                }
-                pos += recSize;
-            }
-            _fs.Seek(0, SeekOrigin.End);
-            return result;
+            return ReadBatchUnlocked(afterSeq, limit);
         }
+    }
+
+    private List<OutboxEntry> ReadBatchUnlocked(ulong afterSeq, int limit)
+    {
+        ulong minSeq = Math.Max(afterSeq, _ackedThrough);
+        var result = new List<OutboxEntry>(Math.Min(limit, 64));
+        long pos = HeaderSize;
+        long len = _fs.Length;
+        int fixedLen = 8 + 8 + 16 + 16 + 2 + 1 + 1 + 16 + 8 + 4 + 2 + 2 + 4;
+        while (pos + fixedLen + 4 <= len && result.Count < limit)
+        {
+            _fs.Seek(pos, SeekOrigin.Begin);
+            var fixedPart = new byte[fixedLen];
+            _fs.ReadExactly(fixedPart);
+            ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart);
+            uint valLen = BinaryPrimitives.ReadUInt32LittleEndian(fixedPart.AsSpan(fixedLen - 4));
+            long recSize = fixedLen + valLen + 4;
+            if (pos + recSize > len) break;
+            var rec = new byte[recSize];
+            _fs.Seek(pos, SeekOrigin.Begin);
+            _fs.ReadExactly(rec);
+            uint stored = BinaryPrimitives.ReadUInt32LittleEndian(rec.AsSpan(rec.Length - 4));
+            if (Hashes.Crc32C(rec.AsSpan(0, rec.Length - 4)) != stored) break;
+
+            if (seq > minSeq)
+            {
+                int o = 0;
+                o += 8;
+                ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(rec.AsSpan(o)); o += 8;
+                var changeId = rec.AsSpan(o, 16).ToArray(); o += 16;
+                var recordId = rec.AsSpan(o, 16).ToArray(); o += 16;
+                ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(rec.AsSpan(o)); o += 2;
+                byte op = rec[o++]; o++;
+                var author = rec.AsSpan(o, 16).ToArray(); o += 16;
+                ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(rec.AsSpan(o)); o += 8;
+                uint logical = BinaryPrimitives.ReadUInt32LittleEndian(rec.AsSpan(o)); o += 4;
+                ushort keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(rec.AsSpan(o)); o += 2;
+                o += 2;
+                o += 4;
+                var value = valLen == 0 ? Array.Empty<byte>() : rec.AsSpan(o, (int)valLen).ToArray();
+                result.Add(new OutboxEntry
+                {
+                    OutboxSeq = seq,
+                    CommitSeq = commitSeq,
+                    ChangeId = changeId,
+                    RecordId = recordId,
+                    FieldId = fieldId,
+                    OpKind = op,
+                    AuthorNodeId = author,
+                    Wall = wall,
+                    Logical = logical,
+                    KeyEpoch = keyEpoch,
+                    Value = value
+                });
+            }
+            pos += recSize;
+        }
+        _fs.Seek(0, SeekOrigin.End);
+        return result;
     }
 
     public void Acknowledge(ulong throughSeq)
@@ -243,6 +248,63 @@ public sealed class OutboxLog : IDisposable
             uint crc = Hashes.Crc32C(ab.Slice(0, 8));
             BinaryPrimitives.WriteUInt32LittleEndian(ab.Slice(8), crc);
             File.WriteAllBytes(_ackPath, ab.ToArray());
+        }
+    }
+
+
+    /// <summary>
+    /// Rewrite log keeping only entries with OutboxSeq &gt; AckedThrough.
+    /// Returns number of retained entries. Call after Acknowledge when file is large.
+    /// </summary>
+    public int Compact()
+    {
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var keep = ReadBatchUnlocked(afterSeq: _ackedThrough, limit: int.MaxValue);
+            string tmp = _path + ".tmp";
+            using (var nfs = new FileStream(tmp, FileMode.Create, FileAccess.ReadWrite, FileShare.None,
+                       bufferSize: 64 * 1024, FileOptions.None))
+            {
+                Span<byte> hdr = stackalloc byte[HeaderSize];
+                hdr.Clear();
+                Magic.CopyTo(hdr);
+                BinaryPrimitives.WriteUInt16LittleEndian(hdr.Slice(4), Version);
+                BinaryPrimitives.WriteUInt64LittleEndian(hdr.Slice(8), _nextSeq);
+                nfs.Write(hdr);
+                int fixedLen = 8 + 8 + 16 + 16 + 2 + 1 + 1 + 16 + 8 + 4 + 2 + 2 + 4;
+                foreach (var e in keep)
+                {
+                    int valLen = e.Value.Length;
+                    int recSize = fixedLen + valLen + 4;
+                    var rec = new byte[recSize];
+                    int o = 0;
+                    BinaryPrimitives.WriteUInt64LittleEndian(rec.AsSpan(o), e.OutboxSeq); o += 8;
+                    BinaryPrimitives.WriteUInt64LittleEndian(rec.AsSpan(o), e.CommitSeq); o += 8;
+                    e.ChangeId.CopyTo(rec.AsSpan(o, 16)); o += 16;
+                    e.RecordId.CopyTo(rec.AsSpan(o, 16)); o += 16;
+                    BinaryPrimitives.WriteUInt16LittleEndian(rec.AsSpan(o), e.FieldId); o += 2;
+                    rec[o++] = e.OpKind;
+                    rec[o++] = 0;
+                    e.AuthorNodeId.CopyTo(rec.AsSpan(o, 16)); o += 16;
+                    BinaryPrimitives.WriteUInt64LittleEndian(rec.AsSpan(o), e.Wall); o += 8;
+                    BinaryPrimitives.WriteUInt32LittleEndian(rec.AsSpan(o), e.Logical); o += 4;
+                    BinaryPrimitives.WriteUInt16LittleEndian(rec.AsSpan(o), e.KeyEpoch); o += 2;
+                    BinaryPrimitives.WriteUInt16LittleEndian(rec.AsSpan(o), 0); o += 2;
+                    BinaryPrimitives.WriteUInt32LittleEndian(rec.AsSpan(o), (uint)valLen); o += 4;
+                    e.Value.CopyTo(rec.AsSpan(o, valLen)); o += valLen;
+                    uint crc = Hashes.Crc32C(rec.AsSpan(0, o));
+                    BinaryPrimitives.WriteUInt32LittleEndian(rec.AsSpan(o), crc);
+                    nfs.Write(rec);
+                }
+                nfs.Flush(flushToDisk: true);
+            }
+            _fs.Dispose();
+            File.Move(tmp, _path, overwrite: true);
+            _fs = new FileStream(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
+                bufferSize: 64 * 1024, FileOptions.None);
+            _fs.Seek(0, SeekOrigin.End);
+            return keep.Count;
         }
     }
 
