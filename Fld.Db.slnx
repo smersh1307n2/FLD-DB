@@ -4,8 +4,10 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Fld1.Core/Fld1.Core.csproj" />
+    <Project Path="src/Fld1.Run/Fld1.Run.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Fld1.Core.Tests/Fld1.Core.Tests.csproj" />
+    <Project Path="tests/Fld1.Run.Tests/Fld1.Run.Tests.csproj" />
   </Folder>
 </Solution>
