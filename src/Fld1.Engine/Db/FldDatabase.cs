@@ -1,6 +1,7 @@
 using Fld1.Core.Hlc;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Storage;
+using Fld1.Engine.Outbox;
 using Fld1.Manifest.Format;
 using Fld1.Manifest.IO;
 using Fld1.Run.Builder;
@@ -24,9 +25,11 @@ public sealed class FldDatabase : IDisposable
     private readonly byte[] _localAuthor;
     private readonly HlcClock _clock;
     private readonly MemOverlay _overlay = new();
+    private readonly HashSet<MemFieldKey> _dirty = new();
     private readonly AtomicManifestStore _manifestStore;
     private readonly object _commitLock = new();
     private WalManager _wal;
+    private OutboxLog _outbox;
     private readonly List<(ulong runId, string path, byte[]? cached)> _runs = new();
     private ulong _nextRunId = 1;
     private ulong _clientRequestSeq;
@@ -51,6 +54,7 @@ public sealed class FldDatabase : IDisposable
         uint namespaceId,
         byte[] localAuthor,
         WalManager wal,
+        OutboxLog outbox,
         AtomicManifestStore manifestStore,
         int autoCheckpointOverlayFields = 0,
         bool truncateSealedWal = true,
@@ -61,6 +65,7 @@ public sealed class FldDatabase : IDisposable
         _localAuthor = localAuthor;
         _clock = new HlcClock(localAuthor);
         _wal = wal;
+        _outbox = outbox;
         _manifestStore = manifestStore;
         _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
         _truncateSealedWal = truncateSealedWal;
@@ -100,9 +105,10 @@ public sealed class FldDatabase : IDisposable
 
         string walDir = Path.Combine(dbDir, "wal");
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
+        var outbox = OutboxLog.Open(Path.Combine(dbDir, "outbox"), namespaceId);
 
         var db = new FldDatabase(
-            dbDir, namespaceId, author, wal, manifestStore,
+            dbDir, namespaceId, author, wal, outbox, manifestStore,
             options.AutoCheckpointOverlayFields,
             options.TruncateSealedWal,
             options.AutoCompactRunCount);
@@ -177,6 +183,7 @@ public sealed class FldDatabase : IDisposable
             KeyEpoch = keyEpoch,
             IsTombstone = isTombstone
         });
+        lock (_commitLock) { _dirty.Add(key); }
     }
 
     /// <summary>Put taking ownership of <paramref name="value"/> (no extra copy).</summary>
@@ -186,7 +193,8 @@ public sealed class FldDatabase : IDisposable
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
         ArgumentNullException.ThrowIfNull(value);
         var hlc = _clock.Now();
-        _overlay.Put(new MemFieldKey(recordId, fieldId), new MemFieldValue
+        var keyOwned = new MemFieldKey(recordId, fieldId);
+        _overlay.Put(keyOwned, new MemFieldValue
         {
             Value = value,
             Wall = hlc.Stamp.Wall,
@@ -195,6 +203,7 @@ public sealed class FldDatabase : IDisposable
             KeyEpoch = keyEpoch,
             IsTombstone = false
         });
+        lock (_commitLock) { _dirty.Add(keyOwned); }
     }
 
     /// <summary>Tombstone field (soft delete). Visible as miss on TryGet.</summary>
@@ -235,8 +244,16 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
-            var snap = _overlay.Snapshot();
-            if (snap.Count == 0) return 0;
+            if (_dirty.Count == 0) return 0;
+
+            // Only keys written since last Commit (delta)
+            var snap = new List<KeyValuePair<MemFieldKey, MemFieldValue>>(_dirty.Count);
+            foreach (var key in _dirty)
+            {
+                if (_overlay.TryGet(key, out var v) && v is not null)
+                    snap.Add(new KeyValuePair<MemFieldKey, MemFieldValue>(key, v));
+            }
+            if (snap.Count == 0) { _dirty.Clear(); return 0; }
 
             _clientRequestSeq++;
             var fields = new List<WalFieldMutation>(snap.Count);
@@ -287,6 +304,31 @@ public sealed class FldDatabase : IDisposable
             ulong commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
             _wal.Flush();
 
+            // Durable outbox for BIN-SYNC (ChangeId stable across restarts)
+            Span<byte> changeId = stackalloc byte[16];
+            Span<byte> recBuf2 = stackalloc byte[16];
+            foreach (var kv in snap)
+            {
+                Uuid7.NewUuid7(changeId);
+                kv.Key.WriteRecordId(recBuf2);
+                _outbox.Append(new OutboxEntry
+                {
+                    OutboxSeq = 0, // assigned by log
+                    CommitSeq = commitSeq,
+                    ChangeId = changeId.ToArray(),
+                    RecordId = recBuf2.ToArray(),
+                    FieldId = kv.Key.FieldId,
+                    OpKind = kv.Value.IsTombstone ? (byte)2 : (byte)1,
+                    AuthorNodeId = kv.Value.AuthorNodeId,
+                    Wall = kv.Value.Wall,
+                    Logical = kv.Value.Logical,
+                    KeyEpoch = kv.Value.KeyEpoch,
+                    Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
+                });
+            }
+            _outbox.Flush();
+            _dirty.Clear();
+
             // Defer manifest disk write — WAL is source of truth until Checkpoint/FlushManifest
             _pendingFlushedCommitSeq = commitSeq;
             _manifestDirty = true;
@@ -294,7 +336,6 @@ public sealed class FldDatabase : IDisposable
                             && _overlay.Count >= _autoCheckpointOverlayFields;
             if (!autoCkpt)
                 return commitSeq;
-            // Checkpoint under same lock (no re-entry)
             CheckpointUnderLock();
             return commitSeq;
         }
@@ -368,6 +409,7 @@ public sealed class FldDatabase : IDisposable
             _runs.Add((runId, path, runBytes));
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
+            _dirty.Clear();
             if (_truncateSealedWal)
                 _wal.TruncateSealedSegments(seqHi);
             if (_autoCompactRunCount > 0 && _runs.Count >= _autoCompactRunCount)
@@ -723,6 +765,25 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+
+    public IReadOnlyList<OutboxEntry> ReadOutboxBatch(ulong afterSeq, int limit = 256)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _outbox.ReadBatch(afterSeq, limit);
+    }
+
+    public void AcknowledgeOutbox(ulong throughSeq)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _outbox.Acknowledge(throughSeq);
+    }
+
+    public ulong GetOutboxWatermark()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _outbox.Watermark;
+    }
+
     public void RotateWal()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -745,6 +806,7 @@ public sealed class FldDatabase : IDisposable
                 catch { /* best-effort on dispose */ }
             }
             _disposed = true;
+            _outbox.Dispose();
             _wal.Dispose();
         }
     }
