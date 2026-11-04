@@ -34,9 +34,6 @@ public readonly struct RunVerifyResult
     public static RunVerifyResult Fail(RunVerifyStatus s, string? d = null) => new(s, d);
 }
 
-/// <summary>
-/// Independent FLD1 run verifier. Spec RUN-VERIFY-001.
-/// </summary>
 public static class RunVerify
 {
     public static RunVerifyResult Verify(ReadOnlySpan<byte> file)
@@ -55,7 +52,6 @@ public static class RunVerify
         if (ns > 0xFFFF)
             return RunVerifyResult.Fail(RunVerifyStatus.BadNamespace, $"ns={ns}");
 
-        // reserved pad must be zero [A6-RESERVED]
         var pad = RunHeader.ReservedPad(file);
         for (int i = 0; i < pad.Length; i++)
         {
@@ -86,7 +82,6 @@ public static class RunVerify
                 return RunVerifyResult.Fail(RunVerifyStatus.BadAlignment, "values");
         }
 
-        // Footer xxHash64
         if (file.Length < (int)footerOff + 8)
             return RunVerifyResult.Fail(RunVerifyStatus.TooSmall, "footer");
         ulong expected = Hashes.XxHash64(file.Slice(0, (int)footerOff));

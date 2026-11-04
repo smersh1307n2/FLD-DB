@@ -9,28 +9,33 @@ namespace Fld1.Run.Builder;
 
 /// <summary>
 /// Deterministic FLD1 STATE run builder. Spec PART I–II.
-/// Inline values only in this iteration (len ≤ 256). External blobs next.
+/// Supports inline (≤ policy, default 256) and external values (≤ 4 MB).
 /// </summary>
 public sealed class RunBuilder
 {
     private readonly uint _namespaceId;
     private readonly List<FieldWrite> _writes = new();
     private readonly uint _inlinePolicy;
+    private readonly uint _pgmEpsilon;
 
-    public RunBuilder(uint namespaceId, uint inlinePolicy = RunConstants.MaxInlineValueLen)
+    public RunBuilder(
+        uint namespaceId,
+        uint inlinePolicy = RunConstants.MaxInlineValueLen,
+        uint pgmEpsilon = RunConstants.MaxPgmEpsilon)
     {
         if (namespaceId > 0xFFFF)
             throw new ArgumentOutOfRangeException(nameof(namespaceId));
         if (inlinePolicy > RunConstants.MaxInlineValueLen)
             throw new ArgumentOutOfRangeException(nameof(inlinePolicy));
+        if (pgmEpsilon > 65535)
+            throw new ArgumentOutOfRangeException(nameof(pgmEpsilon));
         _namespaceId = namespaceId;
         _inlinePolicy = inlinePolicy;
+        _pgmEpsilon = pgmEpsilon;
     }
 
     public RunBuilder Add(FieldWrite write)
     {
-        if (write.Value.Length > _inlinePolicy && write.Value.Length <= RunConstants.MaxBlobLen)
-            throw new NotSupportedException("External values not yet implemented in this iteration");
         if (write.Value.Length > RunConstants.MaxBlobLen)
             throw new ArgumentException("value > 4 MB");
         _writes.Add(write);
@@ -46,17 +51,14 @@ public sealed class RunBuilder
         ReadOnlySpan<byte> authorNodeId,
         ushort keyEpoch = 0,
         bool isTombstone = false)
-    {
-        return Add(new FieldWrite(recordId, fieldId, value, wall, logical, authorNodeId, keyEpoch, isTombstone));
-    }
+        => Add(new FieldWrite(recordId, fieldId, value, wall, logical, authorNodeId, keyEpoch, isTombstone));
 
     public byte[] Build()
     {
         if (_writes.Count == 0)
             return EmptyRunBuilder.Create(_namespaceId);
 
-        // --- LWW collapse: one winner per (RecordId, FieldId) ---
-        // Winner = max (Wall, Logical, AuthorNodeId BE)
+        // LWW: one winner per (RecordId, FieldId)
         var winners = new Dictionary<(IdKey, ushort), FieldWrite>();
         foreach (var w in _writes)
         {
@@ -65,75 +67,67 @@ public sealed class RunBuilder
                 winners[key] = w;
         }
 
-        // Group by RecordId, sort RecordId ASC (BE)
         var byRecord = winners.Values
             .GroupBy(w => new IdKey(w.RecordId))
             .OrderBy(g => g.Key, IdKeyComparer.Instance)
             .ToList();
 
-        // Intern authors: unique sorted ASC
+        // Intern authors ASC
         var authorSet = new SortedSet<IdKey>(IdKeyComparer.Instance);
         foreach (var w in winners.Values)
             authorSet.Add(new IdKey(w.AuthorNodeId));
-        var authors = authorSet.ToList(); // index 0 → internId 1
+        var authors = authorSet.ToList();
         var authorToIntern = new Dictionary<IdKey, uint>(IdKeyComparer.Instance);
         for (int i = 0; i < authors.Count; i++)
             authorToIntern[authors[i]] = (uint)(i + 1);
 
-        // Build cluster blobs in order
+        // External value refs collected in (RecordId, FieldId) order during cluster build
+        var externalEntries = new List<ExternalEntry>();
+
         var clusterBlobs = new List<byte[]>();
         var clusterRecordIds = new List<byte[]>();
         uint totalFields = 0;
         uint aliveFields = 0;
         bool anyHlcOverride = false;
         bool anyKeyEpoch = false;
+        bool anyExternal = false;
 
         foreach (var group in byRecord)
         {
             var fields = group.OrderBy(f => f.FieldId).ToList();
-            // Dup FieldId already collapsed by LWW dict
             totalFields += (uint)fields.Count;
-
-            // Mode for BaseWall/Logical/InternId
             var mode = ComputeMode(fields, authorToIntern);
 
-            // Overrides: field differs from mode OR keyEpoch != 0
             var overrides = new List<(int idx, FieldWrite f, uint internId)>();
             for (int i = 0; i < fields.Count; i++)
             {
                 var f = fields[i];
                 uint iid = authorToIntern[new IdKey(f.AuthorNodeId)];
-                bool need = f.Wall != mode.Wall || f.Logical != mode.Logical || iid != mode.InternId || f.KeyEpoch != 0;
-                if (need)
-                    overrides.Add((i, f, iid));
+                bool need = f.Wall != mode.Wall || f.Logical != mode.Logical
+                            || iid != mode.InternId || f.KeyEpoch != 0;
+                if (need) overrides.Add((i, f, iid));
             }
             if (overrides.Count > 0) anyHlcOverride = true;
             if (fields.Any(f => f.KeyEpoch != 0)) anyKeyEpoch = true;
 
-            // Lifecycle DEAD?
-            bool dead = false;
-            foreach (var f in fields)
-            {
-                if (f.FieldId == 0 && f.Value.Length == 1 && f.Value[0] == 0x01)
-                {
-                    dead = true;
-                    break;
-                }
-            }
+            bool dead = fields.Any(f =>
+                f.FieldId == 0 && f.Value.Length == 1 && f.Value[0] == 0x01);
 
-            // Count alive (non-tombstone for contributor; simplified: non-tombstone)
-            foreach (var f in fields)
-            {
-                if (!f.IsTombstone) aliveFields++;
-            }
-
-            // Payload area: concatenate values FieldId ASC, no gaps
+            bool clusterHasExternal = false;
             int payloadLen = 0;
             foreach (var f in fields)
             {
-                if (f.IsTombstone)
-                    continue; // tombstone has no value bytes in payload; ValLen=0
-                payloadLen += f.Value.Length;
+                if (!f.IsTombstone) aliveFields++;
+                if (f.IsTombstone) continue;
+                if ((uint)f.Value.Length > _inlinePolicy)
+                {
+                    clusterHasExternal = true;
+                    anyExternal = true;
+                }
+                else
+                {
+                    payloadLen += f.Value.Length;
+                }
             }
             if (payloadLen > RunConstants.MaxPayloadArea)
                 throw new InvalidOperationException("payloadArea > 65535");
@@ -147,17 +141,16 @@ public sealed class RunBuilder
             var blob = new byte[clusterSize];
             var span = blob.AsSpan();
 
-            // Cluster header
             group.Key.CopyTo(span.Slice(0, 16));
             BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(16), (ushort)fields.Count);
-            ushort cflags = dead ? (ushort)ClusterFlags.Dead : (ushort)0;
+            ushort cflags = 0;
+            if (dead) cflags |= (ushort)ClusterFlags.Dead;
+            if (clusterHasExternal) cflags |= (ushort)ClusterFlags.HasExternal;
             BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(18), cflags);
             BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(20), mode.Wall);
             BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(28), mode.Logical);
             BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(32), mode.InternId);
-            // reserved 4 at 36 = 0
 
-            // FieldDesc[]
             int payloadOff = 0;
             int descBase = RunConstants.ClusterHeaderSize;
             for (int i = 0; i < fields.Count; i++)
@@ -174,6 +167,13 @@ public sealed class RunBuilder
                     valLen = 0;
                     off = 0;
                 }
+                else if ((uint)f.Value.Length > _inlinePolicy)
+                {
+                    valLen = RunConstants.ExternalValLen;
+                    // ValueRef index assigned after all clusters — store placeholder, fix up later
+                    off = (ushort)externalEntries.Count;
+                    externalEntries.Add(new ExternalEntry(group.Key.Bytes, f.FieldId, f.Value));
+                }
                 else
                 {
                     valLen = (ushort)f.Value.Length;
@@ -185,11 +185,10 @@ public sealed class RunBuilder
 
                 BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(d + 2), valLen);
                 span[d + 4] = fdFlags;
-                span[d + 5] = 0; // reserved
+                span[d + 5] = 0;
                 BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(d + 6), off);
             }
 
-            // FieldHlcOverride[] FieldIdx ASC (already in order)
             int ovBase = descBase + descBytes;
             for (int oi = 0; oi < overrides.Count; oi++)
             {
@@ -200,15 +199,14 @@ public sealed class RunBuilder
                 BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(o + 4), f.Wall);
                 BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(o + 12), f.Logical);
                 BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(o + 16), iid);
-                // pad 4 at +20 = 0
             }
 
-            // payload
             int payBase = ovBase + ovBytes;
             int cursor = 0;
             foreach (var f in fields)
             {
                 if (f.IsTombstone) continue;
+                if ((uint)f.Value.Length > _inlinePolicy) continue;
                 f.Value.CopyTo(span.Slice(payBase + cursor, f.Value.Length));
                 cursor += f.Value.Length;
             }
@@ -217,79 +215,78 @@ public sealed class RunBuilder
             clusterRecordIds.Add(group.Key.Bytes);
         }
 
-        // --- Layout ---
-        // intern @ 256
+        // Sort external entries by (RecordId, FieldId) for ValueRef catalog — already insertion order
+        // matches FieldId ASC within RecordId ASC because we iterate byRecord sorted + fields sorted.
+        // Spec requires ValueRef sorted (RecordId, FieldId) ASC — our collection order is correct.
+
+        // --- Section layout ---
         ulong internOff = RunConstants.HeaderSize;
         int internBytes = authors.Count * RunConstants.InternEntrySize;
 
-        // PGM after intern
+        // PGM multi-segment
+        var pgmSegs = BuildPgm(clusterRecordIds, _pgmEpsilon);
         ulong pgmOff = internOff + (ulong)internBytes;
-        // Simple single-segment PGM covering all clusters (valid, deterministic)
-        int pgmSegments = clusterBlobs.Count == 0 ? 0 : 1;
-        int pgmBytes = pgmSegments * RunConstants.PgmSegmentSize;
-        uint pgmEpsilon = 32;
+        int pgmBytes = pgmSegs.Count * RunConstants.PgmSegmentSize;
 
-        // slots after pgm
         ulong slotOff = pgmOff + (ulong)pgmBytes;
         int slotBytes = clusterBlobs.Count * RunConstants.CompactSlotSize;
 
-        // data after slots
         ulong dataOff = slotOff + (ulong)slotBytes;
         int dataBytes = 0;
         foreach (var b in clusterBlobs) dataBytes += b.Length;
 
-        // no external values in this iteration
-        ulong valuesOff = dataOff + (ulong)dataBytes;
-        // pad data end to 8 for valuesOff alignment if needed
-        // Spec: valuesOff % 8 == 0 when HAS_VALUES; for no external, valuesOff == footerOff
-        // Align body end to 8
-        ulong bodyEnd = valuesOff;
-        ulong footerOff = (bodyEnd + 7) & ~7UL;
-        ulong valuesLen = 0;
-        // HAS_VALUES = 0 path: valuesOff == footerOff
-        valuesOff = footerOff;
+        // Values section
+        ulong valuesOff;
+        ulong valuesLen;
+        int valuesSectionBytes = 0;
+        if (externalEntries.Count > 0)
+        {
+            // Align values section start to 8
+            ulong dataEnd = dataOff + (ulong)dataBytes;
+            valuesOff = (dataEnd + 7) & ~7UL;
+            int refBytes = externalEntries.Count * RunConstants.ValueRefSize;
+            int blobBytes = 0;
+            foreach (var e in externalEntries) blobBytes += e.Value.Length;
+            // valuesLen includes refs + blobs + pad to 8
+            int raw = refBytes + blobBytes;
+            int padded = (raw + 7) & ~7;
+            valuesLen = (ulong)padded;
+            valuesSectionBytes = padded;
+        }
+        else
+        {
+            ulong dataEnd = dataOff + (ulong)dataBytes;
+            valuesOff = (dataEnd + 7) & ~7UL; // will equal footerOff
+            valuesLen = 0;
+        }
+
+        ulong footerOff = valuesOff + valuesLen;
+        // When no external: valuesOff == footerOff already
+        if (externalEntries.Count == 0)
+        {
+            footerOff = valuesOff;
+            valuesOff = footerOff;
+        }
 
         int fileSize = (int)footerOff + RunConstants.FooterSize;
         var file = new byte[fileSize];
         var fs = file.AsSpan();
 
-        // Intern table
+        // Intern
         for (int i = 0; i < authors.Count; i++)
             authors[i].Bytes.CopyTo(fs.Slice((int)internOff + i * 16, 16));
 
-        // PGM single segment
-        if (pgmSegments == 1)
+        // PGM segments
+        for (int s = 0; s < pgmSegs.Count; s++)
         {
-            // StartKey = K(first), StartIdx=0, SegEps=0 (use default), Num/Den for constant or linear
-            // For single segment over sorted keys: Predict uses linear from first to last
-            ulong k0 = Uuid7.ProjectK(clusterRecordIds[0]);
-            BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff, 8), k0);
-            BinaryPrimitives.WriteUInt32LittleEndian(fs.Slice((int)pgmOff + 8, 4), 0); // StartIdx
-            BinaryPrimitives.WriteUInt16LittleEndian(fs.Slice((int)pgmOff + 12, 2), 0); // SegEps=0 → default
-            // Reserved 2 = 0
-            // Num/Den: if one cluster, Den=1 Num=0; else slope
-            if (clusterBlobs.Count == 1)
-            {
-                BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff + 16, 8), 0); // Num
-                BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff + 24, 8), 1); // Den
-            }
-            else
-            {
-                ulong kLast = Uuid7.ProjectK(clusterRecordIds[^1]);
-                ulong spanK = kLast - k0;
-                ulong spanI = (ulong)(clusterBlobs.Count - 1);
-                // p = (k-k0)*Num/Den ≈ index; Num=spanI, Den=spanK (or 1 if 0)
-                if (spanK == 0)
-                {
-                    BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff + 16, 8), 0);
-                    BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff + 24, 8), 1);
-                }
-                else
-                {
-                    BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff + 16, 8), spanI);
-                    BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)pgmOff + 24, 8), spanK);
-                }
-            }
+            var seg = pgmSegs[s];
+            int pos = (int)pgmOff + s * RunConstants.PgmSegmentSize;
+            BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(pos, 8), seg.StartKey);
+            BinaryPrimitives.WriteUInt32LittleEndian(fs.Slice(pos + 8, 4), seg.StartIdx);
+            BinaryPrimitives.WriteUInt16LittleEndian(fs.Slice(pos + 12, 2), seg.SegEps);
+            // reserved 2 = 0
+            BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(pos + 16, 8), seg.Num);
+            BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(pos + 24, 8), seg.Den);
         }
 
         // Slots + data
@@ -298,45 +295,51 @@ public sealed class RunBuilder
         {
             int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
             BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(slotPos, 8), (ulong)dataCursor);
-            uint shortKey = Uuid7.ShortKey(clusterRecordIds[i]);
-            // ShortKey stored as 4 bytes — raw RecordId[12..15], which is BE interpretation
-            // Spec: ShortKey = RecordId[12..15]. Write as raw bytes (not host endian concern for identity)
             clusterRecordIds[i].AsSpan(12, 4).CopyTo(fs.Slice(slotPos + 8, 4));
-            // pad 4 = 0
-
             clusterBlobs[i].CopyTo(fs.Slice(dataCursor));
             dataCursor += clusterBlobs[i].Length;
         }
 
-        // Flags
+        // Values section: ValueRef catalog then blob pool
+        if (externalEntries.Count > 0)
+        {
+            int refBase = (int)valuesOff;
+            int blobBase = refBase + externalEntries.Count * RunConstants.ValueRefSize;
+            int blobCursor = 0;
+            for (int i = 0; i < externalEntries.Count; i++)
+            {
+                var e = externalEntries[i];
+                int rp = refBase + i * RunConstants.ValueRefSize;
+                // DataOffset is relative to start of blob pool (or absolute from file start?)
+                // Spec: DataOffset[8] in ValueRef — absolute file offset is more useful for MMF;
+                // Spec says DataOffset[i+1] = DataOffset[i] + Length[i] continuous.
+                // Use absolute file offsets for simplicity and zero-copy.
+                ulong absOff = (ulong)(blobBase + blobCursor);
+                BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(rp, 8), absOff);
+                BinaryPrimitives.WriteUInt32LittleEndian(fs.Slice(rp + 8, 4), (uint)e.Value.Length);
+                uint crc = Hashes.Crc32C(e.Value);
+                BinaryPrimitives.WriteUInt32LittleEndian(fs.Slice(rp + 12, 4), crc);
+                e.Value.CopyTo(fs.Slice(blobBase + blobCursor, e.Value.Length));
+                blobCursor += e.Value.Length;
+            }
+            // remaining pad already zero
+        }
+
         ushort runFlags = 0;
+        if (anyExternal) runFlags |= (ushort)RunFlags.HasValues;
         if (anyHlcOverride) runFlags |= (ushort)RunFlags.HasHlcOverrides;
         if (anyKeyEpoch) runFlags |= (ushort)RunFlags.HasKeyEpochs;
-        // HAS_VALUES = 0 (no external section)
 
-        // rootDigest: BLAKE3(tag ‖ ns ‖ body without header digests area?)
-        // Spec: Run StateDigest = BLAKE3-256("FLD1-RUNSTATE-v1" ‖ ns ‖ body)
-        // For empty: tag ‖ ns only. For non-empty we hash tag ‖ ns ‖ content after header.
-        // Practical approach matching empty: tag ‖ ns LE ‖ file[256..footerOff)
-        // But footer order says: compute digests from content, write into header, then xxhash.
-        // Use: body = intern+pgm+slots+data (from internOff to footerOff)
+        // rootDigest = BLAKE3(tag ‖ ns ‖ body[internOff..footerOff))
         Span<byte> nsLe = stackalloc byte[4];
         BinaryPrimitives.WriteUInt32LittleEndian(nsLe, _namespaceId);
-
-        // Temporary: write header with zero digest, then compute
+        var bodySlice = fs.Slice((int)internOff, (int)(footerOff - internOff));
+        var hashInput = new byte[Tags.RunStateV1.Length + 4 + bodySlice.Length];
+        Tags.RunStateV1.CopyTo(hashInput);
+        nsLe.CopyTo(hashInput.AsSpan(Tags.RunStateV1.Length));
+        bodySlice.CopyTo(hashInput.AsSpan(Tags.RunStateV1.Length + 4));
         Span<byte> digest = stackalloc byte[32];
-        // Hash tag ‖ ns ‖ bytes[internOff..footerOff)
-        using (var _ = new DigestScope())
-        {
-            // Build hash input
-            var bodySlice = fs.Slice((int)internOff, (int)(footerOff - internOff));
-            // Blake3 tagged: tag + ns + body
-            var hasherData = new byte[Tags.RunStateV1.Length + 4 + bodySlice.Length];
-            Tags.RunStateV1.CopyTo(hasherData);
-            nsLe.CopyTo(hasherData.AsSpan(Tags.RunStateV1.Length));
-            bodySlice.CopyTo(hasherData.AsSpan(Tags.RunStateV1.Length + 4));
-            Hashes.Blake3_256(hasherData, digest);
-        }
+        Hashes.Blake3_256(hashInput, digest);
 
         RunHeader.WriteCore(
             fs.Slice(0, RunHeader.Size),
@@ -345,21 +348,118 @@ public sealed class RunBuilder
             numClusters: (uint)clusterBlobs.Count,
             numFields: totalFields,
             internCount: (uint)authors.Count,
-            pgmSegments: (uint)pgmSegments,
-            pgmEpsilon: pgmEpsilon,
+            pgmSegments: (uint)pgmSegs.Count,
+            pgmEpsilon: _pgmEpsilon,
             internOff, pgmOff, slotOff, dataOff,
             valuesOff, valuesLen, footerOff,
-            numExternal: 0,
+            numExternal: (uint)externalEntries.Count,
             aliveFields: aliveFields,
-            contributorCount: aliveFields, // no ghosts/retained tombs tracked yet
+            contributorCount: aliveFields,
             ghostCount: 0,
             digest);
 
-        // Footer xxHash64
-        ulong hash = Hashes.XxHash64(fs.Slice(0, (int)footerOff));
-        BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)footerOff, 8), hash);
-
+        ulong xh = Hashes.XxHash64(fs.Slice(0, (int)footerOff));
+        BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)footerOff, 8), xh);
         return file;
+    }
+
+    /// <summary>
+    /// Greedy PGM segments with dup-group indivisibility. Spec §2.1 / [K-PGM-DUP-RANGE].
+    /// </summary>
+    private static List<PgmSeg> BuildPgm(List<byte[]> recordIds, uint defaultEps)
+    {
+        var segs = new List<PgmSeg>();
+        if (recordIds.Count == 0) return segs;
+
+        var keys = new ulong[recordIds.Count];
+        for (int i = 0; i < recordIds.Count; i++)
+            keys[i] = Uuid7.ProjectK(recordIds[i]);
+
+        // Build dup-group boundaries: [start, end) ranges of equal K
+        var groups = new List<(int start, int end)>();
+        int gStart = 0;
+        for (int i = 1; i <= keys.Length; i++)
+        {
+            if (i == keys.Length || keys[i] != keys[gStart])
+            {
+                groups.Add((gStart, i));
+                gStart = i;
+            }
+        }
+
+        int segStart = 0;
+        int groupIdx = 0;
+        while (groupIdx < groups.Count)
+        {
+            int start = groups[groupIdx].start;
+            int end = groups[groupIdx].end; // exclusive, at least one group
+            // Expand greedily by whole groups while max error ≤ defaultEps
+            int nextGroup = groupIdx + 1;
+            while (nextGroup < groups.Count)
+            {
+                int candidateEnd = groups[nextGroup].end;
+                if (MaxError(keys, start, candidateEnd) <= defaultEps)
+                {
+                    end = candidateEnd;
+                    nextGroup++;
+                }
+                else break;
+            }
+
+            // SegEps for dup groups: min(ceil((G-1)/2), 65535) when a single group is large
+            ushort segEps = 0;
+            int groupSize = end - start;
+            // If this segment is exactly one dup-group with G>1, raise SegEps
+            if (nextGroup == groupIdx + 1 && groupSize > 1)
+            {
+                int raised = (groupSize - 1 + 1) / 2; // ceil((G-1)/2)
+                segEps = (ushort)Math.Min(raised, 65535);
+            }
+
+            ulong k0 = keys[start];
+            uint startIdx = (uint)start;
+            ulong num, den;
+            if (end - start <= 1)
+            {
+                num = 0; den = 1;
+            }
+            else
+            {
+                ulong kLast = keys[end - 1];
+                ulong spanK = kLast - k0;
+                ulong spanI = (ulong)(end - start - 1);
+                if (spanK == 0) { num = 0; den = 1; }
+                else { num = spanI; den = spanK; }
+            }
+
+            segs.Add(new PgmSeg(k0, startIdx, segEps, num, den));
+            groupIdx = nextGroup;
+            segStart = end;
+        }
+
+        return segs;
+    }
+
+    /// <summary>Max |predict(i) - i| over [start, end).</summary>
+    private static ulong MaxError(ulong[] keys, int start, int end)
+    {
+        if (end - start <= 1) return 0;
+        ulong k0 = keys[start];
+        ulong kLast = keys[end - 1];
+        ulong spanK = kLast - k0;
+        ulong spanI = (ulong)(end - start - 1);
+        if (spanK == 0) return 0;
+        ulong maxErr = 0;
+        for (int i = start; i < end; i++)
+        {
+            // p = (k - k0) * spanI / spanK
+            UInt128 num = (UInt128)(keys[i] - k0) * spanI;
+            ulong pred = (ulong)(num / spanK);
+            ulong actual = (ulong)(i - start);
+            ulong err = pred > actual ? pred - actual : actual - pred;
+            if (err > maxErr) maxErr = err;
+        }
+        return maxErr;
     }
 
     private static int CompareHlc(FieldWrite a, FieldWrite b)
@@ -375,7 +475,6 @@ public sealed class RunBuilder
         List<FieldWrite> fields,
         Dictionary<IdKey, uint> authorToIntern)
     {
-        // Mode = most frequent (Wall, Logical, InternId) triple; tie → first in FieldId order
         var counts = new Dictionary<(ulong, uint, uint), int>();
         (ulong, uint, uint) first = default;
         bool hasFirst = false;
@@ -390,18 +489,27 @@ public sealed class RunBuilder
         var mode = first;
         foreach (var kv in counts)
         {
-            if (kv.Value > best)
-            {
-                best = kv.Value;
-                mode = kv.Key;
-            }
+            if (kv.Value > best) { best = kv.Value; mode = kv.Key; }
         }
         return mode;
     }
 
-    private ref struct DigestScope { public void Dispose() { } }
+    private readonly struct PgmSeg(ulong startKey, uint startIdx, ushort segEps, ulong num, ulong den)
+    {
+        public readonly ulong StartKey = startKey;
+        public readonly uint StartIdx = startIdx;
+        public readonly ushort SegEps = segEps;
+        public readonly ulong Num = num;
+        public readonly ulong Den = den;
+    }
 
-    /// <summary>16-byte id key for dictionaries/sorting (unsigned BE compare).</summary>
+    private sealed class ExternalEntry(byte[] recordId, ushort fieldId, byte[] value)
+    {
+        public readonly byte[] RecordId = recordId;
+        public readonly ushort FieldId = fieldId;
+        public readonly byte[] Value = value;
+    }
+
     private readonly struct IdKey : IComparable<IdKey>
     {
         public readonly byte[] Bytes;

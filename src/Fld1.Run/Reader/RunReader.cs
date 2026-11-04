@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using Fld1.Core.Hash;
 using Fld1.Core.Util;
 using Fld1.Core.Uuid;
 using Fld1.Run.Format;
@@ -8,7 +9,6 @@ namespace Fld1.Run.Reader;
 
 /// <summary>
 /// Zero-copy reader over an immutable FLD1 run buffer.
-/// Lookup: PGM window → ShortKey filter → full RecordId match → FieldDesc binary search.
 /// </summary>
 public readonly struct RunReader
 {
@@ -31,14 +31,10 @@ public readonly struct RunReader
         return result.IsOk;
     }
 
-    /// <summary>
-    /// Point get. Returns false on miss / tombstone / empty.
-    /// </summary>
     public bool TryGet(ReadOnlySpan<byte> recordId, ushort fieldId, out ReadOnlySpan<byte> value)
     {
         value = default;
-        if (recordId.Length != 16) return false;
-        if (IsEmpty) return false;
+        if (recordId.Length != 16 || IsEmpty) return false;
 
         var file = _file.Span;
         int clusterIdx = FindCluster(file, recordId);
@@ -56,24 +52,86 @@ public readonly struct RunReader
         if (n == 0) return -1;
 
         ulong slotOff = RunHeader.ReadSlotOff(file);
-        ulong dataOff = RunHeader.ReadDataOff(file);
         uint shortKey = Uuid7.ShortKey(recordId);
 
-        // Linear scan for correctness (PGM window optimization later).
-        // Spec: slot is prefilter; full RecordId in cluster header is source of truth.
-        for (int i = 0; i < (int)n; i++)
+        // PGM window when available, else full scan
+        int lo = 0, hi = (int)n - 1;
+        uint segs = RunHeader.ReadPgmSegments(file);
+        if (segs > 0)
+        {
+            ulong k = Uuid7.ProjectK(recordId);
+            var (wLo, wHi) = PgmWindow(file, k, (int)n);
+            lo = wLo;
+            hi = wHi;
+        }
+
+        for (int i = lo; i <= hi; i++)
         {
             int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
-            // ShortKey prefilter
             uint sk = BinaryPrimitives.ReadUInt32BigEndian(file.Slice(slotPos + 8, 4));
             if (sk != shortKey) continue;
 
             ulong off = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
-            var clusterRec = file.Slice((int)off, 16);
-            if (ByteUtil.Equals16(clusterRec, recordId))
+            if (ByteUtil.Equals16(file.Slice((int)off, 16), recordId))
                 return i;
         }
+
+        // Fallback full scan if PGM miss (spec [A9-PGM-TRUTH])
+        if (segs > 0)
+        {
+            for (int i = 0; i < (int)n; i++)
+            {
+                if (i >= lo && i <= hi) continue;
+                int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
+                uint sk = BinaryPrimitives.ReadUInt32BigEndian(file.Slice(slotPos + 8, 4));
+                if (sk != shortKey) continue;
+                ulong off = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
+                if (ByteUtil.Equals16(file.Slice((int)off, 16), recordId))
+                    return i;
+            }
+        }
         return -1;
+    }
+
+    private static (int lo, int hi) PgmWindow(ReadOnlySpan<byte> file, ulong k, int n)
+    {
+        uint segs = RunHeader.ReadPgmSegments(file);
+        uint defaultEps = RunHeader.ReadPgmEpsilon(file);
+        ulong pgmOff = RunHeader.ReadPgmOff(file);
+
+        // Find segment: last with StartKey <= k, or first
+        int segIdx = 0;
+        for (int s = 0; s < (int)segs; s++)
+        {
+            ulong startKey = BinaryPrimitives.ReadUInt64LittleEndian(
+                file.Slice((int)pgmOff + s * RunConstants.PgmSegmentSize, 8));
+            if (startKey <= k) segIdx = s;
+            else break;
+        }
+
+        int spos = (int)pgmOff + segIdx * RunConstants.PgmSegmentSize;
+        ulong segStartKey = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(spos, 8));
+        uint startIdx = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(spos + 8, 4));
+        ushort segEps = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(spos + 12, 2));
+        ulong num = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(spos + 16, 8));
+        ulong den = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(spos + 24, 8));
+        if (den == 0) den = 1;
+
+        ulong pred;
+        if (k <= segStartKey)
+            pred = startIdx;
+        else
+        {
+            UInt128 p = (UInt128)(k - segStartKey) * num / den;
+            pred = startIdx + (ulong)p;
+        }
+
+        uint eps = segEps != 0 ? segEps : defaultEps;
+        long lo = (long)pred - (long)eps;
+        long hi = (long)pred + (long)eps;
+        if (lo < 0) lo = 0;
+        if (hi >= n) hi = n - 1;
+        return ((int)lo, (int)hi);
     }
 
     private static bool TryGetFromCluster(
@@ -82,12 +140,9 @@ public readonly struct RunReader
         value = default;
         var ch = file.Slice(clusterOff);
         ushort numFields = BinaryPrimitives.ReadUInt16LittleEndian(ch.Slice(16));
-        // flags at 18
         int descBase = clusterOff + RunConstants.ClusterHeaderSize;
 
-        // Binary search FieldDesc by FieldId
-        int lo = 0, hi = numFields - 1;
-        int found = -1;
+        int lo = 0, hi = numFields - 1, found = -1;
         while (lo <= hi)
         {
             int mid = lo + ((hi - lo) >> 1);
@@ -106,12 +161,25 @@ public readonly struct RunReader
         if ((flags & (byte)FieldDescFlags.Tombstone) != 0)
             return false;
 
+        ushort payloadOrRef = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc + 6, 2));
+
         if (valLen == RunConstants.ExternalValLen)
-            return false; // external not yet
+        {
+            // Offset = ValueRef index
+            ulong valuesOff = RunHeader.ReadValuesOff(file);
+            int refPos = (int)valuesOff + payloadOrRef * RunConstants.ValueRefSize;
+            ulong dataOff = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(refPos, 8));
+            uint length = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(refPos + 8, 4));
+            uint crc = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(refPos + 12, 4));
+            if (length > RunConstants.MaxBlobLen) return false;
+            value = file.Slice((int)dataOff, (int)length);
+            // Optional CRC check on first read
+            if (Hashes.Crc32C(value) != crc)
+                return false;
+            return true;
+        }
 
-        ushort payloadOffset = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc + 6, 2));
-
-        // Count overrides to find payload base
+        // inline
         int overrideCount = 0;
         for (int i = 0; i < numFields; i++)
         {
@@ -121,8 +189,7 @@ public readonly struct RunReader
         }
         int payloadBase = descBase + numFields * RunConstants.FieldDescSize
                           + overrideCount * RunConstants.FieldHlcOverrideSize;
-
-        value = file.Slice(payloadBase + payloadOffset, valLen);
+        value = file.Slice(payloadBase + payloadOrRef, valLen);
         return true;
     }
 }
