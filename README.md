@@ -16,32 +16,26 @@ Implements [FLD KERNEL SPECIFICATION v1.5.8-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.8.m
 
 | Module | Status |
 |--------|--------|
-| `Fld1.Core` | Uuid7, HLC, ByteUtil (RecordId BE + Author=NodeId LE limbs), Hashes, Ids |
-| `Fld1.Run` | Full STATE run: empty/non-empty, inline+external, multi-seg PGM, Get, Verify |
-| `Fld1.Wal` | Micro-WAL v2: header, envelope, GROUP_COMMIT, writer, recovery |
-| `Fld1.Manifest` | Binary manifest, atomic swap, RunEntry, QUERY_COMMIT_RESULT |
-| `Fld1.Engine` / `Fld1.Client` | Planned (v1.5 Shared Engine) |
+| `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes, Ids |
+| `Fld1.Run` | STATE run builder/reader/verify (+ ArrayPool digest) |
+| `Fld1.Wal` | Micro-WAL v2 |
+| `Fld1.Manifest` | Binary manifest + atomic store |
+| `Fld1.Engine` | Single-process DB: overlay, WAL commit, checkpoint→run, get |
 
-## Spec
+## Engine (current)
 
-[`docs/FLD-KERNEL-SPEC-v1.5.8.md`](docs/FLD-KERNEL-SPEC-v1.5.8.md) — PART XI: compat notes for BinSync.Core 2.6.5.
+```csharp
+using var db = FldDatabase.Open("/path/to/db", namespaceId: 0);
+db.Put(recordId, fieldId, value);
+db.Commit();       // durable WAL group commit
+db.Checkpoint();   // seal overlay → immutable .fld1 + manifest
+db.TryGet(recordId, fieldId, out var span);
+```
+
+Optimizations in this path: span get, run byte[] cache, LWW overlay dictionary keyed by value-type `MemFieldKey`, pooled BLAKE3 input in RunBuilder.
 
 ## Build
 
 ```bash
-dotnet restore
-dotnet build -c Release
-dotnet test -c Release
-```
-
-## Layout
-
-```
-docs/                  FLD kernel specification
-src/Fld1.Core/         primitives
-src/Fld1.Run/          FLD1 run format
-src/Fld1.Wal/          Micro-WAL v2
-src/Fld1.Manifest/     binary manifest + atomic store
-tests/                 xUnit
-packages/              local nupkgs (BinSync.Core)
+dotnet restore && dotnet build -c Release && dotnet test -c Release
 ```
