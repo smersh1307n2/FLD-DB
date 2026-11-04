@@ -1,18 +1,15 @@
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
-using Fld1.Core.Util;
 
 namespace Fld1.Run.Format;
 
 /// <summary>
 /// FLD1 run header — 256 bytes, 4 cache lines. Spec §1.1.
-/// All multi-byte integers little-endian except magic and raw id fields.
 /// </summary>
 public static class RunHeader
 {
     public const int Size = RunConstants.HeaderSize;
 
-    // Offsets
     public const int OffMagic = 0x00;
     public const int OffBinaryVersion = 0x04;
     public const int OffFlags = 0x06;
@@ -43,7 +40,6 @@ public static class RunHeader
     public static bool CheckMagic(ReadOnlySpan<byte> header)
     {
         if (header.Length < 4) return false;
-        // [A1-MAGIC] memcmp, never ReadUInt32LE == const
         return header[0] == (byte)'F'
             && header[1] == (byte)'L'
             && header[2] == (byte)'D'
@@ -52,58 +48,103 @@ public static class RunHeader
 
     public static void WriteEmpty(Span<byte> header, uint namespaceId, ReadOnlySpan<byte> rootDigest32)
     {
+        WriteCore(
+            header, namespaceId, flags: 0,
+            numClusters: 0, numFields: 0, internCount: 0,
+            pgmSegments: 0, pgmEpsilon: 0,
+            internOff: Size, pgmOff: Size, slotOff: Size, dataOff: Size,
+            valuesOff: Size, valuesLen: 0, footerOff: Size,
+            numExternal: 0, aliveFields: 0, contributorCount: 0, ghostCount: 0,
+            rootDigest32);
+    }
+
+    public static void WriteCore(
+        Span<byte> header,
+        uint namespaceId,
+        ushort flags,
+        uint numClusters,
+        uint numFields,
+        uint internCount,
+        uint pgmSegments,
+        uint pgmEpsilon,
+        ulong internOff,
+        ulong pgmOff,
+        ulong slotOff,
+        ulong dataOff,
+        ulong valuesOff,
+        ulong valuesLen,
+        ulong footerOff,
+        uint numExternal,
+        uint aliveFields,
+        uint contributorCount,
+        uint ghostCount,
+        ReadOnlySpan<byte> rootDigest32,
+        ReadOnlySpan<byte> summaryXor = default,
+        ReadOnlySpan<byte> summarySum = default)
+    {
         if (header.Length < Size) throw new ArgumentException("header buffer too small");
         if (rootDigest32.Length < 32) throw new ArgumentException("rootDigest must be 32 bytes");
         header.Clear();
 
-        // magic
         RunConstants.Magic.CopyTo(header);
         BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(OffBinaryVersion), RunConstants.BinaryVersion);
-        // flags = 0 (no HAS_VALUES)
-        BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(OffFlags), 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(OffFlags), flags);
         BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffNamespaceId), namespaceId);
-        // counts zero
-        // internOff = 256
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffInternOff), Size);
-        // all section offs = 256 for empty (no sections)
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffPgmOff), Size);
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffSlotOff), Size);
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffDataOff), Size);
-        // valuesOff == footerOff when HAS_VALUES=0
-        const ulong footerOff = Size; // 256
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffValuesOff), footerOff);
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffValuesLen), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffNumClusters), numClusters);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffNumFields), numFields);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffInternCount), internCount);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffPgmSegments), pgmSegments);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffPgmEpsilon), pgmEpsilon);
+        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffInternOff), internOff);
+        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffPgmOff), pgmOff);
+        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffSlotOff), slotOff);
+        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffDataOff), dataOff);
+        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffValuesOff), valuesOff);
+        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffValuesLen), valuesLen);
         BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffFooterOff), footerOff);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffNumExternalValues), numExternal);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffAliveFields), aliveFields);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffContributorCount), contributorCount);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffGhostCount), ghostCount);
+        if (summaryXor.Length >= 16) summaryXor.Slice(0, 16).CopyTo(header.Slice(OffSummaryXor, 16));
+        if (summarySum.Length >= 16) summarySum.Slice(0, 16).CopyTo(header.Slice(OffSummarySum, 16));
         rootDigest32.Slice(0, 32).CopyTo(header.Slice(OffRootDigest, 32));
     }
 
     public static ushort ReadBinaryVersion(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffBinaryVersion));
-
     public static RunFlags ReadFlags(ReadOnlySpan<byte> h)
         => (RunFlags)BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffFlags));
-
     public static uint ReadNamespaceId(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffNamespaceId));
-
     public static uint ReadNumClusters(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffNumClusters));
-
     public static uint ReadNumFields(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffNumFields));
-
+    public static uint ReadInternCount(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffInternCount));
+    public static uint ReadPgmSegments(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffPgmSegments));
+    public static uint ReadPgmEpsilon(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffPgmEpsilon));
+    public static ulong ReadInternOff(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffInternOff));
+    public static ulong ReadPgmOff(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffPgmOff));
+    public static ulong ReadSlotOff(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffSlotOff));
+    public static ulong ReadDataOff(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffDataOff));
     public static ulong ReadFooterOff(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffFooterOff));
-
     public static ulong ReadValuesOff(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffValuesOff));
-
     public static ulong ReadValuesLen(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffValuesLen));
-
+    public static uint ReadAliveFields(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffAliveFields));
     public static ReadOnlySpan<byte> RootDigest(ReadOnlySpan<byte> h)
         => h.Slice(OffRootDigest, 32);
-
     public static ReadOnlySpan<byte> ReservedPad(ReadOnlySpan<byte> h)
         => h.Slice(OffReservedPad, ReservedPadLen);
 }
