@@ -10,15 +10,15 @@ Implements [FLD KERNEL SPECIFICATION v1.5.8-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.8.m
 
 | Module | Status |
 |--------|--------|
-| `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes, Ids — tests green |
-| `Fld1.Run` | Empty run (264B), Header, Verify, Reader — tests green |
-| `Fld1.Wal` | Planned |
+| `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes, Ids |
+| `Fld1.Run` | Full STATE run: empty/non-empty, inline+external, multi-seg PGM, Get, Verify |
+| `Fld1.Wal` | Micro-WAL v2: header, envelope, GROUP_COMMIT codec, writer, recovery |
 | `Fld1.Manifest` | Planned |
 | `Fld1.Engine` / `Fld1.Client` | Planned (v1.5 Shared Engine) |
 
 ## Spec
 
-Normative draft: [`docs/FLD-KERNEL-SPEC-v1.5.8.md`](docs/FLD-KERNEL-SPEC-v1.5.8.md)
+[`docs/FLD-KERNEL-SPEC-v1.5.8.md`](docs/FLD-KERNEL-SPEC-v1.5.8.md)
 
 ## Build
 
@@ -32,13 +32,10 @@ dotnet test -c Release
 
 ```
 docs/                  FLD kernel specification
-src/Fld1.Core/         primitives (Uuid7, HLC, ByteUtil, Canon, Hashes)
+src/Fld1.Core/         primitives
 src/Fld1.Run/          FLD1 run format, builder, reader, verify
+src/Fld1.Wal/          Micro-WAL v2
 tests/                 xUnit
 bench/                 BenchmarkDotNet
-packages/              local nupkgs (BinSync.Core)
+packages/              local nupkgs
 ```
-
-## License
-
-TBD (aligned with BIN-SYNC dual licensing intent).

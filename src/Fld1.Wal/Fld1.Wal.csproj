@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Fld1.Wal</RootNamespace>
+    <AssemblyName>Fld1.Wal</AssemblyName>
+    <Version>0.1.0-alpha</Version>
+    <Description>FLD Micro-WAL v2: envelope, GROUP_COMMIT, recovery, rotation.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Fld1.Core\Fld1.Core.csproj" />
+  </ItemGroup>
+</Project>
