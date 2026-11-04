@@ -26,7 +26,7 @@ public sealed class FldDatabase : IDisposable
     private readonly MemOverlay _overlay = new();
     private readonly AtomicManifestStore _manifestStore;
     private readonly object _commitLock = new();
-    private WalWriter _wal;
+    private WalManager _wal;
     private readonly List<(ulong runId, string path, byte[]? cached)> _runs = new();
     private ulong _nextRunId = 1;
     private ulong _clientRequestSeq;
@@ -35,6 +35,8 @@ public sealed class FldDatabase : IDisposable
     private ulong _pendingFlushedCommitSeq; // deferred manifest watermark
     private bool _manifestDirty;
     private readonly int _autoCheckpointOverlayFields;
+    private readonly bool _truncateSealedWal;
+    private readonly int _autoCompactRunCount;
     private bool _disposed;
 
     public string DbDir => _dbDir;
@@ -48,9 +50,11 @@ public sealed class FldDatabase : IDisposable
         string dbDir,
         uint namespaceId,
         byte[] localAuthor,
-        WalWriter wal,
+        WalManager wal,
         AtomicManifestStore manifestStore,
-        int autoCheckpointOverlayFields = 0)
+        int autoCheckpointOverlayFields = 0,
+        bool truncateSealedWal = true,
+        int autoCompactRunCount = 0)
     {
         _dbDir = dbDir;
         _namespaceId = namespaceId;
@@ -59,6 +63,8 @@ public sealed class FldDatabase : IDisposable
         _wal = wal;
         _manifestStore = manifestStore;
         _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
+        _truncateSealedWal = truncateSealedWal;
+        _autoCompactRunCount = autoCompactRunCount;
         Uuid7.NewUuid7(_clientInstanceId);
     }
 
@@ -92,42 +98,17 @@ public sealed class FldDatabase : IDisposable
                 .Append(namespaceId).Distinct().OrderBy(x => x).ToList()));
         }
 
-        string walPath = Path.Combine(dbDir, "wal", $"ns_{namespaceId}.0.log");
-        WalWriter wal;
-        WalRecoveryResult recovered;
-        if (!File.Exists(walPath))
-        {
-            wal = WalWriter.Create(walPath, namespaceId, firstCommitSeq: 1);
-            recovered = new WalRecoveryResult
-            {
-                Status = WalRecoveryStatus.Ok,
-                Records = [],
-                ValidEndOffset = WalHeader.Size
-            };
-        }
-        else
-        {
-            recovered = WalRecovery.Recover(walPath);
-            if (recovered.Status is WalRecoveryStatus.CorruptHeader or WalRecoveryStatus.CorruptMiddle
-                or WalRecoveryStatus.UnknownKind or WalRecoveryStatus.OrderViolation)
-                throw new InvalidDataException($"WAL recovery failed: {recovered.Status} {recovered.Detail}");
+        string walDir = Path.Combine(dbDir, "wal");
+        var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
 
-            if (recovered.Status is WalRecoveryStatus.TruncatedTorn
-                or WalRecoveryStatus.CorruptTailAmbiguous)
-            {
-                using var fs = new FileStream(walPath, FileMode.Open, FileAccess.Write, FileShare.Read);
-                fs.SetLength(recovered.ValidEndOffset);
-                fs.Flush(flushToDisk: true);
-            }
-
-            ulong nextSeq = (recovered.LastCommitSeq ?? 0) + 1;
-            if (nextSeq == 0) nextSeq = 1;
-            wal = WalWriter.OpenForAppend(walPath, namespaceId, (ulong)recovered.ValidEndOffset, nextSeq);
-        }
-
-        var db = new FldDatabase(dbDir, namespaceId, author, wal, manifestStore, options.AutoCheckpointOverlayFields);
+        var db = new FldDatabase(
+            dbDir, namespaceId, author, wal, manifestStore,
+            options.AutoCheckpointOverlayFields,
+            options.TruncateSealedWal,
+            options.AutoCompactRunCount);
         db.LoadRunsFromManifest(manifest);
-        db.ReplayWalIntoOverlay(recovered.Records);
+        db.GcOrphanRuns();
+        db.ReplayWalIntoOverlay(walRecords);
         return db;
     }
 
@@ -387,6 +368,10 @@ public sealed class FldDatabase : IDisposable
             _runs.Add((runId, path, runBytes));
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
+            if (_truncateSealedWal)
+                _wal.TruncateSealedSegments(seqHi);
+            if (_autoCompactRunCount > 0 && _runs.Count >= _autoCompactRunCount)
+                CompactUnderLock();
             return runId;
     }
 
@@ -476,7 +461,11 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
-        {
+            return CompactUnderLock();
+    }
+
+    private ulong CompactUnderLock()
+    {
             // Collect all recordIds
             var idSet = new HashSet<(ulong, ulong)>();
             var idList = new List<byte[]>();
@@ -574,7 +563,23 @@ public sealed class FldDatabase : IDisposable
             {
                 try { if (op != path) File.Delete(op); } catch { /* retain on failure */ }
             }
+            if (_truncateSealedWal)
+                _wal.TruncateSealedSegments(seqHi);
             return runId;
+    }
+
+    /// <summary>Remove run files on disk not referenced by in-memory run list.</summary>
+    private void GcOrphanRuns()
+    {
+        string runsDir = Path.Combine(_dbDir, "runs");
+        if (!Directory.Exists(runsDir)) return;
+        var live = new HashSet<string>(_runs.Select(r => Path.GetFullPath(r.path)), StringComparer.Ordinal);
+        foreach (var f in Directory.EnumerateFiles(runsDir, "*.fld1"))
+        {
+            if (!live.Contains(Path.GetFullPath(f)))
+            {
+                try { File.Delete(f); } catch { /* ignore */ }
+            }
         }
     }
 
@@ -716,6 +721,13 @@ public sealed class FldDatabase : IDisposable
                 _runs[index] = (runId, path, bytes);
             return _runs[index].cached!;
         }
+    }
+
+    public void RotateWal()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+            _wal.Rotate();
     }
 
     public void Dispose()
