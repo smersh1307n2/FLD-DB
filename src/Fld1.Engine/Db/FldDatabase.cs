@@ -108,17 +108,29 @@ public sealed class FldDatabase : IDisposable
 
         string walDir = Path.Combine(dbDir, "wal");
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
-        var outbox = OutboxLog.Open(Path.Combine(dbDir, "outbox"), namespaceId);
+        OutboxLog? outbox = null;
+        try
+        {
+            outbox = OutboxLog.Open(Path.Combine(dbDir, "outbox"), namespaceId);
 
-        var db = new FldDatabase(
-            dbDir, namespaceId, author, wal, outbox, manifestStore,
-            options.AutoCheckpointOverlayFields,
-            options.TruncateSealedWal,
-            options.AutoCompactRunCount);
-        db.LoadRunsFromManifest(manifest);
-        db.GcOrphanRuns();
-        db.ReplayWalIntoOverlay(walRecords);
-        return db;
+            var db = new FldDatabase(
+                dbDir, namespaceId, author, wal, outbox, manifestStore,
+                options.AutoCheckpointOverlayFields,
+                options.TruncateSealedWal,
+                options.AutoCompactRunCount);
+
+            db.LoadRunsFromManifest(manifest);
+            db.GcOrphanRuns();
+            db.ReplayWalIntoOverlay(walRecords);
+            return db;
+        }
+        catch
+        {
+            // Open must not leak file handles when Manifest/Run/Outbox recovery fails.
+            try { outbox?.Dispose(); } catch { /* preserve original open error */ }
+            try { wal.Dispose(); } catch { /* preserve original open error */ }
+            throw;
+        }
     }
 
     private void LoadRunsFromManifest(ManifestDocument manifest)
