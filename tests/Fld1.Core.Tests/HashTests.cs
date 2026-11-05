@@ -23,6 +23,31 @@ public class HashTests
     }
 
     [Fact]
+    public void Crc32C_matches_castagnoli_check_value()
+    {
+        // CRC-32C/Castagnoli check("123456789") = 0xE3069283.
+        Assert.Equal(0xE3069283u, Hashes.Crc32C("123456789"u8));
+    }
+
+    [Fact]
+    public void Crc32C_two_spans_match_single_span()
+    {
+        Assert.Equal(
+            Hashes.Crc32C("123456789"u8),
+            Hashes.Crc32C("1234"u8, "56789"u8));
+    }
+
+    [Fact]
+    public void Legacy_ieee_crc_is_readable_but_not_used_for_new_writes()
+    {
+        // CRC-32/IEEE 802.3 check("123456789") = 0xCBF43926.
+        const uint legacy = 0xCBF43926;
+        Assert.Equal(legacy, Hashes.Crc32Ieee("123456789"u8));
+        Assert.True(Hashes.IsCrc32COrLegacy("123456789"u8, legacy));
+        Assert.Equal(0xE3069283u, Hashes.Crc32C("123456789"u8));
+    }
+
+    [Fact]
     public void Blake3_tagged_runstate()
     {
         Span<byte> dig = stackalloc byte[32];
