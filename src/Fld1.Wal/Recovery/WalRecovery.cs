@@ -144,8 +144,7 @@ public static class WalRecovery
             uint storedCrc = BinaryPrimitives.ReadUInt32LittleEndian(crcBuf);
 
             // Verify RecordCrc = CRC32C(Envelope[0..16) ‖ Payload) without a payload-sized copy.
-            uint computed = Hashes.Crc32C(env.Slice(0, 16), payload);
-            if (computed != storedCrc)
+            if (!Hashes.IsCrc32COrLegacy(env.Slice(0, 16), payload, storedCrc))
             {
                 bool isLast = pos + recordSize >= fileSize;
                 return Fail(
