@@ -28,6 +28,7 @@ public sealed class OutboxLog : IDisposable
     private readonly object _lock = new();
 
     private FileStream _fs;
+    private long _writeOffset;
     private HashSet<EntryKey> _entryKeys;
     private List<IndexPoint> _sparseIndex;
     private int _recordCount;
@@ -88,6 +89,7 @@ public sealed class OutboxLog : IDisposable
         _ackPath = ackPath;
         _statePath = statePath;
         _fs = fs;
+        _writeOffset = fs.Length;
         _nextSeq = nextSeq;
         _ackedThrough = ackedThrough;
         _maxCommitSeq = maxCommitSeq;
@@ -412,7 +414,7 @@ public sealed class OutboxLog : IDisposable
         Span<byte> crcBuffer = stackalloc byte[RecordCrcSize];
         BinaryPrimitives.WriteUInt32LittleEndian(crcBuffer, crc);
 
-        long recordOffset = _fs.Length;
+        long recordOffset = _writeOffset;
         try
         {
             _fs.Position = recordOffset;
@@ -423,6 +425,7 @@ public sealed class OutboxLog : IDisposable
             if ((_recordCount % SparseIndexStride) == 0)
                 _sparseIndex.Add(new IndexPoint(sequence, recordOffset));
 
+            _writeOffset = checked(recordOffset + FixedRecordSize + valueLength + RecordCrcSize);
             _nextSeq = checked(sequence + 1);
             _maxCommitSeq = Math.Max(_maxCommitSeq, entry.CommitSeq);
             _recordCount++;
@@ -468,7 +471,7 @@ public sealed class OutboxLog : IDisposable
     {
         ulong minimumExclusive = Math.Max(afterSeq, _ackedThrough);
         var result = new List<OutboxEntry>(Math.Min(limit, 64));
-        long fileLength = _fs.Length;
+        long fileLength = _writeOffset;
         long position = FindReadStartOffset(minimumExclusive);
         Span<byte> fixedPart = stackalloc byte[FixedRecordSize];
 
@@ -514,7 +517,6 @@ public sealed class OutboxLog : IDisposable
             position += recordLength;
         }
 
-        _fs.Seek(0, SeekOrigin.End);
         return result;
     }
 
@@ -726,6 +728,7 @@ public sealed class OutboxLog : IDisposable
                     _path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
                     bufferSize: 64 * 1024, FileOptions.None);
                 _fs.Seek(0, SeekOrigin.End);
+                _writeOffset = _fs.Position;
             }
             catch
             {
