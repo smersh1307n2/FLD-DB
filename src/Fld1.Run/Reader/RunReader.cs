@@ -361,6 +361,34 @@ public readonly struct RunReader
     }
 
     /// <summary>
+    /// Enumerate every stored FieldId for a record, including tombstone descriptors.
+    /// Used by compaction; user-visible scans continue to omit tombstones.
+    /// </summary>
+    public void ScanFieldIds(ReadOnlySpan<byte> recordId, Action<ushort> onFieldId)
+    {
+        ArgumentNullException.ThrowIfNull(onFieldId);
+        if (recordId.Length != 16 || IsEmpty) return;
+
+        var file = _file.Span;
+        int clusterIdx = FindCluster(file, recordId);
+        if (clusterIdx < 0) return;
+
+        ulong slotOff = RunHeader.ReadSlotOff(file);
+        int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
+        ulong dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
+        int clusterOff = checked((int)dataOffset);
+        ushort numFields = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(clusterOff + 16, 2));
+        int descBase = clusterOff + RunConstants.ClusterHeaderSize;
+
+        for (int i = 0; i < numFields; i++)
+        {
+            int desc = descBase + i * RunConstants.FieldDescSize;
+            ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc, 2));
+            onFieldId(fieldId);
+        }
+    }
+
+    /// <summary>
     /// Enumerate every cluster RecordId (16B copied into buffer via callback).
     /// </summary>
     public void ScanRecordIds(Action<ReadOnlySpan<byte>> onRecordId)
