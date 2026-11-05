@@ -62,6 +62,7 @@ public sealed class WalManager : IDisposable
         }
 
         ulong? expectedNextSeq = null;
+        Span<byte> segmentHeader = stackalloc byte[WalHeader.Size];
         long lastValidEnd = WalHeader.Size;
         string lastPath = SegmentPath(walDir, namespaceId, segs[^1]);
         int lastSeg = segs[^1];
@@ -81,19 +82,18 @@ public sealed class WalManager : IDisposable
                 if (headerStream.Length < WalHeader.Size)
                     throw new InvalidDataException($"WAL {path}: truncated header.");
 
-                Span<byte> header = stackalloc byte[WalHeader.Size];
-                headerStream.ReadExactly(header);
+                headerStream.ReadExactly(segmentHeader);
 
-                if (!WalHeader.CheckMagic(header)
-                    || !WalHeader.VerifyCrc(header)
-                    || WalHeader.ReadVersion(header) != WalConstants.WalVersion)
+                if (!WalHeader.CheckMagic(segmentHeader)
+                    || !WalHeader.VerifyCrc(segmentHeader)
+                    || WalHeader.ReadVersion(segmentHeader) != WalConstants.WalVersion)
                     throw new InvalidDataException($"WAL {path}: invalid header.");
-                if (WalHeader.ReadNamespaceId(header) != namespaceId)
+                if (WalHeader.ReadNamespaceId(segmentHeader) != namespaceId)
                     throw new InvalidDataException($"WAL {path}: namespace mismatch.");
-                if (WalHeader.ReadFlags(header) != 0)
+                if (WalHeader.ReadFlags(segmentHeader) != 0)
                     throw new InvalidDataException($"WAL {path}: reserved flags are non-zero.");
 
-                firstCommitSeq = WalHeader.ReadFirstCommitSeq(header);
+                firstCommitSeq = WalHeader.ReadFirstCommitSeq(segmentHeader);
                 if (firstCommitSeq == 0)
                     throw new InvalidDataException($"WAL {path}: FirstCommitSeq is zero.");
                 if (expectedNextSeq.HasValue && firstCommitSeq != expectedNextSeq.Value)
@@ -243,6 +243,7 @@ public sealed class WalManager : IDisposable
             EnsureUsable();
             var segments = ListSegments(_walDir, _namespaceId);
             int removed = 0;
+            Span<byte> segmentHeader = stackalloc byte[WalHeader.Size];
 
             // Only delete a contiguous sealed prefix. Leaving a hole between retained
             // segment numbers would make recovery order ambiguous.
@@ -259,9 +260,8 @@ public sealed class WalManager : IDisposable
                 ulong firstSeq;
                 using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 {
-                    Span<byte> header = stackalloc byte[WalHeader.Size];
-                    fs.ReadExactly(header);
-                    firstSeq = WalHeader.ReadFirstCommitSeq(header);
+                    fs.ReadExactly(segmentHeader);
+                    firstSeq = WalHeader.ReadFirstCommitSeq(segmentHeader);
                 }
 
                 if (firstSeq == 0)
