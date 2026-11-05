@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using Fld1.Engine.Db;
+using Fld1.Engine.Outbox;
 using Xunit;
 
 namespace Fld1.Engine.Tests;
@@ -124,6 +126,44 @@ public class OutboxTests : IDisposable
             Assert.Equal(expectedChangeId, rebuilt.ChangeId);
             Assert.Equal("recover-me"u8.ToArray(), rebuilt.Value);
         }
+    }
+
+    [Fact]
+    public void Sparse_index_reads_from_the_requested_cursor()
+    {
+        string outboxDir = Path.Combine(_dir, "direct-outbox");
+        using var outbox = OutboxLog.Open(outboxDir, namespaceId: 9);
+        var author = new byte[16];
+        author[0] = 0xA5;
+
+        for (uint i = 0; i < 256; i++)
+        {
+            var recordId = new byte[16];
+            BinaryPrimitives.WriteUInt32LittleEndian(recordId, i + 1);
+            var changeId = new byte[16];
+            BinaryPrimitives.WriteUInt32LittleEndian(changeId, i + 1);
+            outbox.Append(new OutboxEntry
+            {
+                OutboxSeq = 0,
+                CommitSeq = i + 1,
+                ChangeId = changeId,
+                RecordId = recordId,
+                FieldId = 1,
+                OpKind = 1,
+                AuthorNodeId = author,
+                Wall = i + 1,
+                Logical = 0,
+                KeyEpoch = 0,
+                Value = new byte[] { (byte)i }
+            });
+        }
+        outbox.Flush();
+
+        var batch = outbox.ReadBatch(afterSeq: 129, limit: 10);
+        Assert.Equal(10, batch.Count);
+        Assert.Equal(130ul, batch[0].OutboxSeq);
+        Assert.Equal(139ul, batch[^1].OutboxSeq);
+        Assert.Equal((byte)129, batch[0].Value[0]);
     }
 
     [Fact]
