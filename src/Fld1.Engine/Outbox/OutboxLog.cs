@@ -187,7 +187,7 @@ public sealed class OutboxLog : IDisposable
             throw new InvalidDataException("Outbox ACK file has an invalid length.");
 
         uint stored = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4));
-        if (Hashes.Crc32C(bytes.AsSpan(0, 8)) != stored)
+        if (!Hashes.IsCrc32COrLegacy(bytes.AsSpan(0, 8), stored))
             throw new InvalidDataException("Outbox ACK CRC mismatch.");
 
         return BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(0, 8));
@@ -206,7 +206,7 @@ public sealed class OutboxLog : IDisposable
             throw new InvalidDataException("Outbox state file version/reserved bytes are invalid.");
 
         uint stored = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(16, 4));
-        if (Hashes.Crc32C(bytes.AsSpan(0, 16)) != stored)
+        if (!Hashes.IsCrc32COrLegacy(bytes.AsSpan(0, 16), stored))
             throw new InvalidDataException("Outbox state CRC mismatch.");
 
         return BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8, 8));
@@ -287,8 +287,8 @@ public sealed class OutboxLog : IDisposable
     {
         uint stored = BinaryPrimitives.ReadUInt32LittleEndian(
             record.Slice(record.Length - RecordCrcSize, RecordCrcSize));
-        uint computed = Hashes.Crc32C(record.Slice(0, record.Length - RecordCrcSize));
-        if (stored != computed)
+        if (!Hashes.IsCrc32COrLegacy(
+                record.Slice(0, record.Length - RecordCrcSize), stored))
             throw new InvalidDataException($"Outbox CRC mismatch at offset {offset}.");
     }
 
