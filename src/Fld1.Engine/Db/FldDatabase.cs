@@ -1,4 +1,5 @@
 using Fld1.Core.Hlc;
+using Fld1.Core.Hash;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Storage;
 using Fld1.Engine.Outbox;
@@ -42,6 +43,7 @@ public sealed class FldDatabase : IDisposable
     private readonly bool _truncateSealedWal;
     private readonly int _autoCompactRunCount;
     private bool _disposed;
+    private bool _faulted;
 
     public string DbDir => _dbDir;
     public uint NamespaceId => _namespaceId;
@@ -122,45 +124,125 @@ public sealed class FldDatabase : IDisposable
     private void LoadRunsFromManifest(ManifestDocument manifest)
     {
         ulong sealedSeq = 0;
+        foreach (var entry in manifest.Runs)
+        {
+            if (entry.RunId >= _nextRunId)
+                _nextRunId = checked(entry.RunId + 1);
+        }
+
         foreach (var re in manifest.Runs.Where(r => r.Ns == _namespaceId).OrderBy(r => r.RunId))
         {
             var path = Path.Combine(_dbDir, "runs", $"{re.RunId}.fld1");
-            if (File.Exists(path))
-            {
-                _runs.Add((re.RunId, path, null));
-                if (re.RunId >= _nextRunId) _nextRunId = re.RunId + 1;
-                if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
-            }
+            if (!File.Exists(path))
+                throw new InvalidDataException(
+                    $"Manifest references missing Run {re.RunId} for namespace {_namespaceId}.");
+
+            _runs.Add((re.RunId, path, null));
+            if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
         }
         _lastSealedCommitSeq = sealedSeq;
     }
 
-    /// <summary>Apply durable WAL mutations with CommitSeq &gt; last sealed run into overlay.</summary>
+    /// <summary>
+    /// Recover the storage overlay and idempotently finish Outbox materialization.
+    /// The Outbox watermark is independent of Run sealing and prevents ACKed entries
+    /// removed by CompactOutbox from being resurrected during WAL replay.
+    /// </summary>
     private void ReplayWalIntoOverlay(List<WalRecoveredRecord> records)
     {
-        foreach (var rec in records)
+        bool outboxChanged = false;
+        ulong materializedThrough = _outbox.MaterializedThroughCommitSeq;
+
+        foreach (var record in records)
         {
-            if (rec.CommitSeq <= _lastSealedCommitSeq) continue;
-            if (rec.Kind != WalConstants.KindGroupCommit) continue;
-            var payload = GroupCommitCodec.Decode(rec.Payload);
-            foreach (var mut in payload.Mutations)
+            if (record.Kind != WalConstants.KindGroupCommit)
+                continue;
+
+            var payload = GroupCommitCodec.Decode(record.Payload);
+            foreach (var mutation in payload.Mutations)
             {
-                if (mut.Ns != (ushort)_namespaceId && mut.Ns != _namespaceId) continue;
-                foreach (var f in mut.Fields)
+                if (mutation.Ns != _namespaceId)
+                    continue;
+
+                foreach (var field in mutation.Fields)
                 {
-                    var key = new MemFieldKey(f.RecordId, f.FieldId);
-                    _overlay.Put(key, new MemFieldValue
+                    byte[] changeId = GetDurableChangeId(_namespaceId, record.CommitSeq, field);
+                    if (record.CommitSeq > materializedThrough)
                     {
-                        Value = f.Value,
-                        Wall = f.Wall,
-                        Logical = f.Logical,
-                        AuthorNodeId = f.AuthorNodeId,
-                        KeyEpoch = f.KeyEpoch,
-                        IsTombstone = f.OpKind == 2
+                        outboxChanged |= _outbox.AppendIfMissing(new OutboxEntry
+                        {
+                            OutboxSeq = 0,
+                            CommitSeq = record.CommitSeq,
+                            ChangeId = changeId,
+                            RecordId = field.RecordId,
+                            FieldId = field.FieldId,
+                            OpKind = field.OpKind,
+                            AuthorNodeId = field.AuthorNodeId,
+                            Wall = field.Wall,
+                            Logical = field.Logical,
+                            KeyEpoch = field.KeyEpoch,
+                            Value = field.OpKind == 2 ? Array.Empty<byte>() : field.Value
+                        });
+                    }
+
+                    if (record.CommitSeq <= _lastSealedCommitSeq)
+                        continue;
+
+                    _overlay.Put(new MemFieldKey(field.RecordId, field.FieldId), new MemFieldValue
+                    {
+                        Value = field.OpKind == 2 ? Array.Empty<byte>() : field.Value,
+                        Wall = field.Wall,
+                        Logical = field.Logical,
+                        AuthorNodeId = field.AuthorNodeId,
+                        KeyEpoch = field.KeyEpoch,
+                        IsTombstone = field.OpKind == 2,
+                        ChangeId = changeId
                     });
+                    _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
+                    _manifestDirty = true;
                 }
             }
         }
+
+        if (outboxChanged)
+            _outbox.Flush();
+    }
+
+    private static byte[] GetDurableChangeId(uint namespaceId, ulong commitSeq, WalFieldMutation field)
+    {
+        if (field.ChangeId is { Length: 16 })
+        {
+            bool allZero = true;
+            for (int i = 0; i < 16; i++)
+                allZero &= field.ChangeId[i] == 0;
+            if (!allZero)
+                return field.ChangeId;
+        }
+
+        // Legacy WAL body v1 did not carry ChangeId. Derive a deterministic identity
+        // from the stable WAL field mutation so every replay produces the same ID.
+        Span<byte> input = stackalloc byte[4 + 8 + 16 + 2 + 1 + 2 + 8 + 4 + 16];
+        int offset = 0;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(input.Slice(offset, 4), namespaceId); offset += 4;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(input.Slice(offset, 8), commitSeq); offset += 8;
+        field.RecordId.CopyTo(input.Slice(offset, 16)); offset += 16;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(input.Slice(offset, 2), field.FieldId); offset += 2;
+        input[offset++] = field.OpKind;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(input.Slice(offset, 2), field.KeyEpoch); offset += 2;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(input.Slice(offset, 8), field.Wall); offset += 8;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(input.Slice(offset, 4), field.Logical); offset += 4;
+        field.AuthorNodeId.CopyTo(input.Slice(offset, 16));
+
+        Span<byte> digest = stackalloc byte[32];
+        Hashes.Blake3_256Tagged("FLD1/OUTBOX-CHANGE-ID/v1"u8, input, digest);
+        return digest.Slice(0, 16).ToArray();
+    }
+
+    private static byte[] NewChangeId()
+    {
+        var changeId = new byte[16];
+        Uuid7.NewUuid7(changeId);
+        return changeId;
     }
 
     public void Put(
@@ -171,47 +253,60 @@ public sealed class FldDatabase : IDisposable
         bool isTombstone = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        EnsureHealthy();
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
+
         var hlc = _clock.Now();
         var key = new MemFieldKey(recordId, fieldId);
-        // Single alloc for value; author is shared local ref (immutable 16B)
-        _overlay.Put(key, new MemFieldValue
+        var valueState = new MemFieldValue
         {
             Value = isTombstone ? Array.Empty<byte>() : value.ToArray(),
             Wall = hlc.Stamp.Wall,
             Logical = hlc.Stamp.Logical,
             AuthorNodeId = _localAuthor,
             KeyEpoch = keyEpoch,
-            IsTombstone = isTombstone
-        });
-        lock (_commitLock) { _dirty.Add(key); }
+            IsTombstone = isTombstone,
+            ChangeId = NewChangeId()
+        };
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _overlay.Put(key, valueState);
+            _dirty.Add(key);
+        }
     }
 
-    /// <summary>Put taking ownership of <paramref name="value"/> (no extra copy).</summary>
+    /// <summary>Put taking ownership of value without copying the payload.</summary>
     public void PutOwned(ReadOnlySpan<byte> recordId, ushort fieldId, byte[] value, ushort keyEpoch = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        EnsureHealthy();
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
         ArgumentNullException.ThrowIfNull(value);
+
         var hlc = _clock.Now();
-        var keyOwned = new MemFieldKey(recordId, fieldId);
-        _overlay.Put(keyOwned, new MemFieldValue
+        var key = new MemFieldKey(recordId, fieldId);
+        var valueState = new MemFieldValue
         {
             Value = value,
             Wall = hlc.Stamp.Wall,
             Logical = hlc.Stamp.Logical,
             AuthorNodeId = _localAuthor,
             KeyEpoch = keyEpoch,
-            IsTombstone = false
-        });
-        lock (_commitLock) { _dirty.Add(keyOwned); }
+            IsTombstone = false,
+            ChangeId = NewChangeId()
+        };
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _overlay.Put(key, valueState);
+            _dirty.Add(key);
+        }
     }
 
-    /// <summary>Tombstone field (soft delete). Visible as miss on TryGet.</summary>
-    public void Delete(ReadOnlySpan<byte> recordId, ushort fieldId, ushort keyEpoch = 0)
-        => Put(recordId, fieldId, ReadOnlySpan<byte>.Empty, keyEpoch, isTombstone: true);
-
-    /// <summary>Apply batch into overlay (not durable until Commit).</summary>
+    /// <summary>Apply batch into overlay (not durable until Commit).</summary>    /// <summary>Apply batch into overlay (not durable until Commit).</summary>
     public void Apply(FldWriteBatch batch)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
