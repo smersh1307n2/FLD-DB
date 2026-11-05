@@ -97,7 +97,8 @@ public sealed class OutboxLog : IDisposable
         _recordCount = recordCount;
     }
 
-    public static OutboxLog Open(string dir, uint namespaceId)
+    public static OutboxLog Open(
+        string dir, uint namespaceId, ulong checkpointedThroughCommitSeq = 0)
     {
         Directory.CreateDirectory(dir);
 
@@ -106,12 +107,14 @@ public sealed class OutboxLog : IDisposable
         string statePath = Path.Combine(dir, $"ns_{namespaceId}.obx.state");
 
         ulong ackedThrough = LoadAck(ackPath);
-        ulong materializedThrough = LoadMaterializedWatermark(statePath);
+        ulong storedMaterializedThrough = LoadMaterializedWatermark(statePath);
+        ulong materializedThrough = Math.Max(storedMaterializedThrough, checkpointedThroughCommitSeq);
 
         if (!File.Exists(path))
         {
-            if (File.Exists(ackPath) || File.Exists(statePath))
-                throw new InvalidDataException("Outbox log is missing but a durable sidecar exists.");
+            if (File.Exists(ackPath) || File.Exists(statePath) || checkpointedThroughCommitSeq != 0)
+                throw new InvalidDataException(
+                    "Outbox log is missing but ACK/checkpoint metadata proves that it previously existed.");
 
             var created = CreateNew(path);
             return new OutboxLog(
@@ -149,7 +152,7 @@ public sealed class OutboxLog : IDisposable
             if (headerNextSeq == 0)
                 throw new InvalidDataException("Outbox next sequence is zero.");
 
-            var scan = ScanAndRepairTornTail(fs);
+            var scan = ScanAndRepairTornTail(fs, materializedThrough);
             ulong scannedNextSeq = scan.LastSeq == 0 ? 1 : checked(scan.LastSeq + 1);
             ulong nextSeq = Math.Max(headerNextSeq, scannedNextSeq);
 
@@ -159,6 +162,9 @@ public sealed class OutboxLog : IDisposable
 
             if (scan.Truncated)
                 fs.Flush(flushToDisk: true);
+
+            if (materializedThrough > storedMaterializedThrough)
+                WriteMaterializedWatermark(statePath, materializedThrough);
 
             fs.Seek(0, SeekOrigin.End);
             return new OutboxLog(
@@ -232,7 +238,7 @@ public sealed class OutboxLog : IDisposable
         List<IndexPoint> SparseIndex,
         int RecordCount);
 
-    private static ScanResult ScanAndRepairTornTail(FileStream fs)
+    private static ScanResult ScanAndRepairTornTail(FileStream fs, ulong materializedThrough)
     {
         var keys = new HashSet<EntryKey>();
         var sparseIndex = new List<IndexPoint>();
@@ -288,10 +294,10 @@ public sealed class OutboxLog : IDisposable
                 ArrayPool<byte>.Shared.Return(rented);
             }
 
-            if (!keys.Add(EntryKey.From(fixedPart)))
-                throw new InvalidDataException($"Duplicate Outbox field mutation at offset {position}.");
-
             ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(8, 8));
+            if (commitSeq > materializedThrough && !keys.Add(EntryKey.From(fixedPart)))
+                throw new InvalidDataException($"Duplicate unmaterialized Outbox field mutation at offset {position}.");
+
             maxCommitSeq = Math.Max(maxCommitSeq, commitSeq);
 
             if ((recordCount % SparseIndexStride) == 0)
@@ -560,6 +566,26 @@ public sealed class OutboxLog : IDisposable
             KeyEpoch = keyEpoch,
             Value = value
         };
+    }
+
+    /// <summary>
+    /// Persist that Outbox entries through a WAL CommitSeq are durable before the
+    /// corresponding sealed WAL prefix is truncated.
+    /// </summary>
+    public void MarkMaterialized(ulong throughCommitSeq)
+    {
+        lock (_lock)
+        {
+            EnsureUsable();
+            if (throughCommitSeq <= _materializedThroughCommitSeq)
+                return;
+
+            _fs.Flush(flushToDisk: true);
+            WriteMaterializedWatermark(_statePath, throughCommitSeq);
+            _materializedThroughCommitSeq = throughCommitSeq;
+
+            _entryKeys.RemoveWhere(key => key.CommitSeq <= throughCommitSeq);
+        }
     }
 
     public void Acknowledge(ulong throughSeq)
