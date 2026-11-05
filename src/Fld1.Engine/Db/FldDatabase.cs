@@ -602,7 +602,10 @@ public sealed class FldDatabase : IDisposable
         if (recordId.Length != 16) return false;
 
         lock (_commitLock)
+        {
+            EnsureHealthy();
             return TryResolveUnlocked(recordId, fieldId, out resolved);
+        }
     }
 
     /// <summary>Mark record dead via lifecycle field 0x0000 = Dead.</summary>
@@ -857,6 +860,7 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
+            EnsureHealthy();
             if (!_manifestDirty) return;
             _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq));
             _manifestDirty = false;
@@ -875,6 +879,7 @@ public sealed class FldDatabase : IDisposable
         var result = new List<(ushort FieldId, byte[] Value)>();
         lock (_commitLock)
         {
+            EnsureHealthy();
             var fieldIds = new HashSet<ushort>();
             Span<byte> overlayRecordId = stackalloc byte[16];
 
@@ -914,6 +919,7 @@ public sealed class FldDatabase : IDisposable
         var result = new List<byte[]>();
         lock (_commitLock)
         {
+            EnsureHealthy();
             var ids = new HashSet<(ulong Lo, ulong Hi)>();
 
             foreach (var item in _overlay.Snapshot())
@@ -1049,11 +1055,15 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
+        {
+            EnsureHealthy();
             _wal.Rotate();
+        }
     }
 
     private void EnsureHealthy()
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         if (_faulted)
             throw new InvalidOperationException("Database requires reopen after a failed durable operation.");
     }
@@ -1093,9 +1103,9 @@ public sealed class FldDatabase : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
         lock (_commitLock)
         {
+            if (_disposed) return;
             if (_manifestDirty)
             {
                 try
