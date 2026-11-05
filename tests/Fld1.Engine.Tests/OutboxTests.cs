@@ -135,6 +135,10 @@ public class OutboxTests : IDisposable
         string outboxPath = Path.Combine(outboxDir, "ns_11.obx");
         var author = new byte[16];
         author[0] = 0xA1;
+        var changeId = new byte[16];
+        changeId[0] = 1;
+        var recordId = new byte[16];
+        recordId[0] = 2;
 
         using (var outbox = OutboxLog.Open(outboxDir, namespaceId: 11))
         {
@@ -142,8 +146,8 @@ public class OutboxTests : IDisposable
             {
                 OutboxSeq = 0,
                 CommitSeq = 1,
-                ChangeId = new byte[16] { 1 },
-                RecordId = new byte[16] { 2 },
+                ChangeId = changeId,
+                RecordId = recordId,
                 FieldId = 3,
                 OpKind = 1,
                 AuthorNodeId = author,
