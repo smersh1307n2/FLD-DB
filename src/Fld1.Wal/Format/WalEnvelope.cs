@@ -44,9 +44,8 @@ public static class WalEnvelope
     public static bool VerifyEnvelopeCrc(ReadOnlySpan<byte> e)
     {
         if (e.Length < Size) return false;
-        uint expected = Hashes.Crc32C(e.Slice(0, OffEnvelopeCrc));
         uint actual = BinaryPrimitives.ReadUInt32LittleEndian(e.Slice(OffEnvelopeCrc));
-        return expected == actual;
+        return Hashes.IsCrc32COrLegacy(e.Slice(0, OffEnvelopeCrc), actual);
     }
 
     /// <summary>RawRecordSize = 24 + Length; RecordSize = align8(Raw).</summary>
