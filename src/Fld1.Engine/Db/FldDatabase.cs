@@ -318,6 +318,10 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+    /// <summary>Tombstone one field. The delete is durable after Commit.</summary>
+    public void Delete(ReadOnlySpan<byte> recordId, ushort fieldId, ushort keyEpoch = 0)
+        => Put(recordId, fieldId, ReadOnlySpan<byte>.Empty, keyEpoch, isTombstone: true);
+
     /// <summary>Apply batch into overlay (not durable until Commit).</summary>
     public void Apply(FldWriteBatch batch)
     {
@@ -499,7 +503,6 @@ public sealed class FldDatabase : IDisposable
             byte[] runBytes = builder.Build();
             ulong runId = _nextRunId++;
             string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            string tmp = path + ".tmp";
             var builtReader = new RunReader(runBytes);
             if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
                 throw new InvalidDataException(
@@ -627,11 +630,11 @@ public sealed class FldDatabase : IDisposable
             recordIds.Add(recordId.ToArray());
         }
 
+        Span<byte> overlayRecordId = stackalloc byte[16];
         foreach (var item in _overlay.Snapshot())
         {
-            Span<byte> recordId = stackalloc byte[16];
-            item.Key.WriteRecordId(recordId);
-            AddRecord(recordId);
+            item.Key.WriteRecordId(overlayRecordId);
+            AddRecord(overlayRecordId);
             fieldsByRecord[(item.Key.RecLo, item.Key.RecHi)].Add(item.Key.FieldId);
         }
 
@@ -655,7 +658,7 @@ public sealed class FldDatabase : IDisposable
             for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
             {
                 var bytes = EnsureRunCached(runIndex);
-                new RunReader(bytes).ScanFieldIds(recordId, fieldIds.Add);
+                new RunReader(bytes).ScanFieldIds(recordId, fieldId => { fieldIds.Add(fieldId); });
             }
 
             foreach (ushort fieldId in fieldIds)
