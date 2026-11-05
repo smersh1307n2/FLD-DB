@@ -39,6 +39,44 @@ public class LwwAndCompactTests : IDisposable
     }
 
     [Fact]
+    public void Compact_preserves_tombstone_without_older_live_value()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        ulong deletedFieldWall;
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            // Field 77 has no earlier live value. Its only stored state is a tombstone.
+            db.Delete(recordId, 77);
+            db.Put(recordId, 1, "still-live"u8);
+            db.Commit();
+            db.Checkpoint();
+
+            Assert.True(db.TryResolve(recordId, 77, out var before));
+            Assert.True(before.Found);
+            Assert.True(before.IsTombstone);
+            deletedFieldWall = before.Wall;
+
+            db.Compact();
+
+            Assert.True(db.TryResolve(recordId, 77, out var after));
+            Assert.True(after.Found);
+            Assert.True(after.IsTombstone);
+            Assert.Equal(deletedFieldWall, after.Wall);
+            Assert.True(db.TryGetBytes(recordId, 1, out var live));
+            Assert.Equal("still-live"u8.ToArray(), live);
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            Assert.True(reopened.TryResolve(recordId, 77, out var afterRestart));
+            Assert.True(afterRestart.Found);
+            Assert.True(afterRestart.IsTombstone);
+            Assert.False(reopened.TryGetBytes(recordId, 77, out _));
+        }
+    }
+
+    [Fact]
     public void Lifecycle_delete_record()
     {
         using var db = FldDatabase.Open(_dir);
