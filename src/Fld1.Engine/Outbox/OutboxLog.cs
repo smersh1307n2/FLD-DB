@@ -414,7 +414,15 @@ public sealed class OutboxLog : IDisposable
         Span<byte> crcBuffer = stackalloc byte[RecordCrcSize];
         BinaryPrimitives.WriteUInt32LittleEndian(crcBuffer, crc);
 
+        // Exhaustion/offset overflow must be detected before touching the log.
+        // Otherwise the final record could be written successfully and only then fail
+        // while advancing the in-memory cursor, leaving a log that cannot be reopened.
+        if (sequence == ulong.MaxValue)
+            throw new InvalidOperationException("Outbox sequence space is exhausted.");
+
+        ulong nextSequence = sequence + 1;
         long recordOffset = _writeOffset;
+        long nextWriteOffset = checked(recordOffset + FixedRecordSize + (long)valueLength + RecordCrcSize);
         try
         {
             _fs.Position = recordOffset;
@@ -425,8 +433,8 @@ public sealed class OutboxLog : IDisposable
             if ((_recordCount % SparseIndexStride) == 0)
                 _sparseIndex.Add(new IndexPoint(sequence, recordOffset));
 
-            _writeOffset = checked(recordOffset + FixedRecordSize + valueLength + RecordCrcSize);
-            _nextSeq = checked(sequence + 1);
+            _writeOffset = nextWriteOffset;
+            _nextSeq = nextSequence;
             _maxCommitSeq = Math.Max(_maxCommitSeq, entry.CommitSeq);
             _recordCount++;
             return sequence;

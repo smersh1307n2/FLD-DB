@@ -207,6 +207,48 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Sequence_exhaustion_is_rejected_before_log_is_modified()
+    {
+        string outboxDir = Path.Combine(_dir, "sequence-exhaustion");
+        string outboxPath = Path.Combine(outboxDir, "ns_17.obx");
+        using (var outbox = OutboxLog.Open(outboxDir, namespaceId: 17))
+        {
+            var nextSeq = typeof(OutboxLog).GetField(
+                "_nextSeq",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            nextSeq.SetValue(outbox, ulong.MaxValue);
+
+            long originalLength = new FileInfo(outboxPath).Length;
+            var author = new byte[16];
+            var changeId = new byte[16];
+            changeId[0] = 1;
+            var recordId = new byte[16];
+            recordId[0] = 2;
+
+            Assert.Throws<InvalidOperationException>(() => outbox.Append(new OutboxEntry
+            {
+                OutboxSeq = 0,
+                CommitSeq = 1,
+                ChangeId = changeId,
+                RecordId = recordId,
+                FieldId = 1,
+                OpKind = 1,
+                AuthorNodeId = author,
+                Wall = 1,
+                Logical = 0,
+                KeyEpoch = 0,
+                Value = "value"u8.ToArray()
+            }));
+
+            Assert.Equal(originalLength, new FileInfo(outboxPath).Length);
+        }
+
+        // The failed append did not leave a terminal sequence record or torn tail.
+        using var reopened = OutboxLog.Open(outboxDir, namespaceId: 17);
+        Assert.Empty(reopened.ReadBatch(0, 10));
+    }
+
+    [Fact]
     public void Outbox_survives_reopen()
     {
         var rec = FldDatabase.NewRecordId();
