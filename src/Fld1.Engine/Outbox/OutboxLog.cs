@@ -160,8 +160,23 @@ public sealed class OutboxLog : IDisposable
                 throw new InvalidDataException(
                     $"Outbox ACK watermark {ackedThrough} exceeds last assigned sequence {nextSeq - 1}.");
 
-            if (scan.Truncated || materializedThrough > storedMaterializedThrough)
+            if (scan.Truncated)
+            {
+                // A materialized prefix may no longer exist in WAL. Never cut an Outbox
+                // tail in that state: the torn bytes may be the only copy of a sync event.
+                if (materializedThrough != 0)
+                    throw new InvalidDataException(
+                        "Outbox has an incomplete tail after WAL materialization; refusing destructive recovery.");
+
+                fs.SetLength(scan.ValidEndOffset);
                 fs.Flush(flushToDisk: true);
+            }
+            else if (materializedThrough > storedMaterializedThrough)
+            {
+                // Manifest checkpoint metadata is only promoted after all existing Outbox
+                // bytes are durable, before the watermark sidecar becomes authoritative.
+                fs.Flush(flushToDisk: true);
+            }
 
             if (materializedThrough > storedMaterializedThrough)
                 WriteMaterializedWatermark(statePath, materializedThrough);
@@ -236,7 +251,8 @@ public sealed class OutboxLog : IDisposable
         ulong MaxCommitSeq,
         bool Truncated,
         List<IndexPoint> SparseIndex,
-        int RecordCount);
+        int RecordCount,
+        long ValidEndOffset);
 
     private static ScanResult ScanAndRepairTornTail(FileStream fs, ulong materializedThrough)
     {
@@ -255,7 +271,6 @@ public sealed class OutboxLog : IDisposable
             long remaining = fileLength - position;
             if (remaining < FixedRecordSize + RecordCrcSize)
             {
-                fs.SetLength(position);
                 truncated = true;
                 break;
             }
@@ -271,7 +286,6 @@ public sealed class OutboxLog : IDisposable
             long recordLength = (long)FixedRecordSize + valueLength + RecordCrcSize;
             if (recordLength > remaining)
             {
-                fs.SetLength(position);
                 truncated = true;
                 break;
             }
@@ -308,7 +322,8 @@ public sealed class OutboxLog : IDisposable
             position += recordLength;
         }
 
-        return new ScanResult(keys, previousSeq, maxCommitSeq, truncated, sparseIndex, recordCount);
+        return new ScanResult(
+            keys, previousSeq, maxCommitSeq, truncated, sparseIndex, recordCount, position);
     }
 
     private static void ValidateFixedRecord(ReadOnlySpan<byte> fixedPart, long offset)
