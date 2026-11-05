@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using Fld1.Core.Hash;
 
@@ -18,6 +19,7 @@ public sealed class OutboxLog : IDisposable
     private const int RecordCrcSize = 4;
     private const int AckSize = 12;
     private const int StateSize = 20;
+    private const int SparseIndexStride = 64;
     private const uint MaxValueLength = 4 * 1024 * 1024;
 
     private readonly string _path;
@@ -27,6 +29,8 @@ public sealed class OutboxLog : IDisposable
 
     private FileStream _fs;
     private HashSet<EntryKey> _entryKeys;
+    private List<IndexPoint> _sparseIndex;
+    private int _recordCount;
     private ulong _nextSeq;
     private ulong _ackedThrough;
     private ulong _maxCommitSeq;
@@ -57,6 +61,8 @@ public sealed class OutboxLog : IDisposable
                 BinaryPrimitives.ReadUInt16LittleEndian(fixedPart.Slice(48, 2)));
     }
 
+    private readonly record struct IndexPoint(ulong Seq, long Offset);
+
     public ulong NextSeq { get { lock (_lock) return _nextSeq; } }
     public ulong AckedThrough { get { lock (_lock) return _ackedThrough; } }
     public ulong Watermark => AckedThrough;
@@ -74,7 +80,9 @@ public sealed class OutboxLog : IDisposable
         ulong ackedThrough,
         ulong maxCommitSeq,
         ulong materializedThroughCommitSeq,
-        HashSet<EntryKey> entryKeys)
+        HashSet<EntryKey> entryKeys,
+        List<IndexPoint> sparseIndex,
+        int recordCount)
     {
         _path = path;
         _ackPath = ackPath;
@@ -85,6 +93,8 @@ public sealed class OutboxLog : IDisposable
         _maxCommitSeq = maxCommitSeq;
         _materializedThroughCommitSeq = materializedThroughCommitSeq;
         _entryKeys = entryKeys;
+        _sparseIndex = sparseIndex;
+        _recordCount = recordCount;
     }
 
     public static OutboxLog Open(string dir, uint namespaceId)
@@ -110,7 +120,9 @@ public sealed class OutboxLog : IDisposable
                 ackedThrough: 0,
                 maxCommitSeq: 0,
                 materializedThroughCommitSeq: 0,
-                entryKeys: new HashSet<EntryKey>());
+                entryKeys: new HashSet<EntryKey>(),
+                sparseIndex: new List<IndexPoint>(),
+                recordCount: 0);
         }
 
         var fs = new FileStream(
@@ -152,7 +164,7 @@ public sealed class OutboxLog : IDisposable
             return new OutboxLog(
                 path, ackPath, statePath, fs, nextSeq, ackedThrough,
                 Math.Max(scan.MaxCommitSeq, materializedThrough),
-                materializedThrough, scan.EntryKeys);
+                materializedThrough, scan.EntryKeys, scan.SparseIndex, scan.RecordCount);
         }
         catch
         {
@@ -213,16 +225,23 @@ public sealed class OutboxLog : IDisposable
     }
 
     private readonly record struct ScanResult(
-        HashSet<EntryKey> EntryKeys, ulong LastSeq, ulong MaxCommitSeq, bool Truncated);
+        HashSet<EntryKey> EntryKeys,
+        ulong LastSeq,
+        ulong MaxCommitSeq,
+        bool Truncated,
+        List<IndexPoint> SparseIndex,
+        int RecordCount);
 
     private static ScanResult ScanAndRepairTornTail(FileStream fs)
     {
         var keys = new HashSet<EntryKey>();
+        var sparseIndex = new List<IndexPoint>();
         long position = HeaderSize;
         long fileLength = fs.Length;
         ulong previousSeq = 0;
         ulong maxCommitSeq = 0;
         bool truncated = false;
+        int recordCount = 0;
         Span<byte> fixedPart = stackalloc byte[FixedRecordSize];
 
         while (position < fileLength)
@@ -237,7 +256,6 @@ public sealed class OutboxLog : IDisposable
 
             fs.Position = position;
             fs.ReadExactly(fixedPart);
-
             uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(
                 fixedPart.Slice(FixedRecordSize - 4, 4));
             if (valueLength > MaxValueLength)
@@ -253,27 +271,38 @@ public sealed class OutboxLog : IDisposable
             }
 
             ValidateFixedRecord(fixedPart, position);
-
             ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
             if (seq == 0 || (previousSeq != 0 && seq != checked(previousSeq + 1)))
                 throw new InvalidDataException($"Outbox sequence discontinuity at offset {position}.");
 
             int length = checked((int)recordLength);
-            byte[] record = new byte[length];
-            fs.Position = position;
-            fs.ReadExactly(record);
-            VerifyRecordCrc(record, position);
+            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                fs.Position = position;
+                fs.ReadExactly(rented.AsSpan(0, length));
+                VerifyRecordCrc(rented.AsSpan(0, length), position);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
 
             if (!keys.Add(EntryKey.From(fixedPart)))
                 throw new InvalidDataException($"Duplicate Outbox field mutation at offset {position}.");
 
             ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(8, 8));
             maxCommitSeq = Math.Max(maxCommitSeq, commitSeq);
+
+            if ((recordCount % SparseIndexStride) == 0)
+                sparseIndex.Add(new IndexPoint(seq, position));
+
             previousSeq = seq;
+            recordCount++;
             position += recordLength;
         }
 
-        return new ScanResult(keys, previousSeq, maxCommitSeq, truncated);
+        return new ScanResult(keys, previousSeq, maxCommitSeq, truncated, sparseIndex, recordCount);
     }
 
     private static void ValidateFixedRecord(ReadOnlySpan<byte> fixedPart, long offset)
@@ -340,32 +369,42 @@ public sealed class OutboxLog : IDisposable
     {
         ulong sequence = _nextSeq;
         int valueLength = entry.Value.Length;
-        int recordLength = checked(FixedRecordSize + valueLength + RecordCrcSize);
-        byte[] record = new byte[recordLength];
+        Span<byte> fixedPart = stackalloc byte[FixedRecordSize];
+        fixedPart.Clear();
 
         int offset = 0;
-        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(offset, 8), sequence); offset += 8;
-        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(offset, 8), entry.CommitSeq); offset += 8;
-        entry.ChangeId.CopyTo(record.AsSpan(offset, 16)); offset += 16;
-        entry.RecordId.CopyTo(record.AsSpan(offset, 16)); offset += 16;
-        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(offset, 2), entry.FieldId); offset += 2;
-        record[offset++] = entry.OpKind;
-        record[offset++] = 0;
-        entry.AuthorNodeId.CopyTo(record.AsSpan(offset, 16)); offset += 16;
-        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(offset, 8), entry.Wall); offset += 8;
-        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(offset, 4), entry.Logical); offset += 4;
-        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(offset, 2), entry.KeyEpoch); offset += 2;
+        BinaryPrimitives.WriteUInt64LittleEndian(fixedPart.Slice(offset, 8), sequence); offset += 8;
+        BinaryPrimitives.WriteUInt64LittleEndian(fixedPart.Slice(offset, 8), entry.CommitSeq); offset += 8;
+        entry.ChangeId.CopyTo(fixedPart.Slice(offset, 16)); offset += 16;
+        entry.RecordId.CopyTo(fixedPart.Slice(offset, 16)); offset += 16;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixedPart.Slice(offset, 2), entry.FieldId); offset += 2;
+        fixedPart[offset++] = entry.OpKind;
+        fixedPart[offset++] = 0;
+        entry.AuthorNodeId.CopyTo(fixedPart.Slice(offset, 16)); offset += 16;
+        BinaryPrimitives.WriteUInt64LittleEndian(fixedPart.Slice(offset, 8), entry.Wall); offset += 8;
+        BinaryPrimitives.WriteUInt32LittleEndian(fixedPart.Slice(offset, 4), entry.Logical); offset += 4;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixedPart.Slice(offset, 2), entry.KeyEpoch); offset += 2;
         offset += 2;
-        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(offset, 4), (uint)valueLength); offset += 4;
-        entry.Value.CopyTo(record.AsSpan(offset, valueLength)); offset += valueLength;
-        BinaryPrimitives.WriteUInt32LittleEndian(
-            record.AsSpan(offset, RecordCrcSize), Hashes.Crc32C(record.AsSpan(0, offset)));
+        BinaryPrimitives.WriteUInt32LittleEndian(fixedPart.Slice(offset, 4), (uint)valueLength);
 
+        uint crc = Hashes.Crc32C(fixedPart, entry.Value);
+        Span<byte> crcBuffer = stackalloc byte[RecordCrcSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(crcBuffer, crc);
+
+        long recordOffset = _fs.Length;
         try
         {
-            _fs.Write(record);
+            _fs.Position = recordOffset;
+            _fs.Write(fixedPart);
+            _fs.Write(entry.Value.AsSpan());
+            _fs.Write(crcBuffer);
+
+            if ((_recordCount % SparseIndexStride) == 0)
+                _sparseIndex.Add(new IndexPoint(sequence, recordOffset));
+
             _nextSeq = checked(sequence + 1);
             _maxCommitSeq = Math.Max(_maxCommitSeq, entry.CommitSeq);
+            _recordCount++;
             return sequence;
         }
         catch
@@ -408,9 +447,8 @@ public sealed class OutboxLog : IDisposable
     {
         ulong minimumExclusive = Math.Max(afterSeq, _ackedThrough);
         var result = new List<OutboxEntry>(Math.Min(limit, 64));
-        long position = HeaderSize;
         long fileLength = _fs.Length;
-        ulong previousSeq = 0;
+        long position = FindReadStartOffset(minimumExclusive);
         Span<byte> fixedPart = stackalloc byte[FixedRecordSize];
 
         while (position < fileLength && result.Count < limit)
@@ -432,18 +470,26 @@ public sealed class OutboxLog : IDisposable
 
             ValidateFixedRecord(fixedPart, position);
             ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
-            if (seq == 0 || (previousSeq != 0 && seq != checked(previousSeq + 1)))
-                throw new InvalidDataException($"Outbox sequence discontinuity at offset {position}.");
+            if (seq == 0)
+                throw new InvalidDataException($"Outbox sequence zero at offset {position}.");
 
-            byte[] record = new byte[checked((int)recordLength)];
-            _fs.Position = position;
-            _fs.ReadExactly(record);
-            VerifyRecordCrc(record, position);
+            int length = checked((int)recordLength);
+            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                _fs.Position = position;
+                _fs.ReadExactly(rented.AsSpan(0, length));
+                ReadOnlySpan<byte> record = rented.AsSpan(0, length);
+                VerifyRecordCrc(record, position);
 
-            if (seq > minimumExclusive)
-                result.Add(DecodeEntry(record, valueLength));
+                if (seq > minimumExclusive)
+                    result.Add(DecodeEntry(record, valueLength));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
 
-            previousSeq = seq;
             position += recordLength;
         }
 
@@ -451,25 +497,54 @@ public sealed class OutboxLog : IDisposable
         return result;
     }
 
-    private static OutboxEntry DecodeEntry(byte[] record, uint valueLength)
+    private long FindReadStartOffset(ulong minimumExclusive)
+    {
+        if (_sparseIndex.Count == 0)
+            return HeaderSize;
+
+        int low = 0;
+        int high = _sparseIndex.Count - 1;
+        int candidate = -1;
+
+        while (low <= high)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (_sparseIndex[middle].Seq <= minimumExclusive)
+            {
+                candidate = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (candidate < 0)
+            candidate = 0;
+
+        return _sparseIndex[candidate].Offset;
+    }
+
+    private static OutboxEntry DecodeEntry(ReadOnlySpan<byte> record, uint valueLength)
     {
         int offset = 0;
-        ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(record.AsSpan(offset, 8)); offset += 8;
-        ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(record.AsSpan(offset, 8)); offset += 8;
-        byte[] changeId = record.AsSpan(offset, 16).ToArray(); offset += 16;
-        byte[] recordId = record.AsSpan(offset, 16).ToArray(); offset += 16;
-        ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(offset, 2)); offset += 2;
+        ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(offset, 8)); offset += 8;
+        ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(offset, 8)); offset += 8;
+        byte[] changeId = record.Slice(offset, 16).ToArray(); offset += 16;
+        byte[] recordId = record.Slice(offset, 16).ToArray(); offset += 16;
+        ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset, 2)); offset += 2;
         byte opKind = record[offset++];
         offset++;
-        byte[] author = record.AsSpan(offset, 16).ToArray(); offset += 16;
-        ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(record.AsSpan(offset, 8)); offset += 8;
-        uint logical = BinaryPrimitives.ReadUInt32LittleEndian(record.AsSpan(offset, 4)); offset += 4;
-        ushort keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(offset, 2)); offset += 2;
+        byte[] author = record.Slice(offset, 16).ToArray(); offset += 16;
+        ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(offset, 8)); offset += 8;
+        uint logical = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset, 4)); offset += 4;
+        ushort keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset, 2)); offset += 2;
         offset += 2;
         offset += 4;
         byte[] value = valueLength == 0
             ? Array.Empty<byte>()
-            : record.AsSpan(offset, checked((int)valueLength)).ToArray();
+            : record.Slice(offset, checked((int)valueLength)).ToArray();
 
         return new OutboxEntry
         {
@@ -524,6 +599,7 @@ public sealed class OutboxLog : IDisposable
 
             string tempPath = _path + ".tmp";
             var retainedKeys = new HashSet<EntryKey>();
+            var retainedIndex = new List<IndexPoint>();
             int retainedCount = 0;
             ulong maxCommitSeq = _maxCommitSeq;
 
@@ -560,19 +636,33 @@ public sealed class OutboxLog : IDisposable
                         throw new InvalidDataException($"Outbox record is truncated at offset {position}.");
 
                     ValidateFixedRecord(fixedPart, position);
-                    byte[] record = new byte[checked((int)recordLength)];
-                    _fs.Position = position;
-                    _fs.ReadExactly(record);
-                    VerifyRecordCrc(record, position);
-
-                    ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
-                    ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(8, 8));
-                    maxCommitSeq = Math.Max(maxCommitSeq, commitSeq);
-                    if (seq > _ackedThrough)
+                    int length = checked((int)recordLength);
+                    byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+                    try
                     {
-                        output.Write(record);
-                        retainedKeys.Add(EntryKey.From(fixedPart));
-                        retainedCount++;
+                        _fs.Position = position;
+                        _fs.ReadExactly(rented.AsSpan(0, length));
+                        ReadOnlySpan<byte> record = rented.AsSpan(0, length);
+                        VerifyRecordCrc(record, position);
+
+                        ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
+                        ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(8, 8));
+                        maxCommitSeq = Math.Max(maxCommitSeq, commitSeq);
+
+                        if (seq > _ackedThrough)
+                        {
+                            long outputOffset = output.Position;
+                            if ((retainedCount % SparseIndexStride) == 0)
+                                retainedIndex.Add(new IndexPoint(seq, outputOffset));
+
+                            output.Write(record);
+                            retainedKeys.Add(EntryKey.From(fixedPart));
+                            retainedCount++;
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(rented);
                     }
 
                     position += recordLength;
@@ -581,8 +671,6 @@ public sealed class OutboxLog : IDisposable
                 output.Flush(flushToDisk: true);
             }
 
-            // State-first order is safe: if the process dies before replacing the old
-            // Outbox, old entries are still present and ACK watermark still hides pruned ones.
             if (maxCommitSeq > _materializedThroughCommitSeq)
             {
                 WriteMaterializedWatermark(_statePath, maxCommitSeq);
@@ -616,6 +704,8 @@ public sealed class OutboxLog : IDisposable
 
             TryFsyncDirectory(Path.GetDirectoryName(_path)!);
             _entryKeys = retainedKeys;
+            _sparseIndex = retainedIndex;
+            _recordCount = retainedCount;
             _maxCommitSeq = maxCommitSeq;
             return retainedCount;
         }
