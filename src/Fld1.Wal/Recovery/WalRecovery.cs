@@ -77,6 +77,9 @@ public static class WalRecovery
         long pos = WalHeader.Size;
         long fileSize = stream.Length;
         ulong? prevSeq = null;
+        Span<byte> env = stackalloc byte[WalEnvelope.Size];
+        Span<byte> crcBuf = stackalloc byte[4];
+        Span<byte> padBuf = stackalloc byte[7];
 
         while (pos < fileSize)
         {
@@ -93,7 +96,6 @@ public static class WalRecovery
                 };
             }
 
-            var env = new byte[WalEnvelope.Size];
             stream.Position = pos;
             stream.ReadExactly(env);
 
@@ -138,15 +140,11 @@ public static class WalRecovery
             stream.Position = pos + WalEnvelope.Size;
             if (length > 0) stream.ReadExactly(payload);
 
-            var crcBuf = new byte[4];
             stream.ReadExactly(crcBuf);
             uint storedCrc = BinaryPrimitives.ReadUInt32LittleEndian(crcBuf);
 
-            // Verify RecordCrc = CRC32C(Envelope[0..16) ‖ Payload)
-            var crcInput = new byte[16 + length];
-            env.AsSpan(0, 16).CopyTo(crcInput);
-            payload.CopyTo(crcInput.AsSpan(16));
-            uint computed = Hashes.Crc32C(crcInput);
+            // Verify RecordCrc = CRC32C(Envelope[0..16) ‖ Payload) without a payload-sized copy.
+            uint computed = Hashes.Crc32C(env.Slice(0, 16), payload);
             if (computed != storedCrc)
             {
                 bool isLast = pos + recordSize >= fileSize;
@@ -160,7 +158,7 @@ public static class WalRecovery
             int padLen = recordSize - rawSize;
             if (padLen > 0)
             {
-                var pad = new byte[padLen];
+                Span<byte> pad = padBuf.Slice(0, padLen);
                 stream.ReadExactly(pad);
                 for (int i = 0; i < pad.Length; i++)
                 {
