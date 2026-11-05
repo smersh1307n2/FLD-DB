@@ -37,6 +37,9 @@ public static class WalHeader
     public static ushort ReadVersion(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffWalVersion));
 
+    public static ushort ReadFlags(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffFlags));
+
     public static ulong ReadNamespaceId(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffNamespaceId));
 
