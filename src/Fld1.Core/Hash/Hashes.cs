@@ -28,6 +28,21 @@ public static class Hashes
         => Crc32.HashToUInt32(data);
 
     /// <summary>
+    /// CRC32C over two concatenated spans without materializing a temporary buffer.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Crc32C(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
+    {
+        using var hasher = new Crc32();
+        hasher.Append(first);
+        hasher.Append(second);
+
+        Span<byte> result = stackalloc byte[4];
+        _ = hasher.GetCurrentHash(result);
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result);
+    }
+
+    /// <summary>
     /// BLAKE3-256 into caller-provided 32-byte buffer.
     /// </summary>
     public static void Blake3_256(ReadOnlySpan<byte> data, Span<byte> digest32)
