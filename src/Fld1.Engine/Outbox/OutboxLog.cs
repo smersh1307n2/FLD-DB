@@ -160,7 +160,7 @@ public sealed class OutboxLog : IDisposable
                 throw new InvalidDataException(
                     $"Outbox ACK watermark {ackedThrough} exceeds last assigned sequence {nextSeq - 1}.");
 
-            if (scan.Truncated)
+            if (scan.Truncated || materializedThrough > storedMaterializedThrough)
                 fs.Flush(flushToDisk: true);
 
             if (materializedThrough > storedMaterializedThrough)
