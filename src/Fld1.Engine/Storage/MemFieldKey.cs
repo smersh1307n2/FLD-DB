@@ -39,4 +39,6 @@ public sealed class MemFieldValue
     public required byte[] AuthorNodeId { get; init; }
     public required ushort KeyEpoch { get; init; }
     public required bool IsTombstone { get; init; }
+    /// <summary>Stable BIN-SYNC ChangeId preserved across WAL recovery.</summary>
+    public byte[] ChangeId { get; init; } = Array.Empty<byte>();
 }

@@ -79,7 +79,10 @@ public sealed class WalWriter : IDisposable
             if (!_accepting)
                 throw new InvalidOperationException("WAL not accepting appends");
 
-            ulong commitSeq = _nextCommitSeq++;
+            if (_nextCommitSeq == ulong.MaxValue)
+                throw new OverflowException("WAL CommitSeq exhausted.");
+
+            ulong commitSeq = _nextCommitSeq;
             uint len = (uint)payload.Length;
             int recordSize = WalEnvelope.AlignedRecordSize(len);
 
@@ -88,25 +91,27 @@ public sealed class WalWriter : IDisposable
             WalEnvelope.Write(record.AsSpan(0, WalEnvelope.Size), commitSeq, len, kind, flags);
             payload.CopyTo(record.AsSpan(WalEnvelope.Size, payload.Length));
 
-            // RecordCrc = CRC32C(Envelope[0..16) ‖ Payload)  — bytes before EnvelopeCrc field + payload
-            // Spec: computed = CRC32C(Envelope[0..16) ‖ Payload)
-            Span<byte> crcInput = record.AsSpan(0, 16 + payload.Length);
-            // Wait: Envelope is 20B; [0..16) is through Pad, excluding EnvelopeCrc itself.
-            // Then payload follows at offset 20. So CRC input is not contiguous in the record buffer
-            // when EnvelopeCrc sits in between. Build contiguous for CRC:
-            uint recordCrc;
-            {
-                var tmp = new byte[16 + payload.Length];
-                record.AsSpan(0, 16).CopyTo(tmp);
-                payload.CopyTo(tmp.AsSpan(16));
-                recordCrc = Hashes.Crc32C(tmp);
-            }
+            // CRC32C(Envelope[0..16) ‖ Payload), incrementally and without a second payload-sized copy.
+            uint recordCrc = Hashes.Crc32C(record.AsSpan(0, 16), payload);
             int crcOff = WalEnvelope.Size + payload.Length;
             BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(crcOff, 4), recordCrc);
             // padding already zero
 
-            _fs.Write(record);
-            // Publish after write visible
+            try
+            {
+                _fs.Write(record);
+            }
+            catch
+            {
+                // A partial write makes the active append position uncertain.
+                // Require recovery/reopen before accepting another append.
+                _accepting = false;
+                throw;
+            }
+
+            _nextCommitSeq = commitSeq + 1;
+
+            // Publish after the complete record has been handed to the file stream.
             Thread.MemoryBarrier();
             ulong newEnd = _writeOffset + (ulong)recordSize;
             Volatile.Write(ref _publishedWalEnd, newEnd);
@@ -125,8 +130,16 @@ public sealed class WalWriter : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ulong target = Volatile.Read(ref _publishedWalEnd);
-            _fs.Flush(flushToDisk: true);
-            return target;
+            try
+            {
+                _fs.Flush(flushToDisk: true);
+                return target;
+            }
+            catch
+            {
+                _accepting = false;
+                throw;
+            }
         }
     }
 

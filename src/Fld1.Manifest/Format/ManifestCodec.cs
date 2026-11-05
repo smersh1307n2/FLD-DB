@@ -20,6 +20,8 @@ public static class ManifestCodec
 {
     public static byte[] Encode(ManifestDocument doc)
     {
+        ArgumentNullException.ThrowIfNull(doc);
+        ValidateDocument(doc);
         using var ms = new MemoryStream();
         // Leave space for Generation + Crc (12 bytes), write body first then patch
         WriteU64(ms, doc.Generation);
@@ -102,27 +104,28 @@ public static class ManifestCodec
         ulong generation = ReadU64(data, ref pos);
         uint storedCrc = ReadU32(data, ref pos);
         int bodyStart = pos;
-        uint computed = Hashes.Crc32C(data.Slice(bodyStart));
-        if (computed != storedCrc)
+        if (!Hashes.IsCrc32COrLegacy(data.Slice(bodyStart), storedCrc))
             throw new InvalidDataException("manifest CRC mismatch");
 
         ulong lastFlushed = ReadU64(data, ref pos);
         ulong wmWall = ReadU64(data, ref pos);
         uint wmLog = ReadU32(data, ref pos);
-        _ = ReadU32(data, ref pos); // pad
+        if (ReadU32(data, ref pos) != 0)
+            throw new InvalidDataException("manifest watermark reserved bytes are non-zero");
 
-        uint nsCount = ReadU32(data, ref pos);
-        var namespaces = new List<uint>((int)nsCount);
-        for (uint i = 0; i < nsCount; i++)
+        int nsCount = ReadCount(data, ref pos, minimumEntryBytes: 4, maxCount: 65_536, "namespace");
+        var namespaces = new List<uint>(nsCount);
+        for (int i = 0; i < nsCount; i++)
             namespaces.Add(ReadU32(data, ref pos));
 
-        uint runCount = ReadU32(data, ref pos);
-        var runs = new List<RunEntry>((int)runCount);
-        for (uint i = 0; i < runCount; i++)
+        int runCount = ReadCount(data, ref pos, minimumEntryBytes: 64, maxCount: 1_000_000, "run");
+        var runs = new List<RunEntry>(runCount);
+        for (int i = 0; i < runCount; i++)
         {
             ulong runId = ReadU64(data, ref pos);
             ushort level = ReadU16(data, ref pos);
-            _ = ReadU16(data, ref pos);
+            if (ReadU16(data, ref pos) != 0)
+                throw new InvalidDataException("run entry reserved bytes are non-zero");
             uint ns = ReadU32(data, ref pos);
             var minRec = ReadBytes(data, ref pos, 16);
             var maxRec = ReadBytes(data, ref pos, 16);
@@ -135,9 +138,9 @@ public static class ManifestCodec
             });
         }
 
-        uint retainCount = ReadU32(data, ref pos);
-        var retains = new List<RetainEntry>((int)retainCount);
-        for (uint i = 0; i < retainCount; i++)
+        int retainCount = ReadCount(data, ref pos, minimumEntryBytes: 16, maxCount: 1_000_000, "retain");
+        var retains = new List<RetainEntry>(retainCount);
+        for (int i = 0; i < retainCount; i++)
         {
             retains.Add(new RetainEntry
             {
@@ -146,9 +149,9 @@ public static class ManifestCodec
             });
         }
 
-        uint rcCount = ReadU32(data, ref pos);
-        var clients = new List<ResultClient>((int)rcCount);
-        for (uint i = 0; i < rcCount; i++)
+        int rcCount = ReadCount(data, ref pos, minimumEntryBytes: 52, maxCount: 100_000, "result client");
+        var clients = new List<ResultClient>(rcCount);
+        for (int i = 0; i < rcCount; i++)
         {
             var cid = ReadBytes(data, ref pos, 16);
             ulong seqLo = ReadU64(data, ref pos);
@@ -156,7 +159,9 @@ public static class ManifestCodec
             ulong finalized = ReadU64(data, ref pos);
             ulong floor = ReadU64(data, ref pos);
             uint bmpLen = ReadU32(data, ref pos);
-            var bmp = ReadBytes(data, ref pos, (int)bmpLen);
+            if (bmpLen > 1_048_576)
+                throw new InvalidDataException($"result client bitmap too large: {bmpLen}");
+            var bmp = ReadBytes(data, ref pos, checked((int)bmpLen));
             clients.Add(new ResultClient
             {
                 ClientInstanceId = cid, SeqLo = seqLo, SeqHi = seqHi,
@@ -164,17 +169,19 @@ public static class ManifestCodec
             });
         }
 
-        uint provCount = ReadU32(data, ref pos);
-        var prov = new List<ProvenanceIndexEntry>((int)provCount);
-        for (uint i = 0; i < provCount; i++)
+        int provCount = ReadCount(data, ref pos, minimumEntryBytes: 40, maxCount: 1_000_000, "provenance");
+        var prov = new List<ProvenanceIndexEntry>(provCount);
+        for (int i = 0; i < provCount; i++)
         {
             var cid = ReadBytes(data, ref pos, 16);
             ulong req = ReadU64(data, ref pos);
-            byte outcome = data[pos++];
-            pos += 3; // pad
+            byte outcome = ReadU8(data, ref pos);
+            if (ReadU8(data, ref pos) != 0 || ReadU8(data, ref pos) != 0 || ReadU8(data, ref pos) != 0)
+                throw new InvalidDataException("provenance reserved bytes are non-zero");
             ulong commitSeq = ReadU64(data, ref pos);
             ushort err = ReadU16(data, ref pos);
-            pos += 2; // pad
+            if (ReadU16(data, ref pos) != 0)
+                throw new InvalidDataException("provenance reserved word is non-zero");
             prov.Add(new ProvenanceIndexEntry
             {
                 ClientInstanceId = cid, RequestSeq = req, Outcome = outcome,
@@ -188,7 +195,7 @@ public static class ManifestCodec
         if (pos != data.Length)
             throw new InvalidDataException($"trailing bytes pos={pos} len={data.Length}");
 
-        return new ManifestDocument
+        var document = new ManifestDocument
         {
             Generation = generation,
             LastFlushedCommitSeq = lastFlushed,
@@ -201,6 +208,8 @@ public static class ManifestCodec
             CoordinatorLeaseEpoch = leaseEpoch,
             CoordinatorSessionId = sessionId
         };
+        ValidateDocument(document);
+        return document;
     }
 
     private static void WriteU16(Stream s, ushort v)
@@ -221,21 +230,104 @@ public static class ManifestCodec
         BinaryPrimitives.WriteUInt64LittleEndian(b, v);
         s.Write(b);
     }
-    private static ushort ReadU16(ReadOnlySpan<byte> p, ref int pos)
+    private static int ReadCount(
+        ReadOnlySpan<byte> data, ref int pos, int minimumEntryBytes, int maxCount, string label)
     {
-        var v = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(pos)); pos += 2; return v;
+        uint raw = ReadU32(data, ref pos);
+        int remaining = data.Length - pos;
+        if (raw > maxCount || raw > (uint)(remaining / minimumEntryBytes))
+            throw new InvalidDataException($"manifest {label} count out of bounds: {raw}");
+        return (int)raw;
     }
-    private static uint ReadU32(ReadOnlySpan<byte> p, ref int pos)
+
+    private static byte ReadU8(ReadOnlySpan<byte> data, ref int pos)
     {
-        var v = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(pos)); pos += 4; return v;
+        RequireBytes(data, pos, 1);
+        return data[pos++];
     }
-    private static ulong ReadU64(ReadOnlySpan<byte> p, ref int pos)
+
+    private static ushort ReadU16(ReadOnlySpan<byte> data, ref int pos)
     {
-        var v = BinaryPrimitives.ReadUInt64LittleEndian(p.Slice(pos)); pos += 8; return v;
+        RequireBytes(data, pos, 2);
+        ushort value = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(pos, 2));
+        pos += 2;
+        return value;
     }
-    private static byte[] ReadBytes(ReadOnlySpan<byte> p, ref int pos, int n)
+
+    private static uint ReadU32(ReadOnlySpan<byte> data, ref int pos)
     {
-        if (pos + n > p.Length) throw new InvalidDataException("truncated");
-        var a = p.Slice(pos, n).ToArray(); pos += n; return a;
+        RequireBytes(data, pos, 4);
+        uint value = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(pos, 4));
+        pos += 4;
+        return value;
+    }
+
+    private static ulong ReadU64(ReadOnlySpan<byte> data, ref int pos)
+    {
+        RequireBytes(data, pos, 8);
+        ulong value = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(pos, 8));
+        pos += 8;
+        return value;
+    }
+
+    private static byte[] ReadBytes(ReadOnlySpan<byte> data, ref int pos, int length)
+    {
+        RequireBytes(data, pos, length);
+        byte[] value = data.Slice(pos, length).ToArray();
+        pos += length;
+        return value;
+    }
+
+    private static void RequireBytes(ReadOnlySpan<byte> data, int pos, int length)
+    {
+        if (pos < 0 || length < 0 || pos > data.Length - length)
+            throw new InvalidDataException("manifest is truncated");
+    }
+
+    private static void ValidateDocument(ManifestDocument document)
+    {
+        var namespaces = new HashSet<uint>();
+        foreach (uint ns in document.Namespaces)
+        {
+            if (ns > 0xFFFF || !namespaces.Add(ns))
+                throw new InvalidDataException($"invalid or duplicate namespace id {ns}");
+        }
+
+        // RunId is also the filename, so it must be unique across all namespaces.
+        var runIds = new HashSet<ulong>();
+        foreach (var run in document.Runs)
+        {
+            if (run.RunId == 0 || run.Ns > 0xFFFF || !namespaces.Contains(run.Ns)
+                || run.MinRec.Length != 16 || run.MaxRec.Length != 16
+                || run.SeqLo > run.SeqHi
+                || run.MinRec.AsSpan().SequenceCompareTo(run.MaxRec) > 0
+                || !runIds.Add(run.RunId))
+                throw new InvalidDataException($"invalid or duplicate manifest RunEntry {run.RunId}");
+        }
+
+        var retainIds = new HashSet<ulong>();
+        foreach (var retain in document.Retains)
+        {
+            if (retain.RunId == 0 || !retainIds.Add(retain.RunId))
+                throw new InvalidDataException($"invalid or duplicate RetainEntry {retain.RunId}");
+        }
+
+        var clientIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var client in document.ResultClients)
+        {
+            if (client.ClientInstanceId.Length != 16 || client.AcceptedBitmap.Length > 1_048_576
+                || client.SeqLo > client.SeqHi || client.FinalizedThroughSeq > client.SeqHi
+                || !clientIds.Add(Convert.ToHexString(client.ClientInstanceId)))
+                throw new InvalidDataException("invalid or duplicate ResultClient");
+        }
+
+        foreach (var item in document.ProvenanceIndex)
+        {
+            if (item.ClientInstanceId.Length != 16 || item.Outcome > ManifestOutcome.Skipped)
+                throw new InvalidDataException("invalid ProvenanceIndexEntry");
+        }
+
+        if (document.CoordinatorSessionId.Length != 16)
+            throw new InvalidDataException("CoordinatorSessionId must be 16 bytes");
     }
 }

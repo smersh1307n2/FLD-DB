@@ -60,6 +60,55 @@ public class WalManagerTests : IDisposable
     }
 
     [Fact]
+    public void Open_refuses_full_crc_corruption_without_truncating()
+    {
+        string path = WalManager.SegmentPath(_dir, 5, 0);
+        using (var writer = WalWriter.Create(path, namespaceId: 5, firstCommitSeq: 1))
+        {
+            writer.Append(WalConstants.KindGroupCommit, EmptyPayload());
+            writer.Flush();
+        }
+
+        byte[] bytes = File.ReadAllBytes(path);
+        bytes[WalHeader.Size + WalEnvelope.Size] ^= 0x20;
+        File.WriteAllBytes(path, bytes);
+
+        Assert.Throws<InvalidDataException>(() => WalManager.Open(_dir, 5, rotateAfterBytes: 0));
+        Assert.Equal((long)bytes.Length, new FileInfo(path).Length);
+    }
+
+    [Fact]
+    public void Reopen_after_truncating_prefix_keeps_global_commit_sequence()
+    {
+        string path0 = WalManager.SegmentPath(_dir, 6, 0);
+        string path1 = WalManager.SegmentPath(_dir, 6, 1);
+
+        var (manager, _) = WalManager.Open(_dir, 6, rotateAfterBytes: 0);
+        using (manager)
+        {
+            Assert.Equal(1ul, manager.Append(WalConstants.KindGroupCommit, EmptyPayload()));
+            manager.Flush();
+            manager.Rotate();
+            Assert.Equal(2ul, manager.Append(WalConstants.KindGroupCommit, EmptyPayload()));
+            manager.Flush();
+            Assert.Equal(1, manager.TruncateSealedSegments(sealedThroughSeq: 1));
+        }
+
+        Assert.False(File.Exists(path0));
+        Assert.True(File.Exists(path1));
+
+        var (reopened, records) = WalManager.Open(_dir, 6, rotateAfterBytes: 0);
+        using (reopened)
+        {
+            Assert.Single(records);
+            Assert.Equal(2ul, records[0].CommitSeq);
+            Assert.Equal(3ul, reopened.NextCommitSeq);
+            Assert.Equal(3ul, reopened.Append(WalConstants.KindGroupCommit, EmptyPayload()));
+            reopened.Flush();
+        }
+    }
+
+    [Fact]
     public void Truncate_drops_sealed_segments()
     {
         var (m, _) = WalManager.Open(_dir, 3, rotateAfterBytes: 0);

@@ -1,4 +1,5 @@
 using Fld1.Core.Hlc;
+using Fld1.Core.Hash;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Storage;
 using Fld1.Engine.Outbox;
@@ -42,6 +43,7 @@ public sealed class FldDatabase : IDisposable
     private readonly bool _truncateSealedWal;
     private readonly int _autoCompactRunCount;
     private bool _disposed;
+    private bool _faulted;
 
     public string DbDir => _dbDir;
     public uint NamespaceId => _namespaceId;
@@ -104,63 +106,163 @@ public sealed class FldDatabase : IDisposable
                 .Append(namespaceId).Distinct().OrderBy(x => x).ToList()));
         }
 
+        ulong checkpointedThroughCommitSeq = manifest.Runs
+            .Where(run => run.Ns == namespaceId)
+            .Select(run => run.SeqHi)
+            .DefaultIfEmpty(0UL)
+            .Max();
+
         string walDir = Path.Combine(dbDir, "wal");
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
-        var outbox = OutboxLog.Open(Path.Combine(dbDir, "outbox"), namespaceId);
+        OutboxLog? outbox = null;
+        try
+        {
+            outbox = OutboxLog.Open(
+                Path.Combine(dbDir, "outbox"), namespaceId, checkpointedThroughCommitSeq);
 
-        var db = new FldDatabase(
-            dbDir, namespaceId, author, wal, outbox, manifestStore,
-            options.AutoCheckpointOverlayFields,
-            options.TruncateSealedWal,
-            options.AutoCompactRunCount);
-        db.LoadRunsFromManifest(manifest);
-        db.GcOrphanRuns();
-        db.ReplayWalIntoOverlay(walRecords);
-        return db;
+            var db = new FldDatabase(
+                dbDir, namespaceId, author, wal, outbox, manifestStore,
+                options.AutoCheckpointOverlayFields,
+                options.TruncateSealedWal,
+                options.AutoCompactRunCount);
+
+            db.LoadRunsFromManifest(manifest);
+            db.GcOrphanRuns();
+            db.ReplayWalIntoOverlay(walRecords);
+            return db;
+        }
+        catch
+        {
+            // Open must not leak file handles when Manifest/Run/Outbox recovery fails.
+            try { outbox?.Dispose(); } catch { /* preserve original open error */ }
+            try { wal.Dispose(); } catch { /* preserve original open error */ }
+            throw;
+        }
     }
 
     private void LoadRunsFromManifest(ManifestDocument manifest)
     {
         ulong sealedSeq = 0;
+        foreach (var entry in manifest.Runs)
+        {
+            if (entry.RunId >= _nextRunId)
+                _nextRunId = checked(entry.RunId + 1);
+        }
+
         foreach (var re in manifest.Runs.Where(r => r.Ns == _namespaceId).OrderBy(r => r.RunId))
         {
             var path = Path.Combine(_dbDir, "runs", $"{re.RunId}.fld1");
-            if (File.Exists(path))
-            {
-                _runs.Add((re.RunId, path, null));
-                if (re.RunId >= _nextRunId) _nextRunId = re.RunId + 1;
-                if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
-            }
+            if (!File.Exists(path))
+                throw new InvalidDataException(
+                    $"Manifest references missing Run {re.RunId} for namespace {_namespaceId}.");
+
+            _runs.Add((re.RunId, path, null));
+            if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
         }
         _lastSealedCommitSeq = sealedSeq;
     }
 
-    /// <summary>Apply durable WAL mutations with CommitSeq &gt; last sealed run into overlay.</summary>
+    /// <summary>
+    /// Recover the storage overlay and idempotently finish Outbox materialization.
+    /// The Outbox watermark is independent of Run sealing and prevents ACKed entries
+    /// removed by CompactOutbox from being resurrected during WAL replay.
+    /// </summary>
     private void ReplayWalIntoOverlay(List<WalRecoveredRecord> records)
     {
-        foreach (var rec in records)
+        bool needsOutboxFlush = false;
+        ulong materializedThrough = _outbox.MaterializedThroughCommitSeq;
+
+        foreach (var record in records)
         {
-            if (rec.CommitSeq <= _lastSealedCommitSeq) continue;
-            if (rec.Kind != WalConstants.KindGroupCommit) continue;
-            var payload = GroupCommitCodec.Decode(rec.Payload);
-            foreach (var mut in payload.Mutations)
+            if (record.Kind != WalConstants.KindGroupCommit)
+                continue;
+
+            var payload = GroupCommitCodec.Decode(record.Payload);
+            foreach (var mutation in payload.Mutations)
             {
-                if (mut.Ns != (ushort)_namespaceId && mut.Ns != _namespaceId) continue;
-                foreach (var f in mut.Fields)
+                if (mutation.Ns != _namespaceId)
+                    continue;
+
+                foreach (var field in mutation.Fields)
                 {
-                    var key = new MemFieldKey(f.RecordId, f.FieldId);
-                    _overlay.Put(key, new MemFieldValue
+                    byte[] changeId = GetDurableChangeId(_namespaceId, record.CommitSeq, field);
+                    if (record.CommitSeq > materializedThrough)
                     {
-                        Value = f.Value,
-                        Wall = f.Wall,
-                        Logical = f.Logical,
-                        AuthorNodeId = f.AuthorNodeId,
-                        KeyEpoch = f.KeyEpoch,
-                        IsTombstone = f.OpKind == 2
+                        needsOutboxFlush = true;
+                        _outbox.AppendIfMissing(new OutboxEntry
+                        {
+                            OutboxSeq = 0,
+                            CommitSeq = record.CommitSeq,
+                            ChangeId = changeId,
+                            RecordId = field.RecordId,
+                            FieldId = field.FieldId,
+                            OpKind = field.OpKind,
+                            AuthorNodeId = field.AuthorNodeId,
+                            Wall = field.Wall,
+                            Logical = field.Logical,
+                            KeyEpoch = field.KeyEpoch,
+                            Value = field.OpKind == 2 ? Array.Empty<byte>() : field.Value
+                        });
+                    }
+
+                    if (record.CommitSeq <= _lastSealedCommitSeq)
+                        continue;
+
+                    _overlay.Put(new MemFieldKey(field.RecordId, field.FieldId), new MemFieldValue
+                    {
+                        Value = field.OpKind == 2 ? Array.Empty<byte>() : field.Value,
+                        Wall = field.Wall,
+                        Logical = field.Logical,
+                        AuthorNodeId = field.AuthorNodeId,
+                        KeyEpoch = field.KeyEpoch,
+                        IsTombstone = field.OpKind == 2,
+                        ChangeId = changeId
                     });
+                    _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
+                    _manifestDirty = true;
                 }
             }
         }
+
+        if (needsOutboxFlush)
+            _outbox.Flush();
+    }
+
+    private static byte[] GetDurableChangeId(uint namespaceId, ulong commitSeq, WalFieldMutation field)
+    {
+        if (field.ChangeId is { Length: 16 })
+        {
+            bool allZero = true;
+            for (int i = 0; i < 16; i++)
+                allZero &= field.ChangeId[i] == 0;
+            if (!allZero)
+                return field.ChangeId;
+        }
+
+        // Legacy WAL body v1 did not carry ChangeId. Derive a deterministic identity
+        // from the stable WAL field mutation so every replay produces the same ID.
+        Span<byte> input = stackalloc byte[4 + 8 + 16 + 2 + 1 + 2 + 8 + 4 + 16];
+        int offset = 0;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(input.Slice(offset, 4), namespaceId); offset += 4;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(input.Slice(offset, 8), commitSeq); offset += 8;
+        field.RecordId.CopyTo(input.Slice(offset, 16)); offset += 16;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(input.Slice(offset, 2), field.FieldId); offset += 2;
+        input[offset++] = field.OpKind;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(input.Slice(offset, 2), field.KeyEpoch); offset += 2;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(input.Slice(offset, 8), field.Wall); offset += 8;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(input.Slice(offset, 4), field.Logical); offset += 4;
+        field.AuthorNodeId.CopyTo(input.Slice(offset, 16));
+
+        Span<byte> digest = stackalloc byte[32];
+        Hashes.Blake3_256Tagged("FLD1/OUTBOX-CHANGE-ID/v1"u8, input, digest);
+        return digest.Slice(0, 16).ToArray();
+    }
+
+    private static byte[] NewChangeId()
+    {
+        var changeId = new byte[16];
+        Uuid7.NewUuid7(changeId);
+        return changeId;
     }
 
     public void Put(
@@ -171,43 +273,60 @@ public sealed class FldDatabase : IDisposable
         bool isTombstone = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        EnsureHealthy();
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
+
         var hlc = _clock.Now();
         var key = new MemFieldKey(recordId, fieldId);
-        // Single alloc for value; author is shared local ref (immutable 16B)
-        _overlay.Put(key, new MemFieldValue
+        var valueState = new MemFieldValue
         {
             Value = isTombstone ? Array.Empty<byte>() : value.ToArray(),
             Wall = hlc.Stamp.Wall,
             Logical = hlc.Stamp.Logical,
             AuthorNodeId = _localAuthor,
             KeyEpoch = keyEpoch,
-            IsTombstone = isTombstone
-        });
-        lock (_commitLock) { _dirty.Add(key); }
+            IsTombstone = isTombstone,
+            ChangeId = NewChangeId()
+        };
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _overlay.Put(key, valueState);
+            _dirty.Add(key);
+        }
     }
 
-    /// <summary>Put taking ownership of <paramref name="value"/> (no extra copy).</summary>
+    /// <summary>Put taking ownership of value without copying the payload.</summary>
     public void PutOwned(ReadOnlySpan<byte> recordId, ushort fieldId, byte[] value, ushort keyEpoch = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        EnsureHealthy();
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
         ArgumentNullException.ThrowIfNull(value);
+
         var hlc = _clock.Now();
-        var keyOwned = new MemFieldKey(recordId, fieldId);
-        _overlay.Put(keyOwned, new MemFieldValue
+        var key = new MemFieldKey(recordId, fieldId);
+        var valueState = new MemFieldValue
         {
             Value = value,
             Wall = hlc.Stamp.Wall,
             Logical = hlc.Stamp.Logical,
             AuthorNodeId = _localAuthor,
             KeyEpoch = keyEpoch,
-            IsTombstone = false
-        });
-        lock (_commitLock) { _dirty.Add(keyOwned); }
+            IsTombstone = false,
+            ChangeId = NewChangeId()
+        };
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _overlay.Put(key, valueState);
+            _dirty.Add(key);
+        }
     }
 
-    /// <summary>Tombstone field (soft delete). Visible as miss on TryGet.</summary>
+    /// <summary>Tombstone one field. The delete is durable after Commit.</summary>
     public void Delete(ReadOnlySpan<byte> recordId, ushort fieldId, ushort keyEpoch = 0)
         => Put(recordId, fieldId, ReadOnlySpan<byte>.Empty, keyEpoch, isTombstone: true);
 
@@ -216,12 +335,19 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(batch);
-        foreach (var e in batch.Entries)
+
+        // The batch is one overlay transaction with respect to Commit/Checkpoint.
+        // Monitor is re-entrant, so PutOwned/Delete can retain their own safety checks.
+        lock (_commitLock)
         {
-            if (e.Tombstone)
-                Delete(e.RecordId, e.FieldId);
-            else
-                PutOwned(e.RecordId, e.FieldId, e.Value);
+            EnsureHealthy();
+            foreach (var entry in batch.Entries)
+            {
+                if (entry.Tombstone)
+                    Delete(entry.RecordId, entry.FieldId);
+                else
+                    PutOwned(entry.RecordId, entry.FieldId, entry.Value);
+            }
         }
     }
 
@@ -245,6 +371,7 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
+            EnsureHealthy();
             if (_dirty.Count == 0) return 0;
 
             // Only keys written since last Commit (delta)
@@ -271,6 +398,7 @@ public sealed class FldDatabase : IDisposable
                     Wall = kv.Value.Wall,
                     Logical = kv.Value.Logical,
                     AuthorNodeId = kv.Value.AuthorNodeId,
+                    ChangeId = kv.Value.ChangeId,
                     Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
                 });
             }
@@ -302,32 +430,42 @@ public sealed class FldDatabase : IDisposable
                 Provenance = []
             });
 
-            ulong commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
-            _wal.Flush();
-
-            // Durable outbox for BIN-SYNC (ChangeId stable across restarts)
-            Span<byte> changeId = stackalloc byte[16];
-            Span<byte> recBuf2 = stackalloc byte[16];
-            foreach (var kv in snap)
+            ulong commitSeq;
+            try
             {
-                Uuid7.NewUuid7(changeId);
-                kv.Key.WriteRecordId(recBuf2);
-                _outbox.Append(new OutboxEntry
+                commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
+                _wal.Flush();
+
+                Span<byte> recordId = stackalloc byte[16];
+                foreach (var item in snap)
                 {
-                    OutboxSeq = 0, // assigned by log
-                    CommitSeq = commitSeq,
-                    ChangeId = changeId.ToArray(),
-                    RecordId = recBuf2.ToArray(),
-                    FieldId = kv.Key.FieldId,
-                    OpKind = kv.Value.IsTombstone ? (byte)2 : (byte)1,
-                    AuthorNodeId = kv.Value.AuthorNodeId,
-                    Wall = kv.Value.Wall,
-                    Logical = kv.Value.Logical,
-                    KeyEpoch = kv.Value.KeyEpoch,
-                    Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
-                });
+                    item.Key.WriteRecordId(recordId);
+                    _outbox.AppendIfMissing(new OutboxEntry
+                    {
+                        OutboxSeq = 0,
+                        CommitSeq = commitSeq,
+                        ChangeId = item.Value.ChangeId,
+                        RecordId = recordId.ToArray(),
+                        FieldId = item.Key.FieldId,
+                        OpKind = item.Value.IsTombstone ? (byte)2 : (byte)1,
+                        AuthorNodeId = item.Value.AuthorNodeId,
+                        Wall = item.Value.Wall,
+                        Logical = item.Value.Logical,
+                        KeyEpoch = item.Value.KeyEpoch,
+                        Value = item.Value.IsTombstone ? Array.Empty<byte>() : item.Value.Value
+                    });
+                }
+
+                _outbox.Flush();
             }
-            _outbox.Flush();
+            catch
+            {
+                // WAL may already be durable. Do not append another logical commit in
+                // this process; startup replay will finish the idempotent Outbox append.
+                _faulted = true;
+                throw;
+            }
+
             _dirty.Clear();
 
             // Defer manifest disk write — WAL is source of truth until Checkpoint/FlushManifest
@@ -351,6 +489,10 @@ public sealed class FldDatabase : IDisposable
 
     private ulong CheckpointUnderLock()
     {
+            EnsureHealthy();
+            if (_dirty.Count != 0)
+                throw new InvalidOperationException("Checkpoint requires all overlay writes to be committed first.");
+
             var snap = _overlay.Snapshot();
             if (snap.Count == 0) return 0;
 
@@ -369,11 +511,11 @@ public sealed class FldDatabase : IDisposable
             byte[] runBytes = builder.Build();
             ulong runId = _nextRunId++;
             string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            string tmp = path + ".tmp";
-            File.WriteAllBytes(tmp, runBytes);
-            using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
-                fs.Flush(flushToDisk: true);
-            File.Move(tmp, path, overwrite: true);
+            var builtReader = new RunReader(runBytes);
+            if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
+                throw new InvalidDataException(
+                    $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
+            WriteRunAtomically(path, runBytes);
 
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
@@ -404,6 +546,17 @@ public sealed class FldDatabase : IDisposable
                 });
                 return CloneManifest(m, runs: runs, lastFlushed: seqHi);
             });
+
+            try
+            {
+                _outbox.MarkMaterialized(seqHi);
+            }
+            catch
+            {
+                _faulted = true;
+                throw;
+            }
+
             _manifestDirty = false;
             _pendingFlushedCommitSeq = seqHi;
 
@@ -448,41 +601,11 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (recordId.Length != 16) return false;
 
-        bool have = false;
-        ulong bestWall = 0; uint bestLog = 0;
-        byte[]? bestAuthor = null;
-        byte[]? bestValue = null;
-        bool bestTomb = false;
-        ushort bestEpoch = 0;
-
-        var key = new MemFieldKey(recordId, fieldId);
-        if (_overlay.TryGet(key, out var mem) && mem is not null)
+        lock (_commitLock)
         {
-            have = true;
-            bestWall = mem.Wall; bestLog = mem.Logical;
-            bestAuthor = mem.AuthorNodeId; bestValue = mem.Value;
-            bestTomb = mem.IsTombstone; bestEpoch = mem.KeyEpoch;
+            EnsureHealthy();
+            return TryResolveUnlocked(recordId, fieldId, out resolved);
         }
-
-        for (int i = 0; i < _runs.Count; i++)
-        {
-            var bytes = EnsureRunCached(i);
-            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var st) || !st.Found)
-                continue;
-            var author = st.AuthorNodeId.ToArray();
-            if (!have || FieldResolver.IsNewer(st.Wall, st.Logical, author, bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
-            {
-                have = true;
-                bestWall = st.Wall; bestLog = st.Logical;
-                bestAuthor = author;
-                bestValue = st.IsTombstone ? Array.Empty<byte>() : st.Value.ToArray();
-                bestTomb = st.IsTombstone; bestEpoch = st.KeyEpoch;
-            }
-        }
-
-        if (!have) return false;
-        resolved = new FieldResolver.Resolved(true, bestTomb, bestEpoch, bestWall, bestLog, bestAuthor, bestValue);
-        return true;
     }
 
     /// <summary>Mark record dead via lifecycle field 0x0000 = Dead.</summary>
@@ -509,106 +632,145 @@ public sealed class FldDatabase : IDisposable
 
     private ulong CompactUnderLock()
     {
-            // Collect all recordIds
-            var idSet = new HashSet<(ulong, ulong)>();
-            var idList = new List<byte[]>();
-            void AddId(ReadOnlySpan<byte> rid)
+        EnsureHealthy();
+        if (_dirty.Count != 0)
+            throw new InvalidOperationException("Compact requires all overlay writes to be committed first.");
+
+        // Index overlay keys once. ScanFieldIds includes tombstones; ScanRecord intentionally does not.
+        var fieldsByRecord = new Dictionary<(ulong Lo, ulong Hi), HashSet<ushort>>();
+        var recordIds = new List<byte[]>();
+
+        void AddRecord(ReadOnlySpan<byte> recordId)
+        {
+            var recordKey = (
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8)));
+            if (fieldsByRecord.ContainsKey(recordKey))
+                return;
+
+            fieldsByRecord.Add(recordKey, new HashSet<ushort>());
+            recordIds.Add(recordId.ToArray());
+        }
+
+        Span<byte> overlayRecordId = stackalloc byte[16];
+        foreach (var item in _overlay.Snapshot())
+        {
+            item.Key.WriteRecordId(overlayRecordId);
+            AddRecord(overlayRecordId);
+            fieldsByRecord[(item.Key.RecLo, item.Key.RecHi)].Add(item.Key.FieldId);
+        }
+
+        for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
+        {
+            var bytes = EnsureRunCached(runIndex);
+            new RunReader(bytes).ScanRecordIds(AddRecord);
+        }
+
+        if (recordIds.Count == 0)
+            return 0;
+
+        var builder = new RunBuilder(_namespaceId);
+        foreach (var recordId in recordIds)
+        {
+            var recordKey = (
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.AsSpan(8)));
+            HashSet<ushort> fieldIds = fieldsByRecord[recordKey];
+
+            for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
             {
-                ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid);
-                ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid.Slice(8));
-                if (idSet.Add((lo, hi)))
-                    idList.Add(rid.ToArray());
+                var bytes = EnsureRunCached(runIndex);
+                new RunReader(bytes).ScanFieldIds(recordId, fieldId => { fieldIds.Add(fieldId); });
             }
 
-            foreach (var kv in _overlay.Snapshot())
+            foreach (ushort fieldId in fieldIds)
             {
-                var b = new byte[16];
-                kv.Key.WriteRecordId(b);
-                AddId(b);
-            }
-            for (int i = 0; i < _runs.Count; i++)
-            {
-                var bytes = EnsureRunCached(i);
-                new RunReader(bytes).ScanRecordIds(AddId);
-            }
+                if (!TryResolveUnlocked(recordId, fieldId, out var resolved) || !resolved.Found)
+                    continue;
 
-            if (idList.Count == 0) return 0;
-
-            // Collect field ids per record by scanning
-            var builder = new RunBuilder(_namespaceId);
-            Span<byte> recBuf = stackalloc byte[16];
-            foreach (var rid in idList)
-            {
-                var fieldIds = new HashSet<ushort>();
-                foreach (var kv in _overlay.Snapshot())
+                if (resolved.IsTombstone)
                 {
-                    kv.Key.WriteRecordId(recBuf);
-                    if (recBuf.SequenceEqual(rid))
-                        fieldIds.Add(kv.Key.FieldId);
+                    builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true);
                 }
-                for (int i = 0; i < _runs.Count; i++)
+                else if (resolved.Value is not null)
                 {
-                    var bytes = EnsureRunCached(i);
-                    new RunReader(bytes).ScanRecord(rid, (fid, _) => fieldIds.Add(fid));
-                    // also tombstones: ScanRecord skips them — probe common? need scan with tombs
-                    // For compaction, use TryGetField over scanned live + overlay keys is incomplete for pure tombstone-only fields.
-                }
-                foreach (var fid in fieldIds)
-                {
-                    if (!TryResolveUnlocked(rid, fid, out var r) || !r.Found)
-                        continue;
-                    if (r.IsTombstone)
-                    {
-                        builder.Add(rid, fid, ReadOnlySpan<byte>.Empty, r.Wall, r.Logical,
-                            r.AuthorNodeId ?? _localAuthor, r.KeyEpoch, isTombstone: true);
-                    }
-                    else if (r.Value is not null)
-                    {
-                        builder.Add(rid, fid, r.Value, r.Wall, r.Logical,
-                            r.AuthorNodeId ?? _localAuthor, r.KeyEpoch, isTombstone: false);
-                    }
+                    builder.Add(recordId, fieldId, resolved.Value,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false);
                 }
             }
+        }
 
-            byte[] runBytes = builder.Build();
-            ulong runId = _nextRunId++;
-            string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            string tmp = path + ".tmp";
-            File.WriteAllBytes(tmp, runBytes);
-            using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
-                fs.Flush(flushToDisk: true);
-            File.Move(tmp, path, overwrite: true);
+        byte[] runBytes = builder.Build();
+        var newReader = new RunReader(runBytes);
+        if (!newReader.TryValidate(out var verify) || newReader.NamespaceId != _namespaceId)
+            throw new InvalidDataException($"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
 
-            idList.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
-            ulong seqHi = _pendingFlushedCommitSeq;
-            if (seqHi == 0) seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+        ulong runId = _nextRunId++;
+        string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+        WriteRunAtomically(path, runBytes);
 
-            var oldPaths = _runs.Select(r => r.path).ToList();
-            _manifestStore.Update(m =>
+        recordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+        ulong seqHi = _pendingFlushedCommitSeq;
+        if (seqHi == 0)
+            seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+        if (seqHi == 0)
+            seqHi = _lastSealedCommitSeq;
+
+        var oldPaths = _runs.Select(run => run.path).ToList();
+        _manifestStore.Update(manifest =>
+        {
+            var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
+            runs.Add(new RunEntry
             {
-                var runs = m.Runs.Where(r => r.Ns != _namespaceId).ToList();
-                runs.Add(new RunEntry
-                {
-                    RunId = runId, Level = 0, Ns = _namespaceId,
-                    MinRec = idList[0], MaxRec = idList[^1],
-                    SeqLo = 1, SeqHi = seqHi
-                });
-                return CloneManifest(m, runs: runs, lastFlushed: seqHi);
+                RunId = runId,
+                Level = 0,
+                Ns = _namespaceId,
+                MinRec = recordIds[0],
+                MaxRec = recordIds[^1],
+                SeqLo = 1,
+                SeqHi = seqHi
             });
-            _manifestDirty = false;
+            return CloneManifest(manifest, runs: runs, lastFlushed: seqHi);
+        });
 
-            _runs.Clear();
-            _runs.Add((runId, path, runBytes));
-            _overlay.Clear();
-            _lastSealedCommitSeq = seqHi;
+        try
+        {
+            _outbox.MarkMaterialized(seqHi);
+        }
+        catch
+        {
+            _faulted = true;
+            throw;
+        }
 
-            foreach (var op in oldPaths)
+        _manifestDirty = false;
+        _pendingFlushedCommitSeq = seqHi;
+        _runs.Clear();
+        _runs.Add((runId, path, runBytes));
+        _overlay.Clear();
+        _dirty.Clear();
+        _lastSealedCommitSeq = seqHi;
+
+        foreach (string oldPath in oldPaths)
+        {
+            try
             {
-                try { if (op != path) File.Delete(op); } catch { /* retain on failure */ }
+                if (oldPath != path)
+                    File.Delete(oldPath);
             }
-            if (_truncateSealedWal)
-                _wal.TruncateSealedSegments(seqHi);
-            return runId;
+            catch
+            {
+                // Manifest already points at the replacement Run; stale files are collected on next open.
+            }
+        }
+
+        if (_truncateSealedWal)
+            _wal.TruncateSealedSegments(seqHi);
+
+        return runId;
     }
 
     /// <summary>Remove run files on disk not referenced by in-memory run list.</summary>
@@ -616,13 +778,20 @@ public sealed class FldDatabase : IDisposable
     {
         string runsDir = Path.Combine(_dbDir, "runs");
         if (!Directory.Exists(runsDir)) return;
-        var live = new HashSet<string>(_runs.Select(r => Path.GetFullPath(r.path)), StringComparer.Ordinal);
-        foreach (var f in Directory.EnumerateFiles(runsDir, "*.fld1"))
+
+        // A database directory may contain several namespaces. Only runs absent from
+        // the complete manifest are orphaned; the current FldDatabase loads one namespace.
+        var manifest = _manifestStore.Load();
+        var liveRunIds = manifest.Runs.Select(run => run.RunId).ToHashSet();
+
+        foreach (string file in Directory.EnumerateFiles(runsDir, "*.fld1"))
         {
-            if (!live.Contains(Path.GetFullPath(f)))
-            {
-                try { File.Delete(f); } catch { /* ignore */ }
-            }
+            string name = Path.GetFileNameWithoutExtension(file);
+            if (!ulong.TryParse(name, out ulong runId) || liveRunIds.Contains(runId))
+                continue;
+
+            try { File.Delete(file); }
+            catch { /* stale orphan is harmless and will be retried on next open */ }
         }
     }
 
@@ -691,6 +860,7 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
+            EnsureHealthy();
             if (!_manifestDirty) return;
             _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq));
             _manifestDirty = false;
@@ -704,66 +874,94 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (recordId.Length != 16) return;
+        ArgumentNullException.ThrowIfNull(onField);
 
-        var fieldIds = new HashSet<ushort>();
-        Span<byte> recBuf = stackalloc byte[16];
-        foreach (var kv in _overlay.Snapshot())
+        var result = new List<(ushort FieldId, byte[] Value)>();
+        lock (_commitLock)
         {
-            kv.Key.WriteRecordId(recBuf);
-            if (recBuf.SequenceEqual(recordId))
-                fieldIds.Add(kv.Key.FieldId);
+            EnsureHealthy();
+            var fieldIds = new HashSet<ushort>();
+            Span<byte> overlayRecordId = stackalloc byte[16];
+
+            foreach (var item in _overlay.Snapshot())
+            {
+                item.Key.WriteRecordId(overlayRecordId);
+                if (overlayRecordId.SequenceEqual(recordId))
+                    fieldIds.Add(item.Key.FieldId);
+            }
+
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                var bytes = EnsureRunCached(i);
+                new RunReader(bytes).ScanRecord(recordId, (fieldId, _) => fieldIds.Add(fieldId));
+            }
+
+            foreach (ushort fieldId in fieldIds)
+            {
+                if (TryResolveUnlocked(recordId, fieldId, out var resolved)
+                    && resolved.Found && !resolved.IsTombstone && resolved.Value is not null)
+                {
+                    result.Add((fieldId, resolved.Value));
+                }
+            }
         }
-        for (int i = 0; i < _runs.Count; i++)
-        {
-            var bytes = EnsureRunCached(i);
-            new RunReader(bytes).ScanRecord(recordId, (fid, _) => fieldIds.Add(fid));
-        }
-        foreach (var fid in fieldIds.OrderBy(x => x))
-        {
-            if (TryResolve(recordId, fid, out var r) && r.Found && !r.IsTombstone && r.Value is not null)
-                onField(fid, r.Value);
-        }
+
+        foreach (var item in result.OrderBy(x => x.FieldId))
+            onField(item.FieldId, item.Value);
     }
 
     /// <summary>Enumerate distinct RecordIds from overlay + all runs (BE order not guaranteed).</summary>
     public void ScanRecordIds(Action<byte[]> onRecordId)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var ids = new HashSet<(ulong, ulong)>();
+        ArgumentNullException.ThrowIfNull(onRecordId);
 
-        foreach (var kv in _overlay.Snapshot())
+        var result = new List<byte[]>();
+        lock (_commitLock)
         {
-            if (ids.Add((kv.Key.RecLo, kv.Key.RecHi)))
+            EnsureHealthy();
+            var ids = new HashSet<(ulong Lo, ulong Hi)>();
+
+            foreach (var item in _overlay.Snapshot())
             {
-                var b = new byte[16];
-                kv.Key.WriteRecordId(b);
-                onRecordId(b);
+                if (!ids.Add((item.Key.RecLo, item.Key.RecHi)))
+                    continue;
+
+                var recordId = new byte[16];
+                item.Key.WriteRecordId(recordId);
+                result.Add(recordId);
+            }
+
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                var bytes = EnsureRunCached(i);
+                new RunReader(bytes).ScanRecordIds(recordId =>
+                {
+                    ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId);
+                    ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8));
+                    if (ids.Add((lo, hi)))
+                        result.Add(recordId.ToArray());
+                });
             }
         }
-        for (int i = 0; i < _runs.Count; i++)
-        {
-            var bytes = EnsureRunCached(i);
-            new RunReader(bytes).ScanRecordIds(rid =>
-            {
-                ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid);
-                ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid.Slice(8));
-                if (ids.Add((lo, hi)))
-                    onRecordId(rid.ToArray());
-            });
-        }
+
+        foreach (var recordId in result)
+            onRecordId(recordId);
     }
 
     private byte[] EnsureRunCached(int index)
     {
         var (runId, path, cached) = _runs[index];
         if (cached is not null) return cached;
+
         var bytes = File.ReadAllBytes(path);
-        lock (_commitLock)
-        {
-            if (_runs[index].cached is null)
-                _runs[index] = (runId, path, bytes);
-            return _runs[index].cached!;
-        }
+        var reader = new RunReader(bytes);
+        if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+            throw new InvalidDataException(
+                $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
+
+        _runs[index] = (runId, path, bytes);
+        return bytes;
     }
 
 
@@ -776,50 +974,75 @@ public sealed class FldDatabase : IDisposable
     public int ApplyRemote(ReadOnlySpan<RemoteFieldWrite> writes)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        int applied = 0;
-        foreach (ref readonly var w in writes)
-        {
-            var key = new MemFieldKey(w.RecordId, w.FieldId);
-            bool win = true;
-            if (TryResolve(w.RecordId, w.FieldId, out var resolved) && resolved.Found)
-            {
-                win = FieldResolver.IsNewer(
-                    w.Wall, w.Logical, w.AuthorNodeId,
-                    resolved.Wall, resolved.Logical, resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty);
-            }
-            if (!win) continue;
 
-            _overlay.Put(key, new MemFieldValue
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            int applied = 0;
+
+            foreach (ref readonly var write in writes)
             {
-                Value = w.IsTombstone ? Array.Empty<byte>() : w.Value.ToArray(),
-                Wall = w.Wall,
-                Logical = w.Logical,
-                AuthorNodeId = w.AuthorNodeId,
-                KeyEpoch = w.KeyEpoch,
-                IsTombstone = w.IsTombstone
-            });
-            lock (_commitLock) { _dirty.Add(key); }
-            applied++;
+                var key = new MemFieldKey(write.RecordId, write.FieldId);
+                if (TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved) && resolved.Found)
+                {
+                    if (!FieldResolver.IsNewer(
+                            write.Wall, write.Logical, write.AuthorNodeId,
+                            resolved.Wall, resolved.Logical,
+                            resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
+                        continue;
+                }
+
+                byte[] changeId = write.ChangeId is { Length: 16 }
+                    ? write.ChangeId.ToArray()
+                    : NewChangeId();
+
+                _overlay.Put(key, new MemFieldValue
+                {
+                    Value = write.IsTombstone ? Array.Empty<byte>() : write.Value.ToArray(),
+                    Wall = write.Wall,
+                    Logical = write.Logical,
+                    AuthorNodeId = write.AuthorNodeId.ToArray(),
+                    KeyEpoch = write.KeyEpoch,
+                    IsTombstone = write.IsTombstone,
+                    ChangeId = changeId
+                });
+
+                _dirty.Add(key);
+                applied++;
+            }
+
+            return applied;
         }
-        return applied;
     }
 
     public int CompactOutbox()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _outbox.Compact();
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _outbox.Compact();
+        }
     }
 
     public IReadOnlyList<OutboxEntry> ReadOutboxBatch(ulong afterSeq, int limit = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _outbox.ReadBatch(afterSeq, limit);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _outbox.ReadBatch(afterSeq, limit);
+        }
     }
 
     public void AcknowledgeOutbox(ulong throughSeq)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _outbox.Acknowledge(throughSeq);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _outbox.Acknowledge(throughSeq);
+        }
     }
 
     public ulong GetOutboxWatermark()
@@ -832,14 +1055,57 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
+        {
+            EnsureHealthy();
             _wal.Rotate();
+        }
+    }
+
+    private void EnsureHealthy()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_faulted)
+            throw new InvalidOperationException("Database requires reopen after a failed durable operation.");
+    }
+
+    private static void WriteRunAtomically(string path, byte[] runBytes)
+    {
+        string tempPath = path + ".tmp";
+        string directory = Path.GetDirectoryName(path)!;
+
+        using (var fs = new FileStream(
+            tempPath, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 64 * 1024, FileOptions.WriteThrough))
+        {
+            fs.Write(runBytes);
+            fs.Flush(flushToDisk: true);
+        }
+
+        File.Move(tempPath, path, overwrite: true);
+        TryFsyncDirectory(directory);
+    }
+
+    private static void TryFsyncDirectory(string directory)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+        catch
+        {
+            // Best-effort; directory handles are not flushable on every supported filesystem.
+        }
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
         lock (_commitLock)
         {
+            if (_disposed) return;
             if (_manifestDirty)
             {
                 try

@@ -21,8 +21,12 @@ public readonly struct RemoteFieldWrite
         ulong wall, uint logical, byte[] authorNodeId,
         ushort keyEpoch = 0, bool isTombstone = false, byte[]? changeId = null)
     {
+        ArgumentNullException.ThrowIfNull(recordId);
+        ArgumentNullException.ThrowIfNull(authorNodeId);
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
         if (authorNodeId.Length != 16) throw new ArgumentException("AuthorNodeId");
+        if (changeId is not null && changeId.Length != 16)
+            throw new ArgumentException("ChangeId must be 16 bytes.", nameof(changeId));
         RecordId = recordId;
         FieldId = fieldId;
         Value = value ?? Array.Empty<byte>();

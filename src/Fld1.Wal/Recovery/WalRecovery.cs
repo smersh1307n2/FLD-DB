@@ -63,11 +63,23 @@ public static class WalRecovery
             return Fail(WalRecoveryStatus.CorruptHeader, "header crc", 0);
         if (WalHeader.ReadVersion(header) != WalConstants.WalVersion)
             return Fail(WalRecoveryStatus.CorruptHeader, "version", 0);
+        if (WalHeader.ReadFlags(header) != 0)
+            return Fail(WalRecoveryStatus.CorruptHeader, "reserved flags", 0);
+        if (WalHeader.ReadFirstCommitSeq(header) == 0)
+            return Fail(WalRecoveryStatus.CorruptHeader, "FirstCommitSeq is zero", 0);
+        for (int i = 0x1C; i < header.Length; i++)
+        {
+            if (header[i] != 0)
+                return Fail(WalRecoveryStatus.CorruptHeader, $"reserved byte {i}", 0);
+        }
 
         var records = new List<WalRecoveredRecord>();
         long pos = WalHeader.Size;
         long fileSize = stream.Length;
         ulong? prevSeq = null;
+        Span<byte> env = stackalloc byte[WalEnvelope.Size];
+        Span<byte> crcBuf = stackalloc byte[4];
+        Span<byte> padBuf = stackalloc byte[7];
 
         while (pos < fileSize)
         {
@@ -84,28 +96,20 @@ public static class WalRecovery
                 };
             }
 
-            var env = new byte[WalEnvelope.Size];
             stream.Position = pos;
             stream.ReadExactly(env);
 
             if (!WalEnvelope.VerifyEnvelopeCrc(env))
             {
-                // Could be torn overwrite of envelope or corruption
-                // Spec: EnvelopeCrc invalid → STOP (not truncate if we can't tell)
-                // For recovery of torn at end: if this is the last incomplete attempt, treat as torn
-                if (pos + 24 > fileSize)
-                {
-                    return new WalRecoveryResult
-                    {
-                        Status = WalRecoveryStatus.TruncatedTorn,
-                        Detail = "envelope crc + short",
-                        Records = records,
-                        ValidEndOffset = pos,
-                        LastCommitSeq = prevSeq
-                    };
-                }
+                // The loop already classified tails shorter than the minimum 24-byte
+                // envelope+CRC as torn. Once a complete minimum record prefix exists,
+                // an invalid EnvelopeCrc is corruption and must never be truncated.
                 return Fail(WalRecoveryStatus.CorruptEnvelope, $"pos={pos}", pos, records, prevSeq);
             }
+
+            if (env[WalEnvelope.OffReserved] != 0 || env[WalEnvelope.OffPad] != 0)
+                return Fail(WalRecoveryStatus.CorruptEnvelope,
+                    $"reserved envelope byte pos={pos}", pos, records, prevSeq);
 
             byte kind = WalEnvelope.ReadKind(env);
             if (kind is not (WalConstants.KindGroupCommit or WalConstants.KindNsCreate
@@ -136,16 +140,11 @@ public static class WalRecovery
             stream.Position = pos + WalEnvelope.Size;
             if (length > 0) stream.ReadExactly(payload);
 
-            var crcBuf = new byte[4];
             stream.ReadExactly(crcBuf);
             uint storedCrc = BinaryPrimitives.ReadUInt32LittleEndian(crcBuf);
 
-            // Verify RecordCrc = CRC32C(Envelope[0..16) ‖ Payload)
-            var crcInput = new byte[16 + length];
-            env.AsSpan(0, 16).CopyTo(crcInput);
-            payload.CopyTo(crcInput.AsSpan(16));
-            uint computed = Hashes.Crc32C(crcInput);
-            if (computed != storedCrc)
+            // Verify RecordCrc = CRC32C(Envelope[0..16) ‖ Payload) without a payload-sized copy.
+            if (!Hashes.IsCrc32COrLegacy(env.Slice(0, 16), payload, storedCrc))
             {
                 bool isLast = pos + recordSize >= fileSize;
                 return Fail(
@@ -158,7 +157,7 @@ public static class WalRecovery
             int padLen = recordSize - rawSize;
             if (padLen > 0)
             {
-                var pad = new byte[padLen];
+                Span<byte> pad = padBuf.Slice(0, padLen);
                 stream.ReadExactly(pad);
                 for (int i = 0; i < pad.Length; i++)
                 {

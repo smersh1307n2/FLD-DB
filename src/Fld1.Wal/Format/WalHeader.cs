@@ -37,6 +37,9 @@ public static class WalHeader
     public static ushort ReadVersion(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffWalVersion));
 
+    public static ushort ReadFlags(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffFlags));
+
     public static ulong ReadNamespaceId(ReadOnlySpan<byte> h)
         => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffNamespaceId));
 
@@ -49,7 +52,6 @@ public static class WalHeader
     public static bool VerifyCrc(ReadOnlySpan<byte> h)
     {
         if (h.Length < Size) return false;
-        uint expected = Hashes.Crc32C(h.Slice(0, OffHeaderCrc32C));
-        return expected == ReadHeaderCrc(h);
+        return Hashes.IsCrc32COrLegacy(h.Slice(0, OffHeaderCrc32C), ReadHeaderCrc(h));
     }
 }

@@ -220,7 +220,7 @@ public readonly struct RunReader
             if (length > RunConstants.MaxBlobLen) return false;
             value = file.Slice((int)dataOff, (int)length);
             // Optional CRC check on first read
-            if (Hashes.Crc32C(value) != crc)
+            if (!Hashes.IsCrc32COrLegacy(value, crc))
                 return false;
             return true;
         }
@@ -323,7 +323,7 @@ public readonly struct RunReader
                 if (length <= RunConstants.MaxBlobLen)
                 {
                     var slice = _file.Slice((int)dataOff, (int)length);
-                    if (Hashes.Crc32C(slice.Span) == crc)
+                    if (Hashes.IsCrc32COrLegacy(slice.Span, crc))
                         valueMem = slice;
                     else
                         return false;
@@ -358,6 +358,34 @@ public readonly struct RunReader
         int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
         ulong dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
         ScanClusterFields(file, (int)dataOffset, onField);
+    }
+
+    /// <summary>
+    /// Enumerate every stored FieldId for a record, including tombstone descriptors.
+    /// Used by compaction; user-visible scans continue to omit tombstones.
+    /// </summary>
+    public void ScanFieldIds(ReadOnlySpan<byte> recordId, Action<ushort> onFieldId)
+    {
+        ArgumentNullException.ThrowIfNull(onFieldId);
+        if (recordId.Length != 16 || IsEmpty) return;
+
+        var file = _file.Span;
+        int clusterIdx = FindCluster(file, recordId);
+        if (clusterIdx < 0) return;
+
+        ulong slotOff = RunHeader.ReadSlotOff(file);
+        int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
+        ulong dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
+        int clusterOff = checked((int)dataOffset);
+        ushort numFields = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(clusterOff + 16, 2));
+        int descBase = clusterOff + RunConstants.ClusterHeaderSize;
+
+        for (int i = 0; i < numFields; i++)
+        {
+            int desc = descBase + i * RunConstants.FieldDescSize;
+            ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc, 2));
+            onFieldId(fieldId);
+        }
     }
 
     /// <summary>
@@ -414,7 +442,7 @@ public readonly struct RunReader
                 uint crc = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(refPos + 12, 4));
                 if (length > RunConstants.MaxBlobLen) continue;
                 value = file.Slice((int)dataOff, (int)length);
-                if (Hashes.Crc32C(value) != crc) continue;
+                if (!Hashes.IsCrc32COrLegacy(value, crc)) continue;
             }
             else
             {

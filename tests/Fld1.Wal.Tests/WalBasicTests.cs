@@ -163,6 +163,25 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Full_record_crc_corruption_is_not_treated_as_torn_tail()
+    {
+        var path = PathOf("corrupt-tail.log");
+        using (var writer = WalWriter.Create(path, namespaceId: 0, firstCommitSeq: 1))
+        {
+            writer.Append(WalConstants.KindGroupCommit, GroupCommitCodec.Encode(EmptyPayload()));
+            writer.Flush();
+        }
+
+        byte[] bytes = File.ReadAllBytes(path);
+        bytes[WalHeader.Size + WalEnvelope.Size] ^= 0x40; // mutate payload, retain valid envelope
+        File.WriteAllBytes(path, bytes);
+
+        var recovered = WalRecovery.Recover(path);
+        Assert.Equal(WalRecoveryStatus.CorruptTailAmbiguous, recovered.Status);
+        Assert.Equal((long)bytes.Length, new FileInfo(path).Length);
+    }
+
+    [Fact]
     public void Corrupt_header_stops()
     {
         var path = PathOf("badhdr.log");

@@ -13,6 +13,8 @@ public sealed class WalFieldMutation
     public required ulong Wall { get; init; }
     public required uint Logical { get; init; }
     public required byte[] AuthorNodeId { get; init; } // 16
+    /// <summary>Stable BIN-SYNC ChangeId; empty only when decoding legacy WAL body v1.</summary>
+    public byte[] ChangeId { get; init; } = Array.Empty<byte>();
     public required byte[] Value { get; init; }
 }
 
@@ -68,7 +70,10 @@ public static class GroupCommitCodec
         WriteU32(ms, (uint)p.Mutations.Count);
         WriteU32(ms, (uint)p.Results.Count);
         WriteU32(ms, (uint)p.Provenance.Count);
-        WriteU32(ms, 1); // format version of payload body (1 = HLC+author on fields)
+        WriteU32(ms, 2); // v2 adds stable ChangeId[16] to every field mutation
+
+        Span<byte> zeroChangeId = stackalloc byte[16];
+        zeroChangeId.Clear();
 
         foreach (var m in p.Mutations)
         {
@@ -90,6 +95,15 @@ public static class GroupCommitCodec
                 WriteU64(ms, f.Wall);
                 WriteU32(ms, f.Logical);
                 ms.Write(f.AuthorNodeId);
+                if (f.ChangeId.Length is not (0 or 16))
+                    throw new ArgumentException("ChangeId must be empty or 16 bytes");
+                if (f.ChangeId.Length == 16)
+                    ms.Write(f.ChangeId);
+                else
+                {
+                    // Recovery deterministically derives the stable ID for a zero marker.
+                    ms.Write(zeroChangeId);
+                }
                 WriteU32(ms, (uint)f.Value.Length);
                 ms.Write(f.Value);
             }
@@ -130,7 +144,8 @@ public static class GroupCommitCodec
         uint resCount = ReadU32(payload, ref pos);
         uint provCount = ReadU32(payload, ref pos);
         uint bodyVer = ReadU32(payload, ref pos);
-        if (bodyVer != 1) throw new InvalidDataException($"unsupported GROUP_COMMIT body ver={bodyVer}");
+        if (bodyVer is not (1 or 2))
+            throw new InvalidDataException($"unsupported GROUP_COMMIT body ver={bodyVer}");
         if (mutCount > WalConstants.MaxMutations || resCount > WalConstants.MaxResults
             || provCount > WalConstants.MaxProvenance)
             throw new InvalidDataException("count limit");
@@ -154,6 +169,9 @@ public static class GroupCommitCodec
                 ulong wall = ReadU64(payload, ref pos);
                 uint logical = ReadU32(payload, ref pos);
                 var author = ReadBytes(payload, ref pos, 16);
+                var changeId = bodyVer >= 2
+                    ? ReadBytes(payload, ref pos, 16)
+                    : Array.Empty<byte>();
                 uint valLen = ReadU32(payload, ref pos);
                 if (valLen > WalConstants.MaxValLen) throw new InvalidDataException("ValLen");
                 var val = ReadBytes(payload, ref pos, (int)valLen);
@@ -161,7 +179,7 @@ public static class GroupCommitCodec
                 {
                     RecordId = rid, FieldId = fid, OpKind = op,
                     KeyEpoch = keyEpoch, Wall = wall, Logical = logical,
-                    AuthorNodeId = author, Value = val
+                    AuthorNodeId = author, ChangeId = changeId, Value = val
                 });
             }
             mutations.Add(new WalMutation
