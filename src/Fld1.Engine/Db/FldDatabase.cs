@@ -311,12 +311,19 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(batch);
-        foreach (var e in batch.Entries)
+
+        // The batch is one overlay transaction with respect to Commit/Checkpoint.
+        // Monitor is re-entrant, so PutOwned/Delete can retain their own safety checks.
+        lock (_commitLock)
         {
-            if (e.Tombstone)
-                Delete(e.RecordId, e.FieldId);
-            else
-                PutOwned(e.RecordId, e.FieldId, e.Value);
+            EnsureHealthy();
+            foreach (var entry in batch.Entries)
+            {
+                if (entry.Tombstone)
+                    Delete(entry.RecordId, entry.FieldId);
+                else
+                    PutOwned(entry.RecordId, entry.FieldId, entry.Value);
+            }
         }
     }
 
@@ -340,6 +347,7 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
+            EnsureHealthy();
             if (_dirty.Count == 0) return 0;
 
             // Only keys written since last Commit (delta)
