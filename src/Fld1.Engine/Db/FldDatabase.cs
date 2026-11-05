@@ -106,12 +106,19 @@ public sealed class FldDatabase : IDisposable
                 .Append(namespaceId).Distinct().OrderBy(x => x).ToList()));
         }
 
+        ulong checkpointedThroughCommitSeq = manifest.Runs
+            .Where(run => run.Ns == namespaceId)
+            .Select(run => run.SeqHi)
+            .DefaultIfEmpty(0)
+            .Max();
+
         string walDir = Path.Combine(dbDir, "wal");
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
         OutboxLog? outbox = null;
         try
         {
-            outbox = OutboxLog.Open(Path.Combine(dbDir, "outbox"), namespaceId);
+            outbox = OutboxLog.Open(
+                Path.Combine(dbDir, "outbox"), namespaceId, checkpointedThroughCommitSeq);
 
             var db = new FldDatabase(
                 dbDir, namespaceId, author, wal, outbox, manifestStore,
@@ -162,7 +169,7 @@ public sealed class FldDatabase : IDisposable
     /// </summary>
     private void ReplayWalIntoOverlay(List<WalRecoveredRecord> records)
     {
-        bool outboxChanged = false;
+        bool needsOutboxFlush = false;
         ulong materializedThrough = _outbox.MaterializedThroughCommitSeq;
 
         foreach (var record in records)
@@ -181,7 +188,8 @@ public sealed class FldDatabase : IDisposable
                     byte[] changeId = GetDurableChangeId(_namespaceId, record.CommitSeq, field);
                     if (record.CommitSeq > materializedThrough)
                     {
-                        outboxChanged |= _outbox.AppendIfMissing(new OutboxEntry
+                        needsOutboxFlush = true;
+                        _outbox.AppendIfMissing(new OutboxEntry
                         {
                             OutboxSeq = 0,
                             CommitSeq = record.CommitSeq,
@@ -216,7 +224,7 @@ public sealed class FldDatabase : IDisposable
             }
         }
 
-        if (outboxChanged)
+        if (needsOutboxFlush)
             _outbox.Flush();
     }
 
@@ -538,6 +546,17 @@ public sealed class FldDatabase : IDisposable
                 });
                 return CloneManifest(m, runs: runs, lastFlushed: seqHi);
             });
+
+            try
+            {
+                _outbox.MarkMaterialized(seqHi);
+            }
+            catch
+            {
+                _faulted = true;
+                throw;
+            }
+
             _manifestDirty = false;
             _pendingFlushedCommitSeq = seqHi;
 
@@ -713,6 +732,16 @@ public sealed class FldDatabase : IDisposable
             });
             return CloneManifest(manifest, runs: runs, lastFlushed: seqHi);
         });
+
+        try
+        {
+            _outbox.MarkMaterialized(seqHi);
+        }
+        catch
+        {
+            _faulted = true;
+            throw;
+        }
 
         _manifestDirty = false;
         _pendingFlushedCommitSeq = seqHi;
