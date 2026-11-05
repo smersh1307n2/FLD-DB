@@ -1,4 +1,5 @@
 using System.IO.Hashing;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using Blake3.Managed;
 
@@ -20,26 +21,85 @@ public static class Hashes
         => System.IO.Hashing.XxHash64.HashToUInt64(data, seed: 0);
 
     /// <summary>
-    /// CRC32C (Castagnoli). Spec [K-BLOB-CRC], WAL envelopes.
-    /// System.IO.Hashing.Crc32 uses the Castagnoli polynomial.
+    /// CRC-32C/Castagnoli. New FLD1 files use the reflected Castagnoli polynomial.
+    /// BitOperations dispatches to hardware CRC instructions when available and uses
+    /// an optimized software fallback on other runtimes/architectures.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint Crc32C(ReadOnlySpan<byte> data)
-        => Crc32.HashToUInt32(data);
+        => ~AppendCrc32C(uint.MaxValue, data);
 
-    /// <summary>
-    /// CRC32C over two concatenated spans without materializing a temporary buffer.
-    /// </summary>
+    /// <summary>CRC-32C over two logically concatenated spans without copying.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint Crc32C(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
+    {
+        uint crc = AppendCrc32C(uint.MaxValue, first);
+        return ~AppendCrc32C(crc, second);
+    }
+
+    /// <summary>
+    /// Legacy CRC-32/IEEE used by early FLD1 builds before the CRC-32C correction.
+    /// Only use this when validating old persisted files; never for new writes.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Crc32Ieee(ReadOnlySpan<byte> data)
+        => Crc32.HashToUInt32(data);
+
+    /// <summary>Legacy CRC-32/IEEE over two concatenated spans without copying.</summary>
+    public static uint Crc32Ieee(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
     {
         using var hasher = new Crc32();
         hasher.Append(first);
         hasher.Append(second);
+        return hasher.GetCurrentHashAsUInt32();
+    }
 
-        Span<byte> result = stackalloc byte[4];
-        _ = hasher.GetCurrentHash(result);
-        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result);
+    /// <summary>
+    /// Accept the normative Castagnoli checksum or the legacy IEEE checksum emitted
+    /// by earlier builds. Writers must continue to emit only CRC-32C.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsCrc32COrLegacy(ReadOnlySpan<byte> data, uint stored)
+        => stored == Crc32C(data) || stored == Crc32Ieee(data);
+
+    /// <summary>Two-span variant of <see cref="IsCrc32COrLegacy(ReadOnlySpan{byte}, uint)"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsCrc32COrLegacy(
+        ReadOnlySpan<byte> first, ReadOnlySpan<byte> second, uint stored)
+        => stored == Crc32C(first, second) || stored == Crc32Ieee(first, second);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint AppendCrc32C(uint crc, ReadOnlySpan<byte> data)
+    {
+        int offset = 0;
+        while (data.Length - offset >= 8)
+        {
+            ulong value = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(
+                data.Slice(offset, 8));
+            crc = BitOperations.Crc32C(crc, value);
+            offset += 8;
+        }
+
+        if (data.Length - offset >= 4)
+        {
+            uint value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                data.Slice(offset, 4));
+            crc = BitOperations.Crc32C(crc, value);
+            offset += 4;
+        }
+
+        if (data.Length - offset >= 2)
+        {
+            ushort value = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(
+                data.Slice(offset, 2));
+            crc = BitOperations.Crc32C(crc, value);
+            offset += 2;
+        }
+
+        if (offset < data.Length)
+            crc = BitOperations.Crc32C(crc, data[offset]);
+
+        return crc;
     }
 
     /// <summary>
