@@ -729,7 +729,9 @@ public sealed class OutboxLog : IDisposable
             }
 
             TryFsyncDirectory(Path.GetDirectoryName(_path)!);
-            _entryKeys = retainedKeys;
+            // Every retained entry is now covered by the durable materialization watermark.
+            // Keep no per-entry replay-dedupe keys for this sealed prefix.
+            _entryKeys = new HashSet<EntryKey>();
             _sparseIndex = retainedIndex;
             _recordCount = retainedCount;
             _maxCommitSeq = maxCommitSeq;
