@@ -43,6 +43,90 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Acknowledge_rejects_unassigned_sequence()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var recordId = FldDatabase.NewRecordId();
+        db.Put(recordId, 1, "value"u8);
+        db.Commit();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => db.AcknowledgeOutbox(2));
+        Assert.Equal(0ul, db.GetOutboxWatermark());
+        Assert.Single(db.ReadOutboxBatch(0, 10));
+    }
+
+    [Fact]
+    public void Empty_compaction_preserves_next_sequence_after_reopen()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.Put(recordId, 1, "first"u8);
+            db.Commit();
+            var first = Assert.Single(db.ReadOutboxBatch(0, 10));
+            Assert.Equal(1ul, first.OutboxSeq);
+
+            db.AcknowledgeOutbox(first.OutboxSeq);
+            Assert.Equal(0, db.CompactOutbox());
+        }
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.Put(recordId, 2, "second"u8);
+            db.Commit();
+
+            var second = Assert.Single(db.ReadOutboxBatch(0, 10));
+            Assert.Equal(2ul, second.OutboxSeq);
+            Assert.Equal(1ul, db.GetOutboxWatermark());
+            Assert.Equal("second"u8.ToArray(), second.Value);
+        }
+    }
+
+    [Fact]
+    public void Recovery_does_not_resurrect_acknowledged_compacted_entries()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.Put(recordId, 1, "already-synced"u8);
+            db.Commit();
+            var entry = Assert.Single(db.ReadOutboxBatch(0, 10));
+            db.AcknowledgeOutbox(entry.OutboxSeq);
+            Assert.Equal(0, db.CompactOutbox());
+        }
+
+        // WAL is still present because no Run checkpoint was made. Recovery must honor
+        // the durable Outbox materialization watermark instead of recreating ACKed data.
+        using (var db = FldDatabase.Open(_dir))
+        {
+            Assert.Empty(db.ReadOutboxBatch(0, 10));
+            Assert.Equal(1ul, db.GetOutboxWatermark());
+        }
+    }
+
+    [Fact]
+    public void Recovery_rebuilds_missing_outbox_from_wal_with_stable_change_id()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        byte[] expectedChangeId;
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.Put(recordId, 7, "recover-me"u8);
+            db.Commit();
+            expectedChangeId = Assert.Single(db.ReadOutboxBatch(0, 10)).ChangeId;
+        }
+
+        File.Delete(Path.Combine(_dir, "outbox", "ns_0.obx"));
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            var rebuilt = Assert.Single(db.ReadOutboxBatch(0, 10));
+            Assert.Equal(expectedChangeId, rebuilt.ChangeId);
+            Assert.Equal("recover-me"u8.ToArray(), rebuilt.Value);
+        }
+    }
+
+    [Fact]
     public void Outbox_survives_reopen()
     {
         var rec = FldDatabase.NewRecordId();
