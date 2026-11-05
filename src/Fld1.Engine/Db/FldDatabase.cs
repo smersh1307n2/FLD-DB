@@ -559,41 +559,8 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (recordId.Length != 16) return false;
 
-        bool have = false;
-        ulong bestWall = 0; uint bestLog = 0;
-        byte[]? bestAuthor = null;
-        byte[]? bestValue = null;
-        bool bestTomb = false;
-        ushort bestEpoch = 0;
-
-        var key = new MemFieldKey(recordId, fieldId);
-        if (_overlay.TryGet(key, out var mem) && mem is not null)
-        {
-            have = true;
-            bestWall = mem.Wall; bestLog = mem.Logical;
-            bestAuthor = mem.AuthorNodeId; bestValue = mem.Value;
-            bestTomb = mem.IsTombstone; bestEpoch = mem.KeyEpoch;
-        }
-
-        for (int i = 0; i < _runs.Count; i++)
-        {
-            var bytes = EnsureRunCached(i);
-            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var st) || !st.Found)
-                continue;
-            var author = st.AuthorNodeId.ToArray();
-            if (!have || FieldResolver.IsNewer(st.Wall, st.Logical, author, bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
-            {
-                have = true;
-                bestWall = st.Wall; bestLog = st.Logical;
-                bestAuthor = author;
-                bestValue = st.IsTombstone ? Array.Empty<byte>() : st.Value.ToArray();
-                bestTomb = st.IsTombstone; bestEpoch = st.KeyEpoch;
-            }
-        }
-
-        if (!have) return false;
-        resolved = new FieldResolver.Resolved(true, bestTomb, bestEpoch, bestWall, bestLog, bestAuthor, bestValue);
-        return true;
+        lock (_commitLock)
+            return TryResolveUnlocked(recordId, fieldId, out resolved);
     }
 
     /// <summary>Mark record dead via lifecycle field 0x0000 = Dead.</summary>
@@ -868,13 +835,15 @@ public sealed class FldDatabase : IDisposable
     {
         var (runId, path, cached) = _runs[index];
         if (cached is not null) return cached;
+
         var bytes = File.ReadAllBytes(path);
-        lock (_commitLock)
-        {
-            if (_runs[index].cached is null)
-                _runs[index] = (runId, path, bytes);
-            return _runs[index].cached!;
-        }
+        var reader = new RunReader(bytes);
+        if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+            throw new InvalidDataException(
+                $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
+
+        _runs[index] = (runId, path, bytes);
+        return bytes;
     }
 
 
