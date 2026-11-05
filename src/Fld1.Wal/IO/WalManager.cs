@@ -16,6 +16,7 @@ public sealed class WalManager : IDisposable
     private WalWriter _active;
     private int _activeSeg;
     private bool _disposed;
+    private bool _faulted;
 
     public ulong NamespaceId => _namespaceId;
     public int ActiveSegment => _activeSeg;
@@ -60,35 +61,76 @@ public sealed class WalManager : IDisposable
             return (new WalManager(walDir, namespaceId, rotateAfterBytes, w, 0), allRecords);
         }
 
-        ulong nextSeq = 1;
+        ulong? expectedNextSeq = null;
         long lastValidEnd = WalHeader.Size;
         string lastPath = SegmentPath(walDir, namespaceId, segs[^1]);
         int lastSeg = segs[^1];
 
-        foreach (int seg in segs)
+        for (int index = 0; index < segs.Count; index++)
         {
-            string path = SegmentPath(walDir, namespaceId, seg);
-            var recovered = WalRecovery.Recover(path);
-            if (recovered.Status is WalRecoveryStatus.CorruptHeader or WalRecoveryStatus.CorruptMiddle
-                or WalRecoveryStatus.UnknownKind or WalRecoveryStatus.OrderViolation)
+            int segment = segs[index];
+            if (index > 0 && segment != segs[index - 1] + 1)
+                throw new InvalidDataException(
+                    $"WAL segment gap: {segs[index - 1]} -> {segment}");
+
+            string path = SegmentPath(walDir, namespaceId, segment);
+            ulong firstCommitSeq;
+            using (var headerStream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                if (headerStream.Length < WalHeader.Size)
+                    throw new InvalidDataException($"WAL {path}: truncated header.");
+
+                Span<byte> header = stackalloc byte[WalHeader.Size];
+                headerStream.ReadExactly(header);
+
+                if (!WalHeader.CheckMagic(header)
+                    || !WalHeader.VerifyCrc(header)
+                    || WalHeader.ReadVersion(header) != WalConstants.WalVersion)
+                    throw new InvalidDataException($"WAL {path}: invalid header.");
+                if (WalHeader.ReadNamespaceId(header) != namespaceId)
+                    throw new InvalidDataException($"WAL {path}: namespace mismatch.");
+                if (WalHeader.ReadFlags(header) != 0)
+                    throw new InvalidDataException($"WAL {path}: reserved flags are non-zero.");
+
+                firstCommitSeq = WalHeader.ReadFirstCommitSeq(header);
+                if (firstCommitSeq == 0)
+                    throw new InvalidDataException($"WAL {path}: FirstCommitSeq is zero.");
+                if (expectedNextSeq.HasValue && firstCommitSeq != expectedNextSeq.Value)
+                    throw new InvalidDataException(
+                        $"WAL {path}: FirstCommitSeq {firstCommitSeq}, expected {expectedNextSeq.Value}.");
+
+                expectedNextSeq ??= firstCommitSeq;
+            }
+
+            WalRecoveryResult recovered = WalRecovery.Recover(path);
+            if (recovered.Status == WalRecoveryStatus.TruncatedTorn && index != segs.Count - 1)
+                throw new InvalidDataException($"WAL {path}: torn tail in a non-final segment.");
+            if (recovered.Status is not (WalRecoveryStatus.Ok or WalRecoveryStatus.TruncatedTorn))
                 throw new InvalidDataException($"WAL {path}: {recovered.Status} {recovered.Detail}");
 
-            if (recovered.Status is WalRecoveryStatus.TruncatedTorn
-                or WalRecoveryStatus.CorruptTailAmbiguous)
+            foreach (var record in recovered.Records)
             {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
-                fs.SetLength(recovered.ValidEndOffset);
-                fs.Flush(flushToDisk: true);
+                if (record.CommitSeq != expectedNextSeq!.Value)
+                    throw new InvalidDataException(
+                        $"WAL {path}: CommitSeq {record.CommitSeq}, expected {expectedNextSeq.Value}.");
+                expectedNextSeq = checked(expectedNextSeq.Value + 1);
+            }
+
+            if (recovered.Status == WalRecoveryStatus.TruncatedTorn)
+            {
+                using var writable = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
+                writable.SetLength(recovered.ValidEndOffset);
+                writable.Flush(flushToDisk: true);
             }
 
             allRecords.AddRange(recovered.Records);
-            if (recovered.LastCommitSeq is ulong s)
-                nextSeq = s + 1;
             lastValidEnd = recovered.ValidEndOffset;
             lastPath = path;
-            lastSeg = seg;
+            lastSeg = segment;
         }
 
+        ulong nextSeq = expectedNextSeq!.Value;
         var writer = WalWriter.OpenForAppend(lastPath, namespaceId, (ulong)lastValidEnd, nextSeq);
         return (new WalManager(walDir, namespaceId, rotateAfterBytes, writer, lastSeg), allRecords);
     }
@@ -117,7 +159,7 @@ public sealed class WalManager : IDisposable
     {
         lock (_lock)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            EnsureUsable();
             ulong seq = _active.Append(kind, payload, flags);
             if (_rotateAfterBytes > 0 && (long)_active.WriteOffset >= _rotateAfterBytes)
                 RotateUnderLock();
@@ -129,7 +171,7 @@ public sealed class WalManager : IDisposable
     {
         lock (_lock)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            EnsureUsable();
             return _active.Flush();
         }
     }
@@ -139,7 +181,7 @@ public sealed class WalManager : IDisposable
     {
         lock (_lock)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            EnsureUsable();
             RotateUnderLock();
         }
     }
@@ -147,14 +189,47 @@ public sealed class WalManager : IDisposable
     private void RotateUnderLock()
     {
         ulong nextSeq = _active.NextCommitSeq;
-        _active.StopAccepting();
         _active.Flush();
-        _active.Dispose();
 
-        int newSeg = _activeSeg + 1;
-        string path = SegmentPath(_walDir, _namespaceId, newSeg);
-        _active = WalWriter.Create(path, _namespaceId, firstCommitSeq: nextSeq);
-        _activeSeg = newSeg;
+        int newSegment = checked(_activeSeg + 1);
+        string finalPath = SegmentPath(_walDir, _namespaceId, newSegment);
+        string tempPath = finalPath + ".tmp";
+        if (File.Exists(finalPath))
+            throw new IOException($"WAL segment already exists: {finalPath}");
+        if (File.Exists(tempPath))
+            File.Delete(tempPath); // orphaned temp from an interrupted previous rotation
+
+        bool published = false;
+        try
+        {
+            // New segment contents and header become durable before the segment is published.
+            using (WalWriter.Create(tempPath, _namespaceId, firstCommitSeq: nextSeq))
+            {
+            }
+
+            File.Move(tempPath, finalPath);
+            published = true;
+            TryFsyncDirectory(_walDir);
+
+            var nextWriter = WalWriter.OpenForAppend(
+                finalPath, _namespaceId, WalHeader.Size, nextSeq);
+
+            WalWriter previous = _active;
+            _active = nextWriter;
+            _activeSeg = newSegment;
+            previous.StopAccepting();
+            previous.Dispose();
+        }
+        catch
+        {
+            if (published)
+                _faulted = true; // segment set changed; reopen performs authoritative recovery
+            else if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch { /* best effort */ }
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -165,26 +240,75 @@ public sealed class WalManager : IDisposable
     {
         lock (_lock)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            var segs = ListSegments(_walDir, _namespaceId);
+            EnsureUsable();
+            var segments = ListSegments(_walDir, _namespaceId);
             int removed = 0;
-            foreach (int seg in segs)
+
+            // Only delete a contiguous sealed prefix. Leaving a hole between retained
+            // segment numbers would make recovery order ambiguous.
+            foreach (int segment in segments)
             {
-                if (seg >= _activeSeg) break;
-                string path = SegmentPath(_walDir, _namespaceId, seg);
-                var r = WalRecovery.Recover(path);
-                ulong maxSeq = r.LastCommitSeq ?? 0;
-                if (maxSeq <= sealedThroughSeq && r.Status is WalRecoveryStatus.Ok or WalRecoveryStatus.TruncatedTorn)
+                if (segment >= _activeSeg)
+                    break;
+
+                string path = SegmentPath(_walDir, _namespaceId, segment);
+                WalRecoveryResult recovered = WalRecovery.Recover(path);
+                if (recovered.Status is not (WalRecoveryStatus.Ok or WalRecoveryStatus.TruncatedTorn))
+                    break;
+
+                ulong firstSeq;
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 {
-                    try
-                    {
-                        File.Delete(path);
-                        removed++;
-                    }
-                    catch { /* ignore */ }
+                    Span<byte> header = stackalloc byte[WalHeader.Size];
+                    fs.ReadExactly(header);
+                    firstSeq = WalHeader.ReadFirstCommitSeq(header);
+                }
+
+                if (firstSeq == 0)
+                    break;
+
+                ulong maxSeq = recovered.LastCommitSeq ?? (firstSeq - 1);
+                if (maxSeq > sealedThroughSeq)
+                    break;
+
+                try
+                {
+                    File.Delete(path);
+                    removed++;
+                }
+                catch
+                {
+                    break;
                 }
             }
+
+            if (removed > 0)
+                TryFsyncDirectory(_walDir);
+
             return removed;
+        }
+    }
+
+    private void EnsureUsable()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_faulted)
+            throw new InvalidOperationException("WAL manager requires reopen after a failed rotation.");
+    }
+
+    private static void TryFsyncDirectory(string directory)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+        catch
+        {
+            // Best-effort; directory handles are not flushable on every supported filesystem.
         }
     }
 
