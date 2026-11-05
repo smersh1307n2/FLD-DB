@@ -36,6 +36,24 @@ public class RecoveryTests : IDisposable
     }
 
     [Fact]
+    public void Missing_outbox_after_checkpoint_fails_closed()
+    {
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(Rec(43), 1, "outbox-is-durable"u8);
+            db.Commit();
+            db.Checkpoint();
+        }
+
+        string outboxPath = Path.Combine(_dir, "outbox", "ns_0.obx");
+        Assert.True(File.Exists(outboxPath));
+        File.Delete(outboxPath);
+
+        Assert.Throws<InvalidDataException>(() => FldDatabase.Open(_dir, 0));
+        Assert.False(File.Exists(outboxPath));
+    }
+
+    [Fact]
     public void Corrupt_manifest_fails_open_without_deleting_runs()
     {
         var recordId = Rec(42);
