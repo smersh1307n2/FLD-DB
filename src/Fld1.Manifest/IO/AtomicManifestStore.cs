@@ -5,7 +5,7 @@ namespace Fld1.Manifest.IO;
 /// <summary>
 /// Atomic manifest.fldm persistence. Spec [M-ATOMIC]:
 /// temp → fsync → atomic rename → fsync directory.
-/// Reader always sees old or new whole; CRC mismatch → treat as missing / generation 0.
+/// Reader sees old or new whole; a present CRC-invalid file fails closed.
 /// </summary>
 public sealed class AtomicManifestStore
 {
@@ -23,7 +23,7 @@ public sealed class AtomicManifestStore
         _tmpPath = System.IO.Path.Combine(dbDir, "tmp", "manifest.tmp");
     }
 
-    /// <summary>Load manifest or Empty(generation:0) if missing/corrupt.</summary>
+    /// <summary>Load manifest or Empty(generation:0) if missing; present corruption is fatal.</summary>
     public ManifestDocument Load()
     {
         lock (_lock)
@@ -35,9 +35,13 @@ public sealed class AtomicManifestStore
                 var bytes = File.ReadAllBytes(_path);
                 return ManifestCodec.Decode(bytes);
             }
-            catch (InvalidDataException)
+            catch (InvalidDataException ex)
             {
-                return ManifestDocument.Empty(0);
+                // A present but corrupt manifest is not an empty database. Returning Empty
+                // would make the Engine classify every Run as orphaned and delete user data.
+                throw new InvalidDataException(
+                    $"Manifest '{_path}' is corrupt; refusing to open the database or collect Runs.",
+                    ex);
             }
         }
     }
