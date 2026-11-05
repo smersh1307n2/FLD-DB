@@ -220,7 +220,7 @@ public readonly struct RunReader
             if (length > RunConstants.MaxBlobLen) return false;
             value = file.Slice((int)dataOff, (int)length);
             // Optional CRC check on first read
-            if (Hashes.Crc32C(value) != crc)
+            if (!Hashes.IsCrc32COrLegacy(value, crc))
                 return false;
             return true;
         }
@@ -323,7 +323,7 @@ public readonly struct RunReader
                 if (length <= RunConstants.MaxBlobLen)
                 {
                     var slice = _file.Slice((int)dataOff, (int)length);
-                    if (Hashes.Crc32C(slice.Span) == crc)
+                    if (Hashes.IsCrc32COrLegacy(slice.Span, crc))
                         valueMem = slice;
                     else
                         return false;
@@ -442,7 +442,7 @@ public readonly struct RunReader
                 uint crc = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(refPos + 12, 4));
                 if (length > RunConstants.MaxBlobLen) continue;
                 value = file.Slice((int)dataOff, (int)length);
-                if (Hashes.Crc32C(value) != crc) continue;
+                if (!Hashes.IsCrc32COrLegacy(value, crc)) continue;
             }
             else
             {
