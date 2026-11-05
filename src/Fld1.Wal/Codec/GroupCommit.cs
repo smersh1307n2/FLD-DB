@@ -92,9 +92,18 @@ public static class GroupCommitCodec
                 WriteU64(ms, f.Wall);
                 WriteU32(ms, f.Logical);
                 ms.Write(f.AuthorNodeId);
-                if (f.ChangeId.Length != 16)
-                    throw new ArgumentException("ChangeId must be 16 bytes");
-                ms.Write(f.ChangeId);
+                if (f.ChangeId.Length is not (0 or 16))
+                    throw new ArgumentException("ChangeId must be empty or 16 bytes");
+                if (f.ChangeId.Length == 16)
+                    ms.Write(f.ChangeId);
+                else
+                {
+                    // Compatibility for codec callers that do not attach sync metadata.
+                    // Recovery detects zero and deterministically derives a stable ID.
+                    Span<byte> zeroChangeId = stackalloc byte[16];
+                    zeroChangeId.Clear();
+                    ms.Write(zeroChangeId);
+                }
                 WriteU32(ms, (uint)f.Value.Length);
                 ms.Write(f.Value);
             }
