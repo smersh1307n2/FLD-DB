@@ -104,8 +104,7 @@ public static class ManifestCodec
         ulong generation = ReadU64(data, ref pos);
         uint storedCrc = ReadU32(data, ref pos);
         int bodyStart = pos;
-        uint computed = Hashes.Crc32C(data.Slice(bodyStart));
-        if (computed != storedCrc)
+        if (!Hashes.IsCrc32COrLegacy(data.Slice(bodyStart), storedCrc))
             throw new InvalidDataException("manifest CRC mismatch");
 
         ulong lastFlushed = ReadU64(data, ref pos);
