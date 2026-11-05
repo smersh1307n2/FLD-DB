@@ -977,7 +977,7 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
-    public int CompactOutbox()    public int CompactOutbox()
+    public int CompactOutbox()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
