@@ -587,106 +587,135 @@ public sealed class FldDatabase : IDisposable
 
     private ulong CompactUnderLock()
     {
-            // Collect all recordIds
-            var idSet = new HashSet<(ulong, ulong)>();
-            var idList = new List<byte[]>();
-            void AddId(ReadOnlySpan<byte> rid)
+        EnsureHealthy();
+        if (_dirty.Count != 0)
+            throw new InvalidOperationException("Compact requires all overlay writes to be committed first.");
+
+        // Index overlay keys once. ScanFieldIds includes tombstones; ScanRecord intentionally does not.
+        var fieldsByRecord = new Dictionary<(ulong Lo, ulong Hi), HashSet<ushort>>();
+        var recordIds = new List<byte[]>();
+
+        void AddRecord(ReadOnlySpan<byte> recordId)
+        {
+            var recordKey = (
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8)));
+            if (fieldsByRecord.ContainsKey(recordKey))
+                return;
+
+            fieldsByRecord.Add(recordKey, new HashSet<ushort>());
+            recordIds.Add(recordId.ToArray());
+        }
+
+        foreach (var item in _overlay.Snapshot())
+        {
+            Span<byte> recordId = stackalloc byte[16];
+            item.Key.WriteRecordId(recordId);
+            AddRecord(recordId);
+            fieldsByRecord[(item.Key.RecLo, item.Key.RecHi)].Add(item.Key.FieldId);
+        }
+
+        for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
+        {
+            var bytes = EnsureRunCached(runIndex);
+            new RunReader(bytes).ScanRecordIds(AddRecord);
+        }
+
+        if (recordIds.Count == 0)
+            return 0;
+
+        var builder = new RunBuilder(_namespaceId);
+        foreach (var recordId in recordIds)
+        {
+            var recordKey = (
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.AsSpan(8)));
+            HashSet<ushort> fieldIds = fieldsByRecord[recordKey];
+
+            for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
             {
-                ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid);
-                ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid.Slice(8));
-                if (idSet.Add((lo, hi)))
-                    idList.Add(rid.ToArray());
+                var bytes = EnsureRunCached(runIndex);
+                new RunReader(bytes).ScanFieldIds(recordId, fieldIds.Add);
             }
 
-            foreach (var kv in _overlay.Snapshot())
+            foreach (ushort fieldId in fieldIds)
             {
-                var b = new byte[16];
-                kv.Key.WriteRecordId(b);
-                AddId(b);
-            }
-            for (int i = 0; i < _runs.Count; i++)
-            {
-                var bytes = EnsureRunCached(i);
-                new RunReader(bytes).ScanRecordIds(AddId);
-            }
+                if (!TryResolveUnlocked(recordId, fieldId, out var resolved) || !resolved.Found)
+                    continue;
 
-            if (idList.Count == 0) return 0;
-
-            // Collect field ids per record by scanning
-            var builder = new RunBuilder(_namespaceId);
-            Span<byte> recBuf = stackalloc byte[16];
-            foreach (var rid in idList)
-            {
-                var fieldIds = new HashSet<ushort>();
-                foreach (var kv in _overlay.Snapshot())
+                if (resolved.IsTombstone)
                 {
-                    kv.Key.WriteRecordId(recBuf);
-                    if (recBuf.SequenceEqual(rid))
-                        fieldIds.Add(kv.Key.FieldId);
+                    builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true);
                 }
-                for (int i = 0; i < _runs.Count; i++)
+                else if (resolved.Value is not null)
                 {
-                    var bytes = EnsureRunCached(i);
-                    new RunReader(bytes).ScanRecord(rid, (fid, _) => fieldIds.Add(fid));
-                    // also tombstones: ScanRecord skips them — probe common? need scan with tombs
-                    // For compaction, use TryGetField over scanned live + overlay keys is incomplete for pure tombstone-only fields.
-                }
-                foreach (var fid in fieldIds)
-                {
-                    if (!TryResolveUnlocked(rid, fid, out var r) || !r.Found)
-                        continue;
-                    if (r.IsTombstone)
-                    {
-                        builder.Add(rid, fid, ReadOnlySpan<byte>.Empty, r.Wall, r.Logical,
-                            r.AuthorNodeId ?? _localAuthor, r.KeyEpoch, isTombstone: true);
-                    }
-                    else if (r.Value is not null)
-                    {
-                        builder.Add(rid, fid, r.Value, r.Wall, r.Logical,
-                            r.AuthorNodeId ?? _localAuthor, r.KeyEpoch, isTombstone: false);
-                    }
+                    builder.Add(recordId, fieldId, resolved.Value,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false);
                 }
             }
+        }
 
-            byte[] runBytes = builder.Build();
-            ulong runId = _nextRunId++;
-            string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            string tmp = path + ".tmp";
-            File.WriteAllBytes(tmp, runBytes);
-            using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
-                fs.Flush(flushToDisk: true);
-            File.Move(tmp, path, overwrite: true);
+        byte[] runBytes = builder.Build();
+        var newReader = new RunReader(runBytes);
+        if (!newReader.TryValidate(out var verify) || newReader.NamespaceId != _namespaceId)
+            throw new InvalidDataException($"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
 
-            idList.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
-            ulong seqHi = _pendingFlushedCommitSeq;
-            if (seqHi == 0) seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+        ulong runId = _nextRunId++;
+        string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+        WriteRunAtomically(path, runBytes);
 
-            var oldPaths = _runs.Select(r => r.path).ToList();
-            _manifestStore.Update(m =>
+        recordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+        ulong seqHi = _pendingFlushedCommitSeq;
+        if (seqHi == 0)
+            seqHi = _manifestStore.Load().LastFlushedCommitSeq;
+        if (seqHi == 0)
+            seqHi = _lastSealedCommitSeq;
+
+        var oldPaths = _runs.Select(run => run.path).ToList();
+        _manifestStore.Update(manifest =>
+        {
+            var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
+            runs.Add(new RunEntry
             {
-                var runs = m.Runs.Where(r => r.Ns != _namespaceId).ToList();
-                runs.Add(new RunEntry
-                {
-                    RunId = runId, Level = 0, Ns = _namespaceId,
-                    MinRec = idList[0], MaxRec = idList[^1],
-                    SeqLo = 1, SeqHi = seqHi
-                });
-                return CloneManifest(m, runs: runs, lastFlushed: seqHi);
+                RunId = runId,
+                Level = 0,
+                Ns = _namespaceId,
+                MinRec = recordIds[0],
+                MaxRec = recordIds[^1],
+                SeqLo = 1,
+                SeqHi = seqHi
             });
-            _manifestDirty = false;
+            return CloneManifest(manifest, runs: runs, lastFlushed: seqHi);
+        });
 
-            _runs.Clear();
-            _runs.Add((runId, path, runBytes));
-            _overlay.Clear();
-            _lastSealedCommitSeq = seqHi;
+        _manifestDirty = false;
+        _pendingFlushedCommitSeq = seqHi;
+        _runs.Clear();
+        _runs.Add((runId, path, runBytes));
+        _overlay.Clear();
+        _dirty.Clear();
+        _lastSealedCommitSeq = seqHi;
 
-            foreach (var op in oldPaths)
+        foreach (string oldPath in oldPaths)
+        {
+            try
             {
-                try { if (op != path) File.Delete(op); } catch { /* retain on failure */ }
+                if (oldPath != path)
+                    File.Delete(oldPath);
             }
-            if (_truncateSealedWal)
-                _wal.TruncateSealedSegments(seqHi);
-            return runId;
+            catch
+            {
+                // Manifest already points at the replacement Run; stale files are collected on next open.
+            }
+        }
+
+        if (_truncateSealedWal)
+            _wal.TruncateSealedSegments(seqHi);
+
+        return runId;
     }
 
     /// <summary>Remove run files on disk not referenced by in-memory run list.</summary>
@@ -913,6 +942,45 @@ public sealed class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
             _wal.Rotate();
+    }
+
+    private void EnsureHealthy()
+    {
+        if (_faulted)
+            throw new InvalidOperationException("Database requires reopen after a failed durable operation.");
+    }
+
+    private static void WriteRunAtomically(string path, byte[] runBytes)
+    {
+        string tempPath = path + ".tmp";
+        string directory = Path.GetDirectoryName(path)!;
+
+        using (var fs = new FileStream(
+            tempPath, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 64 * 1024, FileOptions.WriteThrough))
+        {
+            fs.Write(runBytes);
+            fs.Flush(flushToDisk: true);
+        }
+
+        File.Move(tempPath, path, overwrite: true);
+        TryFsyncDirectory(directory);
+    }
+
+    private static void TryFsyncDirectory(string directory)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+        catch
+        {
+            // Best-effort; directory handles are not flushable on every supported filesystem.
+        }
     }
 
     public void Dispose()
