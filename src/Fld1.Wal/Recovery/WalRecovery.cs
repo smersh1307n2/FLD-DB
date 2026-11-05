@@ -63,6 +63,15 @@ public static class WalRecovery
             return Fail(WalRecoveryStatus.CorruptHeader, "header crc", 0);
         if (WalHeader.ReadVersion(header) != WalConstants.WalVersion)
             return Fail(WalRecoveryStatus.CorruptHeader, "version", 0);
+        if (WalHeader.ReadFlags(header) != 0)
+            return Fail(WalRecoveryStatus.CorruptHeader, "reserved flags", 0);
+        if (WalHeader.ReadFirstCommitSeq(header) == 0)
+            return Fail(WalRecoveryStatus.CorruptHeader, "FirstCommitSeq is zero", 0);
+        for (int i = 0x1C; i < header.Length; i++)
+        {
+            if (header[i] != 0)
+                return Fail(WalRecoveryStatus.CorruptHeader, $"reserved byte {i}", 0);
+        }
 
         var records = new List<WalRecoveredRecord>();
         long pos = WalHeader.Size;
@@ -90,22 +99,15 @@ public static class WalRecovery
 
             if (!WalEnvelope.VerifyEnvelopeCrc(env))
             {
-                // Could be torn overwrite of envelope or corruption
-                // Spec: EnvelopeCrc invalid → STOP (not truncate if we can't tell)
-                // For recovery of torn at end: if this is the last incomplete attempt, treat as torn
-                if (pos + 24 > fileSize)
-                {
-                    return new WalRecoveryResult
-                    {
-                        Status = WalRecoveryStatus.TruncatedTorn,
-                        Detail = "envelope crc + short",
-                        Records = records,
-                        ValidEndOffset = pos,
-                        LastCommitSeq = prevSeq
-                    };
-                }
+                // The loop already classified tails shorter than the minimum 24-byte
+                // envelope+CRC as torn. Once a complete minimum record prefix exists,
+                // an invalid EnvelopeCrc is corruption and must never be truncated.
                 return Fail(WalRecoveryStatus.CorruptEnvelope, $"pos={pos}", pos, records, prevSeq);
             }
+
+            if (env[WalEnvelope.OffReserved] != 0 || env[WalEnvelope.OffPad] != 0)
+                return Fail(WalRecoveryStatus.CorruptEnvelope,
+                    $"reserved envelope byte pos={pos}", pos, records, prevSeq);
 
             byte kind = WalEnvelope.ReadKind(env);
             if (kind is not (WalConstants.KindGroupCommit or WalConstants.KindNsCreate
