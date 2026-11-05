@@ -109,7 +109,7 @@ public sealed class FldDatabase : IDisposable
         ulong checkpointedThroughCommitSeq = manifest.Runs
             .Where(run => run.Ns == namespaceId)
             .Select(run => run.SeqHi)
-            .DefaultIfEmpty(0)
+            .DefaultIfEmpty(0UL)
             .Max();
 
         string walDir = Path.Combine(dbDir, "wal");
