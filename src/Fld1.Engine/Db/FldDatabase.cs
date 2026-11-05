@@ -723,13 +723,20 @@ public sealed class FldDatabase : IDisposable
     {
         string runsDir = Path.Combine(_dbDir, "runs");
         if (!Directory.Exists(runsDir)) return;
-        var live = new HashSet<string>(_runs.Select(r => Path.GetFullPath(r.path)), StringComparer.Ordinal);
-        foreach (var f in Directory.EnumerateFiles(runsDir, "*.fld1"))
+
+        // A database directory may contain several namespaces. Only runs absent from
+        // the complete manifest are orphaned; the current FldDatabase loads one namespace.
+        var manifest = _manifestStore.Load();
+        var liveRunIds = manifest.Runs.Select(run => run.RunId).ToHashSet();
+
+        foreach (string file in Directory.EnumerateFiles(runsDir, "*.fld1"))
         {
-            if (!live.Contains(Path.GetFullPath(f)))
-            {
-                try { File.Delete(f); } catch { /* ignore */ }
-            }
+            string name = Path.GetFileNameWithoutExtension(file);
+            if (!ulong.TryParse(name, out ulong runId) || liveRunIds.Contains(runId))
+                continue;
+
+            try { File.Delete(file); }
+            catch { /* stale orphan is harmless and will be retried on next open */ }
         }
     }
 
