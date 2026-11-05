@@ -72,6 +72,9 @@ public static class GroupCommitCodec
         WriteU32(ms, (uint)p.Provenance.Count);
         WriteU32(ms, 2); // v2 adds stable ChangeId[16] to every field mutation
 
+        Span<byte> zeroChangeId = stackalloc byte[16];
+        zeroChangeId.Clear();
+
         foreach (var m in p.Mutations)
         {
             if (m.ClientInstanceId.Length != 16) throw new ArgumentException("ClientInstanceId");
@@ -98,10 +101,7 @@ public static class GroupCommitCodec
                     ms.Write(f.ChangeId);
                 else
                 {
-                    // Compatibility for codec callers that do not attach sync metadata.
-                    // Recovery detects zero and deterministically derives a stable ID.
-                    Span<byte> zeroChangeId = stackalloc byte[16];
-                    zeroChangeId.Clear();
+                    // Recovery deterministically derives the stable ID for a zero marker.
                     ms.Write(zeroChangeId);
                 }
                 WriteU32(ms, (uint)f.Value.Length);
