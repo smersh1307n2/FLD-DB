@@ -366,6 +366,7 @@ public sealed class FldDatabase : IDisposable
                     Wall = kv.Value.Wall,
                     Logical = kv.Value.Logical,
                     AuthorNodeId = kv.Value.AuthorNodeId,
+                    ChangeId = kv.Value.ChangeId,
                     Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
                 });
             }
@@ -397,32 +398,42 @@ public sealed class FldDatabase : IDisposable
                 Provenance = []
             });
 
-            ulong commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
-            _wal.Flush();
-
-            // Durable outbox for BIN-SYNC (ChangeId stable across restarts)
-            Span<byte> changeId = stackalloc byte[16];
-            Span<byte> recBuf2 = stackalloc byte[16];
-            foreach (var kv in snap)
+            ulong commitSeq;
+            try
             {
-                Uuid7.NewUuid7(changeId);
-                kv.Key.WriteRecordId(recBuf2);
-                _outbox.Append(new OutboxEntry
+                commitSeq = _wal.Append(WalConstants.KindGroupCommit, payload);
+                _wal.Flush();
+
+                Span<byte> recordId = stackalloc byte[16];
+                foreach (var item in snap)
                 {
-                    OutboxSeq = 0, // assigned by log
-                    CommitSeq = commitSeq,
-                    ChangeId = changeId.ToArray(),
-                    RecordId = recBuf2.ToArray(),
-                    FieldId = kv.Key.FieldId,
-                    OpKind = kv.Value.IsTombstone ? (byte)2 : (byte)1,
-                    AuthorNodeId = kv.Value.AuthorNodeId,
-                    Wall = kv.Value.Wall,
-                    Logical = kv.Value.Logical,
-                    KeyEpoch = kv.Value.KeyEpoch,
-                    Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
-                });
+                    item.Key.WriteRecordId(recordId);
+                    _outbox.AppendIfMissing(new OutboxEntry
+                    {
+                        OutboxSeq = 0,
+                        CommitSeq = commitSeq,
+                        ChangeId = item.Value.ChangeId,
+                        RecordId = recordId.ToArray(),
+                        FieldId = item.Key.FieldId,
+                        OpKind = item.Value.IsTombstone ? (byte)2 : (byte)1,
+                        AuthorNodeId = item.Value.AuthorNodeId,
+                        Wall = item.Value.Wall,
+                        Logical = item.Value.Logical,
+                        KeyEpoch = item.Value.KeyEpoch,
+                        Value = item.Value.IsTombstone ? Array.Empty<byte>() : item.Value.Value
+                    });
+                }
+
+                _outbox.Flush();
             }
-            _outbox.Flush();
+            catch
+            {
+                // WAL may already be durable. Do not append another logical commit in
+                // this process; startup replay will finish the idempotent Outbox append.
+                _faulted = true;
+                throw;
+            }
+
             _dirty.Clear();
 
             // Defer manifest disk write — WAL is source of truth until Checkpoint/FlushManifest
