@@ -79,7 +79,10 @@ public sealed class WalWriter : IDisposable
             if (!_accepting)
                 throw new InvalidOperationException("WAL not accepting appends");
 
-            ulong commitSeq = _nextCommitSeq++;
+            if (_nextCommitSeq == ulong.MaxValue)
+                throw new OverflowException("WAL CommitSeq exhausted.");
+
+            ulong commitSeq = _nextCommitSeq;
             uint len = (uint)payload.Length;
             int recordSize = WalEnvelope.AlignedRecordSize(len);
 
@@ -105,8 +108,21 @@ public sealed class WalWriter : IDisposable
             BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(crcOff, 4), recordCrc);
             // padding already zero
 
-            _fs.Write(record);
-            // Publish after write visible
+            try
+            {
+                _fs.Write(record);
+            }
+            catch
+            {
+                // A partial write makes the active append position uncertain.
+                // Require recovery/reopen before accepting another append.
+                _accepting = false;
+                throw;
+            }
+
+            _nextCommitSeq = commitSeq + 1;
+
+            // Publish after the complete record has been handed to the file stream.
             Thread.MemoryBarrier();
             ulong newEnd = _writeOffset + (ulong)recordSize;
             Volatile.Write(ref _publishedWalEnd, newEnd);
@@ -125,8 +141,16 @@ public sealed class WalWriter : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             ulong target = Volatile.Read(ref _publishedWalEnd);
-            _fs.Flush(flushToDisk: true);
-            return target;
+            try
+            {
+                _fs.Flush(flushToDisk: true);
+                return target;
+            }
+            catch
+            {
+                _accepting = false;
+                throw;
+            }
         }
     }
 
