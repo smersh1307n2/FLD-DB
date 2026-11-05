@@ -457,6 +457,10 @@ public sealed class FldDatabase : IDisposable
 
     private ulong CheckpointUnderLock()
     {
+            EnsureHealthy();
+            if (_dirty.Count != 0)
+                throw new InvalidOperationException("Checkpoint requires all overlay writes to be committed first.");
+
             var snap = _overlay.Snapshot();
             if (snap.Count == 0) return 0;
 
@@ -476,10 +480,11 @@ public sealed class FldDatabase : IDisposable
             ulong runId = _nextRunId++;
             string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
             string tmp = path + ".tmp";
-            File.WriteAllBytes(tmp, runBytes);
-            using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
-                fs.Flush(flushToDisk: true);
-            File.Move(tmp, path, overwrite: true);
+            var builtReader = new RunReader(runBytes);
+            if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
+                throw new InvalidDataException(
+                    $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
+            WriteRunAtomically(path, runBytes);
 
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
