@@ -48,7 +48,7 @@ public static class Hashes
     /// <summary>Legacy CRC-32/IEEE over two concatenated spans without copying.</summary>
     public static uint Crc32Ieee(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
     {
-        using var hasher = new Crc32();
+        var hasher = new Crc32();
         hasher.Append(first);
         hasher.Append(second);
         return hasher.GetCurrentHashAsUInt32();
