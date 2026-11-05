@@ -811,53 +811,77 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (recordId.Length != 16) return;
+        ArgumentNullException.ThrowIfNull(onField);
 
-        var fieldIds = new HashSet<ushort>();
-        Span<byte> recBuf = stackalloc byte[16];
-        foreach (var kv in _overlay.Snapshot())
+        var result = new List<(ushort FieldId, byte[] Value)>();
+        lock (_commitLock)
         {
-            kv.Key.WriteRecordId(recBuf);
-            if (recBuf.SequenceEqual(recordId))
-                fieldIds.Add(kv.Key.FieldId);
+            var fieldIds = new HashSet<ushort>();
+            Span<byte> overlayRecordId = stackalloc byte[16];
+
+            foreach (var item in _overlay.Snapshot())
+            {
+                item.Key.WriteRecordId(overlayRecordId);
+                if (overlayRecordId.SequenceEqual(recordId))
+                    fieldIds.Add(item.Key.FieldId);
+            }
+
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                var bytes = EnsureRunCached(i);
+                new RunReader(bytes).ScanRecord(recordId, (fieldId, _) => fieldIds.Add(fieldId));
+            }
+
+            foreach (ushort fieldId in fieldIds)
+            {
+                if (TryResolveUnlocked(recordId, fieldId, out var resolved)
+                    && resolved.Found && !resolved.IsTombstone && resolved.Value is not null)
+                {
+                    result.Add((fieldId, resolved.Value));
+                }
+            }
         }
-        for (int i = 0; i < _runs.Count; i++)
-        {
-            var bytes = EnsureRunCached(i);
-            new RunReader(bytes).ScanRecord(recordId, (fid, _) => fieldIds.Add(fid));
-        }
-        foreach (var fid in fieldIds.OrderBy(x => x))
-        {
-            if (TryResolve(recordId, fid, out var r) && r.Found && !r.IsTombstone && r.Value is not null)
-                onField(fid, r.Value);
-        }
+
+        foreach (var item in result.OrderBy(x => x.FieldId))
+            onField(item.FieldId, item.Value);
     }
 
     /// <summary>Enumerate distinct RecordIds from overlay + all runs (BE order not guaranteed).</summary>
     public void ScanRecordIds(Action<byte[]> onRecordId)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var ids = new HashSet<(ulong, ulong)>();
+        ArgumentNullException.ThrowIfNull(onRecordId);
 
-        foreach (var kv in _overlay.Snapshot())
+        var result = new List<byte[]>();
+        lock (_commitLock)
         {
-            if (ids.Add((kv.Key.RecLo, kv.Key.RecHi)))
+            var ids = new HashSet<(ulong Lo, ulong Hi)>();
+
+            foreach (var item in _overlay.Snapshot())
             {
-                var b = new byte[16];
-                kv.Key.WriteRecordId(b);
-                onRecordId(b);
+                if (!ids.Add((item.Key.RecLo, item.Key.RecHi)))
+                    continue;
+
+                var recordId = new byte[16];
+                item.Key.WriteRecordId(recordId);
+                result.Add(recordId);
+            }
+
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                var bytes = EnsureRunCached(i);
+                new RunReader(bytes).ScanRecordIds(recordId =>
+                {
+                    ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId);
+                    ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8));
+                    if (ids.Add((lo, hi)))
+                        result.Add(recordId.ToArray());
+                });
             }
         }
-        for (int i = 0; i < _runs.Count; i++)
-        {
-            var bytes = EnsureRunCached(i);
-            new RunReader(bytes).ScanRecordIds(rid =>
-            {
-                ulong lo = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid);
-                ulong hi = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rid.Slice(8));
-                if (ids.Add((lo, hi)))
-                    onRecordId(rid.ToArray());
-            });
-        }
+
+        foreach (var recordId in result)
+            onRecordId(recordId);
     }
 
     private byte[] EnsureRunCached(int index)
@@ -885,50 +909,76 @@ public sealed class FldDatabase : IDisposable
     public int ApplyRemote(ReadOnlySpan<RemoteFieldWrite> writes)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        int applied = 0;
-        foreach (ref readonly var w in writes)
-        {
-            var key = new MemFieldKey(w.RecordId, w.FieldId);
-            bool win = true;
-            if (TryResolve(w.RecordId, w.FieldId, out var resolved) && resolved.Found)
-            {
-                win = FieldResolver.IsNewer(
-                    w.Wall, w.Logical, w.AuthorNodeId,
-                    resolved.Wall, resolved.Logical, resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty);
-            }
-            if (!win) continue;
+        ArgumentNullException.ThrowIfNull(writes);
 
-            _overlay.Put(key, new MemFieldValue
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            int applied = 0;
+
+            foreach (ref readonly var write in writes)
             {
-                Value = w.IsTombstone ? Array.Empty<byte>() : w.Value.ToArray(),
-                Wall = w.Wall,
-                Logical = w.Logical,
-                AuthorNodeId = w.AuthorNodeId,
-                KeyEpoch = w.KeyEpoch,
-                IsTombstone = w.IsTombstone
-            });
-            lock (_commitLock) { _dirty.Add(key); }
-            applied++;
+                var key = new MemFieldKey(write.RecordId, write.FieldId);
+                if (TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved) && resolved.Found)
+                {
+                    if (!FieldResolver.IsNewer(
+                            write.Wall, write.Logical, write.AuthorNodeId,
+                            resolved.Wall, resolved.Logical,
+                            resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
+                        continue;
+                }
+
+                byte[] changeId = write.ChangeId is { Length: 16 }
+                    ? write.ChangeId.ToArray()
+                    : NewChangeId();
+
+                _overlay.Put(key, new MemFieldValue
+                {
+                    Value = write.IsTombstone ? Array.Empty<byte>() : write.Value.ToArray(),
+                    Wall = write.Wall,
+                    Logical = write.Logical,
+                    AuthorNodeId = write.AuthorNodeId.ToArray(),
+                    KeyEpoch = write.KeyEpoch,
+                    IsTombstone = write.IsTombstone,
+                    ChangeId = changeId
+                });
+
+                _dirty.Add(key);
+                applied++;
+            }
+
+            return applied;
         }
-        return applied;
     }
 
-    public int CompactOutbox()
+    public int CompactOutbox()    public int CompactOutbox()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _outbox.Compact();
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _outbox.Compact();
+        }
     }
 
     public IReadOnlyList<OutboxEntry> ReadOutboxBatch(ulong afterSeq, int limit = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _outbox.ReadBatch(afterSeq, limit);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _outbox.ReadBatch(afterSeq, limit);
+        }
     }
 
     public void AcknowledgeOutbox(ulong throughSeq)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _outbox.Acknowledge(throughSeq);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _outbox.Acknowledge(throughSeq);
+        }
     }
 
     public ulong GetOutboxWatermark()
