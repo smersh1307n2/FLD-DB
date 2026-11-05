@@ -129,6 +129,42 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Torn_tail_after_materialization_fails_closed_without_truncating()
+    {
+        string outboxDir = Path.Combine(_dir, "materialized-outbox");
+        string outboxPath = Path.Combine(outboxDir, "ns_11.obx");
+        var author = new byte[16];
+        author[0] = 0xA1;
+
+        using (var outbox = OutboxLog.Open(outboxDir, namespaceId: 11))
+        {
+            outbox.Append(new OutboxEntry
+            {
+                OutboxSeq = 0,
+                CommitSeq = 1,
+                ChangeId = new byte[16] { 1 },
+                RecordId = new byte[16] { 2 },
+                FieldId = 3,
+                OpKind = 1,
+                AuthorNodeId = author,
+                Wall = 1,
+                Logical = 0,
+                KeyEpoch = 0,
+                Value = "durable"u8.ToArray()
+            });
+            outbox.Flush();
+            outbox.MarkMaterialized(1);
+        }
+
+        using (var stream = new FileStream(outboxPath, FileMode.Append, FileAccess.Write, FileShare.None))
+            stream.Write(new byte[] { 0x01, 0x02, 0x03 });
+
+        long damagedLength = new FileInfo(outboxPath).Length;
+        Assert.Throws<InvalidDataException>(() => OutboxLog.Open(outboxDir, namespaceId: 11));
+        Assert.Equal(damagedLength, new FileInfo(outboxPath).Length);
+    }
+
+    [Fact]
     public void Sparse_index_reads_from_the_requested_cursor()
     {
         string outboxDir = Path.Combine(_dir, "direct-outbox");
