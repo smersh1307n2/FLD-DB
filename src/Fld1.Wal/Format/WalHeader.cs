@@ -52,7 +52,6 @@ public static class WalHeader
     public static bool VerifyCrc(ReadOnlySpan<byte> h)
     {
         if (h.Length < Size) return false;
-        uint expected = Hashes.Crc32C(h.Slice(0, OffHeaderCrc32C));
-        return expected == ReadHeaderCrc(h);
+        return Hashes.IsCrc32COrLegacy(h.Slice(0, OffHeaderCrc32C), ReadHeaderCrc(h));
     }
 }
