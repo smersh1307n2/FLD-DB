@@ -306,7 +306,7 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
-    /// <summary>Apply batch into overlay (not durable until Commit).</summary>    /// <summary>Apply batch into overlay (not durable until Commit).</summary>
+    /// <summary>Apply batch into overlay (not durable until Commit).</summary>
     public void Apply(FldWriteBatch batch)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -909,7 +909,6 @@ public sealed class FldDatabase : IDisposable
     public int ApplyRemote(ReadOnlySpan<RemoteFieldWrite> writes)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(writes);
 
         lock (_commitLock)
         {
