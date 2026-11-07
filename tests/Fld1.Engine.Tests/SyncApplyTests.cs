@@ -193,6 +193,10 @@ public class SyncApplyTests : IDisposable
             Assert.Equal(new byte[] { 83, 84 },
                 page.Select(item => item.Batch.Writes[0].ChangeId[15]).ToArray());
         }
+
+        using var reopened = FldDatabase.Open(_dir);
+        var restoredPage = reopened.ReadRelayBatches(Author(9), afterJournalSeq: 2, limit: 10);
+        Assert.Equal(new ulong[] { 3, 4 }, restoredPage.Select(item => item.JournalSeq));
     }
 
     [Fact]
