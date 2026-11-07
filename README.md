@@ -2,13 +2,13 @@
 
 Embedded field-store with multi-process access via **FLD Shared Engine**.
 
-Implements [FLD KERNEL SPECIFICATION v1.5.8-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.8.md) and integrates with [BIN-SYNC](https://github.com/smersh1307n2/BIN-SYNC).
+Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.md) and integrates with [BIN-SYNC](https://github.com/smersh1307n2/BIN-SYNC).
 
 | Layer | Version |
 |-------|---------|
-| FLD format / kernel | v1.5.8-DRAFT (+compat-2.6.5) |
-| BIN-SYNC **protocol** | CORE v2.3.6 + errata v2.3.7 |
-| `BinSync.Core` **package** | ≥ 2.6.5 |
+| FLD format / kernel | v1.5.9-DRAFT (+compat-2.6.5) |
+| BIN-SYNC **protocol** | CORE v2.4.17 FINAL |
+| `BinSync.Core` **package** | 3.0.0 |
 
 **Target:** .NET 10 / C# 13+
 
