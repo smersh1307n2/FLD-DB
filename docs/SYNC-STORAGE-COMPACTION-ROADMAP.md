@@ -125,12 +125,15 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 - The decoder remains backward-compatible with v2 payloads, validates that relay indexes are unique/in-range and reconstructs RelayFields as references to the original decoded field objects.
 - Relay-only journal records use a compact flag and store the selected operations once, without a second index list.
 
-**2.2 Metadata receipt plus relay-only materialization — implemented, retention still coupled**
+**2.2 Metadata receipt plus relay-only materialization — implemented; per-author relay payload GC implemented, receipt GC open**
 - ApplyJournal now stores batch receipt metadata and only relay-selected operations. Non-relay field payloads are not copied into the journal.
 - The full APPLY WAL record is flushed first; the compact journal materialization is then flushed before ApplyRemoteBatch returns. This makes relay payload durable before a later checkpoint can truncate the WAL.
 - Journal materialization is idempotent by batch identity and compares canonical receipt metadata plus relay payload. WAL recovery rebuilds the same compact journal representation from both v2 and v3 APPLY_COMMIT records.
 - Relay-eligible LWW losers remain in the relay-only materialization.
-- Receipt metadata and relay payload still share one append-only journal record/file and therefore do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
+- Receipt metadata and relay payload remain in one journal record/file, but relay fields are now independently reclaimable per original author. A CRC-protected per-author safe JournalSeq sidecar is persisted before reclamation.
+- After the APPLY WAL prefix is sealed and truncated, `CompactAcknowledgedRelayPayloads` atomically rewrites the journal, removing only relay fields covered by that author's safe watermark while preserving receipt metadata and every other author's payload. The receipt record remains for duplicate ACK handling.
+- Recovery checks the sealed WAL boundary before attempting to rematerialize a batch already present in the compacted journal; this prevents a full pre-compaction WAL payload from resurrecting ACKed relay fields. If the journal receipt is missing, WAL recovery rebuilds it.
+- Compaction currently rewrites the full journal (O(N) I/O); receipt rows and the BatchKey index remain unbounded. No receipt GC is implemented.
 
 **2.3 Bounded indexes and seekable paging — partially implemented**
 - Implemented a sparse in-memory anchor every 256 JournalSeq records. ReadBatches binary-searches the anchors and scans at most one bounded stride before reading the requested page; it no longer retains a full IndexEntry List or rescans the entire consumed prefix.
@@ -145,9 +148,9 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 - ReadBatches uses sparse JournalSeq anchors (stride 256) and bounded scan; full IndexEntry List removed.
 - BatchKey index values are 64-bit offsets, not duplicated BatchKey+IndexEntry structs.
 - ReadRelayBatchPage reports ScannedThroughJournalSeq across nonmatching author ranges. Adapter must persist this scan cursor atomically with relay operations; it is not an ACK watermark.
-- A per-author relay ACK sidecar records safe-through JournalSeq, but does not physically reclaim journal bytes.
+- A per-author relay ACK sidecar records safe-through JournalSeq. Checkpoint/reopen compaction physically reclaims acknowledged author payloads while retaining receipts and other authors' payload.
 
-**Remaining Phase 2 gate:** ApplyJournal receipt and relay payload still share one append-only file and have no physical compaction/truncation. The BatchKey offset dictionary remains one in-memory entry per receipt; disk-backed/rebuildable bounded indexing and safe independent receipt/relay GC remain open.
+**Remaining Phase 2 gate:** relay payload reclamation is implemented per author, but receipt retention remains unbounded and shares the journal's physical record envelope. The BatchKey→offset dictionary still has one in-memory entry per receipt; disk-backed/rebuildable bounded indexing and independent receipt GC remain open. Full-file rewrite cost must be benchmarked at large journal sizes.
 
 
 ### Phase 3 — Durable local PendingLocal coalescing
