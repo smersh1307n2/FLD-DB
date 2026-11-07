@@ -102,3 +102,11 @@ public sealed class RemoteBatchReceipt
     public required int AppliedCount { get; init; }
     public required bool IsDuplicate { get; init; }
 }
+
+/// <summary>One durable journal batch; JournalSeq is a local paging token, not a sync cursor.</summary>
+public sealed class RelayJournalBatch
+{
+    public required ulong JournalSeq { get; init; }
+    public required ulong CommitSeq { get; init; }
+    public required RemoteBatchCommit Batch { get; init; }
+}
