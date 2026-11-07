@@ -1054,6 +1054,7 @@ public sealed class FldDatabase : IDisposable
     /// by BIN-SYNC receive; use ApplyRemoteBatch for atomic durable receive.
     /// Returns number of fields that became the LWW winner in overlay.
     /// </summary>
+    [Obsolete("Non-durable merge-only compatibility API. Use ApplyRemoteBatch for synchronization.")]
     public int ApplyRemote(ReadOnlySpan<RemoteFieldWrite> writes)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
