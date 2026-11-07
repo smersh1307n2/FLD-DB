@@ -416,14 +416,14 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 ### 11.3. Durable change identity
 - ChangeId is mandatory, nonzero, exactly 16 bytes, and immutable from local creation through relay.
 - Remote input with absent/invalid ChangeId is rejected. FLD MUST NOT synthesize a new ChangeId.
-- ChangeId dedup and batch Inbox receipt are durable and atomic with remote apply.
+- FLD durably deduplicates ChangeId and commits relay eligibility atomically with APPLY. BIN-SYNC alone owns Inbox receipts, receive cursors, batch digest-chain state, and ACK state. Integration order: FLD durable APPLY succeeds first; BIN-SYNC then persists Inbox/cursor state and may ACK. If a crash occurs between these steps, redelivery is safe because FLD ChangeId dedup makes APPLY idempotent.
 - LWW loser retention is separate from field winner publication: provenance-valid new operations remain relay-eligible even when they do not replace the current field winner, except exact self-echo/already-seen operations.
 
 ### 11.4. Local and remote commit kinds
 - LOCAL commit creates local author Outbox entries.
 - APPLY commit stores remote field state and relay provenance but MUST NOT reclassify remote mutations as locally-authored writes.
 - Snapshot installation uses APPLY semantics and never generates local Outbox entries.
-- Durable receipt, cursor/digest-chain metadata, and relay-eligible operations commit atomically with APPLY before ACK.
+- FLD ChangeId-seen/provenance state and relay-eligible operations commit atomically with APPLY. BIN-SYNC persists its Inbox receipt, receive cursor, and digest-chain checkpoint only after FLD reports durable success; ACK follows that persistence.
 
 ### 11.5. Digest compatibility
 - BIN-SYNC uses `BIN-SYNC/RECORD/v2` and `BIN-SYNC/STATE/v2` domains. StateRoot is derived only from replicated namespace state.
