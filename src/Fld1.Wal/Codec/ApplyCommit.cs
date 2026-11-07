@@ -24,11 +24,13 @@ public sealed class WalApplyCommit
     public required uint AppliedCount { get; init; }
     public required List<WalFieldMutation> Fields { get; init; }
     public required List<WalFieldMutation> RelayFields { get; init; }
+    /// <summary>Journal-only form: Fields contains only relay payloads and is also the relay subset.</summary>
+    public bool RelayOnly { get; init; }
 }
 
 public static class ApplyCommitCodec
 {
-    private const uint BodyVersion = 2;
+    private const uint BodyVersion = 3;
     private const int MaxProtocolStateDelta = 4 * 1024 * 1024;
 
     public static byte[] Encode(WalApplyCommit commit)
@@ -66,8 +68,20 @@ public static class ApplyCommitCodec
         WriteU32(ms, (uint)commit.ProtocolStateDelta.Length);
         ms.Write(commit.ProtocolStateDelta);
         WriteU32(ms, commit.AppliedCount);
+        WriteByte(ms, commit.RelayOnly ? (byte)1 : (byte)0);
         WriteFields(ms, commit.Fields);
-        WriteFields(ms, commit.RelayFields);
+        if (commit.RelayOnly)
+        {
+            if (!SameFieldLists(commit.Fields, commit.RelayFields))
+                throw new ArgumentException("Relay-only APPLY_COMMIT must store exactly its relay fields.", nameof(commit));
+        }
+        else
+        {
+            var relayIndices = BuildRelayIndices(commit.Fields, commit.RelayFields);
+            WriteU32(ms, (uint)relayIndices.Count);
+            foreach (uint index in relayIndices)
+                WriteVarUInt32(ms, index);
+        }
 
         return ms.ToArray();
     }
@@ -75,7 +89,8 @@ public static class ApplyCommitCodec
     public static WalApplyCommit Decode(ReadOnlySpan<byte> payload)
     {
         int pos = 0;
-        if (ReadU32(payload, ref pos) != BodyVersion)
+        uint bodyVersion = ReadU32(payload, ref pos);
+        if (bodyVersion is not (2 or BodyVersion))
             throw new InvalidDataException("Unsupported APPLY_COMMIT body version.");
 
         var senderPeer = ReadBytes(payload, ref pos, 16);
@@ -94,8 +109,42 @@ public static class ApplyCommitCodec
             throw new InvalidDataException("ProtocolStateDelta exceeds limit.");
         var delta = ReadBytes(payload, ref pos, checked((int)deltaLength));
         uint appliedCount = ReadU32(payload, ref pos);
-        var fields = ReadFields(payload, ref pos);
-        var relayFields = ReadFields(payload, ref pos);
+        bool relayOnly = false;
+        List<WalFieldMutation> fields;
+        List<WalFieldMutation> relayFields;
+        if (bodyVersion == 2)
+        {
+            fields = ReadFields(payload, ref pos);
+            relayFields = ReadFields(payload, ref pos);
+            _ = BuildRelayIndices(fields, relayFields);
+        }
+        else
+        {
+            byte flags = ReadByte(payload, ref pos);
+            if ((flags & ~1) != 0)
+                throw new InvalidDataException("Unknown APPLY_COMMIT flags.");
+            relayOnly = (flags & 1) != 0;
+            fields = ReadFields(payload, ref pos);
+            if (relayOnly)
+            {
+                relayFields = fields;
+            }
+            else
+            {
+                uint relayCount = ReadU32(payload, ref pos);
+                if (relayCount > fields.Count)
+                    throw new InvalidDataException("APPLY_COMMIT relay index count exceeds field count.");
+                relayFields = new List<WalFieldMutation>((int)relayCount);
+                var seen = new HashSet<uint>();
+                for (uint i = 0; i < relayCount; i++)
+                {
+                    uint index = ReadVarUInt32(payload, ref pos);
+                    if (index >= fields.Count || !seen.Add(index))
+                        throw new InvalidDataException("Invalid or duplicate APPLY_COMMIT relay index.");
+                    relayFields.Add(fields[(int)index]);
+                }
+            }
+        }
 
         if (pos != payload.Length)
             throw new InvalidDataException("Trailing bytes in APPLY_COMMIT payload.");
@@ -116,7 +165,8 @@ public static class ApplyCommitCodec
             ProtocolStateDelta = delta,
             AppliedCount = appliedCount,
             Fields = fields,
-            RelayFields = relayFields
+            RelayFields = relayFields,
+            RelayOnly = relayOnly
         };
 
         ValidateId(result.SenderPeer, nameof(result.SenderPeer), nonzero: true);
@@ -136,6 +186,86 @@ public static class ApplyCommitCodec
                 throw new InvalidDataException("Invalid APPLY_COMMIT operation.");
         }
         return result;
+    }
+
+    private readonly record struct ChangeKey(ulong Low, ulong High)
+    {
+        internal static ChangeKey From(byte[] id)
+            => new(BinaryPrimitives.ReadUInt64LittleEndian(id),
+                BinaryPrimitives.ReadUInt64LittleEndian(id.AsSpan(8)));
+    }
+
+    private static List<uint> BuildRelayIndices(
+        List<WalFieldMutation> fields, List<WalFieldMutation> relayFields)
+    {
+        var byChangeId = new Dictionary<ChangeKey, int>(fields.Count);
+        for (int i = 0; i < fields.Count; i++)
+        {
+            var field = fields[i];
+            ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
+            if (!byChangeId.TryAdd(ChangeKey.From(field.ChangeId), i))
+                throw new InvalidDataException("Duplicate ChangeId in APPLY_COMMIT fields.");
+        }
+
+        var indices = new List<uint>(relayFields.Count);
+        var seen = new HashSet<ChangeKey>();
+        foreach (var relay in relayFields)
+        {
+            ValidateId(relay.ChangeId, nameof(relay.ChangeId), nonzero: true);
+            var key = ChangeKey.From(relay.ChangeId);
+            if (!seen.Add(key) || !byChangeId.TryGetValue(key, out int index) ||
+                !SameField(fields[index], relay))
+                throw new InvalidDataException("APPLY_COMMIT relay fields are not an exact subset of fields.");
+            indices.Add((uint)index);
+        }
+        return indices;
+    }
+
+    private static bool SameFieldLists(
+        List<WalFieldMutation> left, List<WalFieldMutation> right)
+    {
+        if (left.Count != right.Count) return false;
+        for (int i = 0; i < left.Count; i++)
+            if (!SameField(left[i], right[i])) return false;
+        return true;
+    }
+
+    private static bool SameField(WalFieldMutation left, WalFieldMutation right)
+        => left.FieldId == right.FieldId && left.OpKind == right.OpKind &&
+           left.KeyEpoch == right.KeyEpoch && left.Wall == right.Wall &&
+           left.Logical == right.Logical &&
+           left.RecordId.AsSpan().SequenceEqual(right.RecordId) &&
+           left.AuthorNodeId.AsSpan().SequenceEqual(right.AuthorNodeId) &&
+           left.ChangeId.AsSpan().SequenceEqual(right.ChangeId) &&
+           left.Value.AsSpan().SequenceEqual(right.Value);
+
+    private static void WriteVarUInt32(Stream stream, uint value)
+    {
+        while (value >= 0x80)
+        {
+            stream.WriteByte((byte)(value | 0x80));
+            value >>= 7;
+        }
+        stream.WriteByte((byte)value);
+    }
+
+    private static uint ReadVarUInt32(ReadOnlySpan<byte> payload, ref int pos)
+    {
+        uint value = 0;
+        for (int i = 0; i < 5; i++)
+        {
+            byte current = ReadByte(payload, ref pos);
+            if (i == 4 && (current & 0xF0) != 0)
+                throw new InvalidDataException("APPLY_COMMIT relay index varint overflows UInt32.");
+            value |= (uint)(current & 0x7F) << (i * 7);
+            if ((current & 0x80) == 0)
+            {
+                if (i > 0 && current == 0)
+                    throw new InvalidDataException("Non-canonical APPLY_COMMIT relay index varint.");
+                return value;
+            }
+        }
+        throw new InvalidDataException("Unterminated APPLY_COMMIT relay index varint.");
     }
 
     private static void WriteFields(Stream stream, List<WalFieldMutation> fields)
@@ -207,6 +337,8 @@ public static class ApplyCommitCodec
         if (aggregate == 0)
             throw new ArgumentException($"{name} must be nonzero.", name);
     }
+
+    private static void WriteByte(Stream stream, byte value) => stream.WriteByte(value);
 
     private static void WriteU16(Stream s, ushort v)
     {
