@@ -177,7 +177,7 @@ public sealed class FldDatabase : IDisposable
             _runs.Add((re.RunId, path, null));
             if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
         }
-        _lastSealedCommitSeq = sealedSeq;
+        _lastSealedCommitSeq = Math.Max(sealedSeq, _outbox.MaterializedThroughCommitSeq);
     }
 
     /// <summary>
@@ -385,7 +385,7 @@ public sealed class FldDatabase : IDisposable
         {
             EnsureHealthy();
             _overlay.Put(key, valueState);
-            _dirty.Add(key);
+            _dirty[key] = valueState;
         }
     }
 
@@ -552,7 +552,32 @@ public sealed class FldDatabase : IDisposable
                 throw new InvalidOperationException("Checkpoint requires all overlay writes to be committed first.");
 
             var snap = _overlay.Snapshot();
-            if (snap.Count == 0) return 0;
+            if (snap.Count == 0)
+            {
+                // APPLY commits can contain only LWW losers. Their durable relay
+                // journal is independent of the field Run, so seal the WAL prefix
+                // without manufacturing an empty Run.
+                ulong applyOnlySeq = _pendingFlushedCommitSeq;
+                if (applyOnlySeq <= _lastSealedCommitSeq) return 0;
+
+                try
+                {
+                    _outbox.MarkMaterialized(applyOnlySeq);
+                    _manifestStore.Update(m => CloneManifest(m, lastFlushed: applyOnlySeq));
+                }
+                catch
+                {
+                    _faulted = true;
+                    throw;
+                }
+
+                _lastSealedCommitSeq = applyOnlySeq;
+                _pendingFlushedCommitSeq = applyOnlySeq;
+                _manifestDirty = false;
+                if (_truncateSealedWal)
+                    _wal.TruncateSealedSegments(applyOnlySeq);
+                return 0;
+            }
 
             var builder = new RunBuilder(_namespaceId);
             Span<byte> rec = stackalloc byte[16];
