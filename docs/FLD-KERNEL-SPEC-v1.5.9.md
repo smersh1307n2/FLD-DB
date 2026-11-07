@@ -295,7 +295,7 @@ FREE→CLAIMING→ACTIVE→FREE; pin-then-deref; RetireEpoch without −1; recla
 
 ## PART IV. BIN-SYNC / CRDT (v2.4.17)
 
-FLD-DB implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. It MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
+When FLD-DB stores synchronized user data, it implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. This PART IV defines that synchronized-database role only. A separate use case — FLD-DB as a generic Metadata Store for an external Data Provider — is defined by the BIN-SYNC Metadata Storage and External Data Provider Architecture (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). That use case requires an explicit Storage-only role and MUST NOT be implemented by routing metadata writes through ordinary synchronized FldDatabase semantics. FLD-DB MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
 
 ### 4.1. Canonical identity and authorship
 - `NodeId`, `RecordId`, `ChangeId`, `BatchId` are exactly 16 bytes at the durable/wire boundary. BIN-SYNC public API normalization does not authorize FLD to hash, truncate, or regenerate an already accepted identifier.
