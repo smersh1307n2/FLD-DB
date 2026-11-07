@@ -58,7 +58,7 @@ public class SyncApplyTests : IDisposable
                     Author(9), Change(change))
             ],
             relayWrites: relay
-                ? [new RemoteFieldWrite(recordId, 5, value, wall, 0, Author(9), Change(change))]
+                ? [new RemoteFieldWrite(recordId, fieldId, value, wall, 0, Author(9), Change(change))]
                 : Array.Empty<RemoteFieldWrite>(),
             protocolStateDelta: [0xA1, 0xB2, 0xC3]);
     }
