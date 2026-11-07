@@ -207,6 +207,54 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void Relay_ack_sidecar_survives_restart_and_compacts_only_acknowledged_author()
+    {
+        var authorA = Author(9);
+        var authorB = Author(10);
+        var writeA = new RemoteFieldWrite(
+            FldDatabase.NewRecordId(), 1, [0xA1], 100, 0, authorA, Change(41));
+        var writeB = new RemoteFieldWrite(
+            FldDatabase.NewRecordId(), 2, [0xB2], 101, 0, authorB, Change(42));
+        var batch = new RemoteBatchCommit(
+            senderPeer: Author(8), senderEpoch: 1, namespaceId: 0,
+            issuerNodeId: Author(8), issuerEpoch: 2, batchId: Change(43),
+            cursorStart: 1, cursorEnd: 1,
+            previousBatchDigest: new byte[16], batchDigest: Change(44),
+            recordsRoot: Change(45), writes: [writeA, writeB],
+            relayWrites: [writeA, writeB], protocolStateDelta: [0xC1]);
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.ApplyRemoteBatch(batch);
+            db.AcknowledgeRelayBatches(authorA, safeThroughJournalSeq: 1);
+
+            var ackedBeforeRestart = db.ReadRelayBatchPage(authorA, 0, 10);
+            Assert.Empty(ackedBeforeRestart.Batches);
+            Assert.Equal(1UL, ackedBeforeRestart.ScannedThroughJournalSeq);
+            Assert.Single(db.ReadRelayBatches(authorB, 0, 10));
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            // WAL replay sees the original full commit, but the durable receipt and
+            // ACK sidecar suppress only author A; author B's relay payload remains.
+            Assert.Empty(reopened.ReadRelayBatches(authorA, 0, 10));
+            Assert.Single(reopened.ReadRelayBatches(authorB, 0, 10));
+
+            reopened.Checkpoint();
+            var duplicate = reopened.ApplyRemoteBatch(batch);
+            Assert.True(duplicate.IsDuplicate);
+        }
+
+        using var compacted = FldDatabase.Open(_dir);
+        Assert.Empty(compacted.ReadRelayBatches(authorA, 0, 10));
+        var remaining = Assert.Single(compacted.ReadRelayBatches(authorB, 0, 10));
+        Assert.Single(remaining.Batch.Writes);
+        Assert.Equal(Change(42), remaining.Batch.Writes[0].ChangeId);
+        Assert.True(compacted.ApplyRemoteBatch(batch).IsDuplicate);
+    }
+
+    [Fact]
     public void ApplyJournal_is_rebuilt_from_wal_if_materialization_is_missing()
     {
         var recordId = FldDatabase.NewRecordId();
