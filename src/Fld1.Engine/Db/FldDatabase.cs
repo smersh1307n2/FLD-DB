@@ -1095,6 +1095,7 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+    /// <summary>Legacy unfenced ACK. External BIN-SYNC consumers must use the lease overload.</summary>
     public void AcknowledgeOutbox(ulong throughSeq)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
