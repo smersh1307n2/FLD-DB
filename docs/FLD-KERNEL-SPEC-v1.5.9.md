@@ -398,7 +398,7 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 
 ## PART XI. COMPATIBILITY WITH BIN-SYNC CORE v2.4.17 FINAL
 
-**Normative baseline:** `BIN-SYNC-SPECIFICATION.txt`, version **2.4.17 FINAL**, dated 2026-11-06. This supersedes the former v2.3.6 + v2.3.7 compatibility claim. The current baseline includes ChangeId provenance (v2.3.8), immutable per-peer cursor offsets and ACK bounds (v2.4.0), bidirectional snapshot baseline (v2.4.4), snapshot resource limits (v2.4.5), StateRoot v2 without Outbox cursor (v2.4.6), canonical STATE_DIGEST (v2.4.7), NEED_RANGE/NEED_KEYS validation (v2.4.8), and canonical CRDT/SCHEMA_MAP validation (v2.4.17).
+**Normative baseline:** `BIN-SYNC-SPECIFICATION.txt`, version **2.4.17 FINAL**, dated 2026-11-06. The storage boundary additionally follows the project contract [`FLD-DB-INTEGRATION-CONTRACT.md`](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md); FLD stores its protocol extension opaquely and does not own BIN-SYNC semantics. This supersedes the former v2.3.6 + v2.3.7 compatibility claim. The current baseline includes ChangeId provenance (v2.3.8), immutable per-peer cursor offsets and ACK bounds (v2.4.0), bidirectional snapshot baseline (v2.4.4), snapshot resource limits (v2.4.5), StateRoot v2 without Outbox cursor (v2.4.6), canonical STATE_DIGEST (v2.4.7), NEED_RANGE/NEED_KEYS validation (v2.4.8), and canonical CRDT/SCHEMA_MAP validation (v2.4.17).
 
 ### 11.1. Version layers
 | Layer | Version | Contract |
@@ -444,8 +444,8 @@ The following are mandatory before FLD-DB claims full BIN-SYNC v2.4.17 conforman
 1. LOCAL/APPLY WAL separation and proof that remote writes never enter local Outbox.
 2. Mandatory immutable ChangeId and durable dedup across restart.
 3. Relay retention for provenance-valid LWW losers, with exact self-echo suppression.
-4. Atomic Inbox/batch receipt, accepted cursor/digest chain, and relay journal before ACK.
-5. Per-author Outbox stream mapping, peer-relative offsets outside FLD, bounded ACK and fenced safe compaction.
+4. Atomic persistence of opaque BIN-SYNC ProtocolStateDelta (Inbox/cursor/digest-chain/SeenChanges) with field state and relay journal before ACK.
+5. Local Outbox cursor mapping, BIN-SYNC-assigned relay author streams, peer-relative offsets outside FLD, bounded ACK and fenced safe retention.
 6. Snapshot consistency and snapshot-tail binding across concurrent commit/compaction.
 7. BIN-SYNC v2 RecordDigest/StateRoot compatibility tests, including tombstone/lifecycle cases.
 8. Strict schema and unsupported merge-policy behavior.
