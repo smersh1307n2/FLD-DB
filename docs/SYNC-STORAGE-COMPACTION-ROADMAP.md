@@ -592,3 +592,56 @@ A code audit can reveal that implementation has changed, but cannot silently ame
 2. **Corrected in this documentation pass:** FLD Kernel Specification now states the binding two-DLL boundary: `Fld1.Storage.dll` and `Fld1.Database.dll`, with Database → Storage dependency and no third Common/Shared runtime DLL.
 3. **Corrected in this documentation pass:** Sync History Storage Audit now distinguishes the implemented FLD per-author JournalSeq ACK sidecar and post-WAL-seal payload compaction from the not-yet-implemented cross-system JournalSeq → ChangeId → OutboxSeq provenance adapter, minimum peer-ACK translation and publication gate.
 4. The provenance mapping, atomic scan-cursor persistence and outbound publication gate remain a separate integration gate as specified in §7.19 and FLD-DB Integration Contract §3.1.1–3.1.2. The audit is evidence, not a substitute for the contract or crash tests.
+
+
+### 7.22 PendingLocal checkpoint and recovery boundary (2026-11-07)
+
+The source audit of `FldDatabase`, `WalManager`, `OutboxLog` and the manifest confirms that a PendingLocal implementation cannot be represented as an ordinary additional WAL record and then rely on the existing Run checkpoint. A Run contains the visible field winners; it does not preserve a staged local payload that has subsequently lost the visible LWW comparison to a remote APPLY. Existing checkpoint logic may seal and truncate the WAL prefix once its Run/ApplyJournal effects are materialized. Therefore, an unpromoted staged operation must have an independent durable recovery representation before it can safely survive checkpoint.
+
+#### 7.22.1 Required separation
+
+- Visible field state and PendingLocal are separate logical state planes. A remote APPLY may replace the visible winner but must not erase or rewrite the staged local operation.
+- PendingLocal is keyed by the canonical field key `(NamespaceId, RecordId, FieldId)`; its stored winner is selected by the existing `FieldResolver.IsNewer` ordering, not arrival order.
+- The PendingLocal checkpoint watermark is a StageSeq (or equivalent staging generation), not WAL CommitSeq, Run SeqHi, OutboxSeq or a peer-relative cursor. These sequence domains must not be conflated.
+- A visible Run checkpoint must not claim to cover PendingLocal merely because both refer to the same field key.
+
+#### 7.22.2 Snapshot publication and reclamation protocol
+
+Any compacted PendingLocal snapshot must be immutable and self-validating. Its durable identity must include at least namespace, monotonically increasing generation, covered StageSeq watermark, record count/length and checksum (or a cryptographically strong content digest if already available in the storage layer).
+
+The required publication order is:
+
+1. Write the complete new snapshot to a temporary generation file and flush its contents to stable storage.
+2. Atomically publish a manifest reference containing the generation, covered StageSeq watermark and checksum; flush the manifest and its containing directory where supported.
+3. Only after the manifest reference is durable may covered staging-log segments/records be reclaimed.
+4. On open, load exactly the generation referenced by the manifest and validate its identity, watermark, length/count and checksum before accepting it as the recovery base.
+5. If a referenced generation is missing, truncated or mismatched, fail closed. Do not silently fall back to an older generation or an empty pending set if later staging records may already have been reclaimed.
+
+A marker stored only in a WAL segment is insufficient as the sole snapshot reference: that segment may itself be removed by a later WAL rotation/truncation. The manifest (or an equivalent independently durable root) must own the current snapshot reference.
+
+#### 7.22.3 Freeze/replay interaction
+
+- Freeze must capture a fixed StageSeq watermark while holding the database serialization boundary. Concurrent later staging belongs to a later freeze.
+- The immutable freeze intent must carry enough information to reproduce the exact operation identities and payloads after a crash. Replaying the same intent must not allocate new ChangeIds or OutboxSeq values.
+- Promotion to Outbox must be idempotent across crashes before Outbox append, after append but before its durability flush, and after Outbox durability but before pending-state cleanup.
+- Pending entries may be removed only when the durable freeze record proves that their StageSeq is covered by the completed immutable promotion. A later staged replacement must remain pending.
+- Outbox publication APIs must not expose a high watermark/page/lease that omits eligible pending work merely because no explicit caller invoked freeze. The API gate and its lock ordering must be specified and tested before enabling the optimized path.
+
+The exact physical representation (shared Storage transaction, independent staging journal plus recoverable promotion record, or another design) remains an implementation choice. It must satisfy the above ordering and pass fault-injection/reopen tests. This section does not authorize a new FLD1 Run or WAL binary-format version by itself.
+
+#### 7.22.4 Minimum crash matrix before implementation is considered complete
+
+- crash during snapshot write; old manifest root and old log remain authoritative;
+- crash after snapshot flush but before manifest publication; orphan snapshot is ignored/reclaimed only after validation;
+- crash after manifest publication but before old-log reclamation; recovery loads the new snapshot and safely tolerates the retained covered log;
+- missing/corrupt referenced snapshot; open fails closed;
+- crash before freeze intent durability; pending state remains unchanged;
+- crash after freeze intent durability but before Outbox append; recovery promotes the exact intent;
+- crash after Outbox append but before flush; recovery deduplicates and completes the same promotion;
+- crash after Outbox flush but before pending cleanup; recovery does not duplicate or re-sequence the operation;
+- later staged replacement survives replay of an earlier freeze watermark;
+- remote APPLY winning the visible field does not change the pending snapshot or its payload;
+- checkpoint/rotation with pending entries and no corresponding visible overlay preserves those entries;
+- repeated open/checkpoint/reopen cycles preserve the same pending winners and frozen ChangeIds/OutboxSeq values.
+
+**Implementation gate:** do not add `CommitPending` or alter the public commit semantics until the snapshot root, staging-log retention and freeze-to-Outbox replay protocol are implemented together. The current immediate `Commit()` path remains the compatibility baseline.
