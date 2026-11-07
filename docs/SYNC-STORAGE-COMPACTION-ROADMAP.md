@@ -112,7 +112,9 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 - ACK-covered replay mappings pruned only after validated contiguous author ACK; digest-chain checkpoint preserved.
 - Inbox + InboxAuthors consolidated into one receipt map; v8 header commitment preserves duplicate ACK/cursor semantics.
 - PeerAuthorProgress combines ACK/pushed/offset watermarks; ReceivedStreams key omits only the redundant namespace component.
-- NodePersistence v10 groups receipt and global-ledger scope keys; v11 removes repeated local NodeId from WAL replay marker keys. v3-v10 snapshots remain readable.
+- NodePersistence v10 groups receipt and global-ledger scope keys; v11 removes repeated local NodeId from WAL replay marker keys; v12 adaptively selects flat/author-grouped receipt encoding. v3-v11 snapshots remain readable.
+- The in-memory Inbox receipt index is adaptive (singleton map promoted to author/session groups), and global ChangeLedgerValue is reduced to one 16-byte Digest16 with zero reserved for unknown legacy markers.
+- BIN-SYNC exposes the public per-author safe Outbox ACK watermark and retained (author, ChangeId) → OutboxSeq resolver. The durable FLD JournalSeq provenance map and atomic scan-cursor integration remain adapter work.
 - Resource caps cover global dedup, Inbox receipts, local WAL markers, Outbox and records; caps are opt-in through NodeOptions.Limits.
 - Tombstone age-only deletion is disabled fail-closed until a durable safe watermark/full-resync gate exists.
 
@@ -402,3 +404,9 @@ Durability/checkpoint design: introduce WAL kinds for pending commit, pending fr
 Required crash tests: after pending WAL flush; after snapshot write before marker; after marker before truncation; after truncation; after freeze WAL flush before Outbox append; after Outbox flush before in-memory stage removal; mixed pending+dirty commit; remote LWW winner after pending local write; checkpoint with pending entries but empty visible overlay; restart with several coalesced commits. Baseline comparison: four separate immediate `Commit()` calls remain four immutable operations; four `CommitPending()` calls to the same field followed by one freeze produce exactly one operation with the final local winner.
 
 The baseline half is now executable: `PendingLocalBaselineTests` proves that four separate immediate commits currently produce four distinct immutable Outbox operations, while four Put calls inside one commit already coalesce to one final value. GitHub Actions run [42350334573](https://github.com/smersh1307n2/FLD-DB/actions/runs/42350334573) passed the new baseline tests and the full .NET 10 suite at commit `77236494106bd8b3b48ff4fa17dd17c6993cc5d8`.
+
+### 7.16 Normative ChangeId identity and equivocation contract (BIN-SYNC E-24, 2026-11-07)
+
+BIN-SYNC CORE specification is now v2.4.18 FINAL. E-24 formalizes the implemented replica-local identity key `(namespaceId, ChangeId)`, alias/route-independent semantic fingerprint after author resolution, same-ID/same-fingerprint duplicate suppression, same-ID/different-fingerprint whole-batch rejection, unknown-but-seen legacy migration and the prohibition on TTL/ACK-based dedup GC before a safe horizon exists. The fingerprint remains local metadata (BLAKE3-128 in the current implementation), not a DELTA_BATCH field; no wire layout changed.
+
+A focused test now verifies alias independence and sensitivity to author, namespace, RecordId, KeyEpoch, value bytes, causal dependency set, FieldTomb and RecordTombstone semantics. The existing integration tests cover alternate-route delivery, local self-echo after Outbox compaction, equivocation atomicity, persistence migration and WAL recovery. This closes the normative-spec gap for Phase 1; independent multi-implementation conformance vectors remain a release gate. Source JournalSeq provenance/adapter transaction and protocol-safe receipt/dedup GC remain open and must not be represented as completed by this erratum.
