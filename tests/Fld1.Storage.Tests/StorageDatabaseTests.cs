@@ -173,6 +173,7 @@ public sealed class StorageDatabaseTests : IDisposable
             }
         }
 
+        Assert.Single(Directory.GetFiles(Path.Combine(_dir, "snapshots"), "p_107.*.snap"));
         using var reopened = StorageDatabase.Open(_dir, 107, walRotateAfterBytes: 0);
         Assert.Equal(3UL, reopened.LastCommitSeq);
         Assert.True(reopened.TryGet("value"u8, out var value));
