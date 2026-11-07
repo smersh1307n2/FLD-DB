@@ -329,3 +329,10 @@ The cross-repository target and phase order are maintained in [Sync Storage Comp
 Implementation order: (1) reproducible baseline; (2) route-independent ChangeId dedup, replay-cache pruning and receipt audit; (3) APPLY payload dedup, metadata-only receipt, relay-only payload and bounded paging; (4) durable PendingLocal coalescing before publication; (5) versioned compact peer-state and FLD Outbox encodings; (6) safe GC and snapshot/new-peer semantics; (7) optional WAL-backed Outbox.
 
 Open gates: no protocol-safe global dedup GC horizon is proven; relay GC requires a validated downstream watermark; snapshot completion does not prove delivery of relay-eligible LWW losers without a per-author cut/tail proof; the 60–65-byte Outbox estimate is unmeasured and must include framing/CRC/index overhead. ChangeId generation, OriginSeq and wire format remain unchanged.
+
+
+## 13. Implementation follow-up — outgoing replay-cache pruning (2026-11-07)
+
+The BIN-SYNC implementation now prunes `PeerState.Ids` entries when and only when a validated contiguous per-author ACK covers the cached cursor range end. The per-peer `LastStreamDigest` chain checkpoint is retained. This was implemented in `dc9a1304de00e75bacb0d2bdd864e0f48e687361` and covered by restart/idempotent-ACK assertions in `402b801e4b2d2781e048f3785766c0abf0425016`. GitHub Actions run 42342495367 passed all jobs.
+
+The original code baseline remains the audit reference; this is a narrowly scoped post-audit code delta. Global ChangeId dedup, APPLY payload dedup and receipt/relay split are not implemented by this change.
