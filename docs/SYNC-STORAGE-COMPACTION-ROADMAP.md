@@ -570,8 +570,9 @@ A code audit can reveal that implementation has changed, but cannot silently ame
 - **Provider/Storage boundaries:** Data Provider captures and applies user changes; Metadata Store owns BIN-SYNC durable state; Physical Storage owns generic atomic byte durability. Do not conflate Storage-only metadata mode with synchronized FldDatabase mode.
 - **Crash consistency:** every freeze, incoming acceptance, pending-apply transition, snapshot lifetime, provenance page, ACK and compaction boundary needs deterministic fault injection and restart assertions.
 
-#### 7.21.4 Reconciliation findings
+#### 7.21.4 Reconciliation findings and corrections
 
-1. FLD Kernel Specification still named BIN-SYNC v2.4.17 as its compatibility baseline, while the current normative protocol is v2.4.19 FINAL. The kernel spec must name v2.4.19 and include E-24/E-25.
-2. FLD Kernel Specification still said Storage and Database remain in one DLL. This conflicts with the binding two-DLL decision in the Storage Core Architecture, roadmap §2.6 and BIN-SYNC Integration Contract §7.1.
-3. A code-backed audit statement that suggests the durable FLD JournalSeq → BIN-SYNC OutboxSeq provenance adapter is already implemented must not be treated as evidence of completion. The source mapping, atomic scan-cursor persistence and outbound publication gate remain a separate integration gate as specified in §7.19 and FLD-DB Integration Contract §3.1.1–3.1.2.
+1. **Corrected in this documentation pass:** FLD Kernel Specification now names BIN-SYNC v2.4.19 FINAL and explicitly includes E-24/E-25. FLD physical format version remains FLD1 binaryVersion 1; this compatibility update does not itself change the FLD1 Run/WAL format.
+2. **Corrected in this documentation pass:** FLD Kernel Specification now states the binding two-DLL boundary: `Fld1.Storage.dll` and `Fld1.Database.dll`, with Database → Storage dependency and no third Common/Shared runtime DLL.
+3. **Corrected in this documentation pass:** Sync History Storage Audit now distinguishes the implemented FLD per-author JournalSeq ACK sidecar and post-WAL-seal payload compaction from the not-yet-implemented cross-system JournalSeq → ChangeId → OutboxSeq provenance adapter, minimum peer-ACK translation and publication gate.
+4. The provenance mapping, atomic scan-cursor persistence and outbound publication gate remain a separate integration gate as specified in §7.19 and FLD-DB Integration Contract §3.1.1–3.1.2. The audit is evidence, not a substitute for the contract or crash tests.
