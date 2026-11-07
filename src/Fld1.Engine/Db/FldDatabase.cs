@@ -1063,7 +1063,10 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
-    /// <summary>Fenced borrowed-span enumeration for an external BIN-SYNC consumer.</summary>
+    /// <summary>
+    /// Fenced borrowed-span enumeration for an external BIN-SYNC consumer. The callback
+    /// runs under the Outbox lock; it must not retain the view or re-enter this database.
+    /// </summary>
     public int VisitOutboxBatch(
         ulong afterSeq, int limit, OutboxLease lease, OutboxEntryVisitor visitor)
     {
