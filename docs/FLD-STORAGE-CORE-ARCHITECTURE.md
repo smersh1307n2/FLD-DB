@@ -152,6 +152,21 @@ Do not leave domain-specific types in a catch-all `Fld1.Core` namespace merely b
 
 Storage implementation details remain internal. The small public Storage API is the extraction boundary; Database code must use that API rather than reaching into Storage implementation classes. This is what makes later project separation mechanical instead of a redesign.
 
+## 5.1. Migration map for the current FLD modules
+
+The existing module names are not proof that their current contents are already domain-neutral. Classify types by dependencies before moving code:
+
+| Existing module | Storage Core candidates | Keep in FLD Database / optional layer |
+|---|---|---|
+| `Fld1.Core` | byte readers/writers, endian helpers, checksums and generic hashing | UUIDv7 policy, HLC, author ordering, RecordId/FieldId and field comparators |
+| `Fld1.Run` | generic immutable page/run framing, page checksums, file readers/writers and generation lifetime | field-record codec, LWW tuples, RecordId/FieldId projection and field-specific indexes |
+| `Fld1.Wal` | WAL envelope, append/flush, sequence validation, recovery scanner and torn-record handling | GroupCommit/ApplyCommit payload codecs and domain-specific replay handlers |
+| `Fld1.Manifest` | atomic manifest file replacement, generation catalog and generic checkpoint publication | FLD namespace/schema/run descriptors that encode field-database meaning |
+| `Fld1.Engine` | generic writer serialization, snapshot lifetime, run selection, checkpoint/recovery orchestration | FldDatabase facade, field overlay, merge and Outbox/Apply behavior |
+| `Fld1.Client` | only if required: transport-neutral IPC primitives for an optional shared engine | shared-engine client protocol and process-specific conveniences; do not make them mandatory for embedded single-process Storage |
+
+This is a classification target, not an assertion that every existing class already satisfies it. Before moving a type, inspect its full dependency graph and split mixed files at the lowest stable seam. A generic WAL envelope must not call a field decoder; a generic run reader must not know RecordId; a generic manifest must not manufacture a NamespaceId.
+
 ## 6. One DLL now, independent package later
 
 The initial package can expose both namespaces from the same assembly:
