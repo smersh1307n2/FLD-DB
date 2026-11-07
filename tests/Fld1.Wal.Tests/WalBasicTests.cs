@@ -141,7 +141,7 @@ public class WalBasicTests : IDisposable
             ChangeId = Id(9), Value = "legacy"u8.ToArray()
         };
         byte[] legacy = EncodeApplyV2(
-            sender: Id(1), issuer: Id(2), batch: Id(3), field,
+            sender: Id(1), issuer: Id(2), batch: Id(3), field: field,
             protocolDelta: [0xA1, 0xB2]);
 
         var decoded = ApplyCommitCodec.Decode(legacy);
