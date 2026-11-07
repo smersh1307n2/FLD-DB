@@ -146,6 +146,11 @@ public sealed class FldDatabase : IDisposable
             db.LoadRunsFromManifest(manifest);
             db.GcOrphanRuns();
             db.ReplayWalIntoOverlay(walRecords);
+            if (db._truncateSealedWal && db._lastSealedCommitSeq != 0)
+            {
+                db._wal.TruncateSealedSegments(db._lastSealedCommitSeq);
+                db._applyJournal.CompactAcknowledgedRelayPayloads(db._lastSealedCommitSeq);
+            }
             return db;
         }
         catch
@@ -199,11 +204,23 @@ public sealed class FldDatabase : IDisposable
                 if (apply.NamespaceId != _namespaceId)
                     throw new InvalidDataException("APPLY_COMMIT namespace does not match database.");
 
+                if (record.CommitSeq <= _lastSealedCommitSeq)
+                {
+                    // A sealed journal record may already have had ACKed relay
+                    // payload reclaimed. Its durable receipt is authoritative;
+                    // do not compare it with the full pre-checkpoint WAL payload.
+                    if (!_applyJournal.TryFindBatch(
+                            apply.IssuerNodeId, apply.IssuerEpoch, apply.NamespaceId,
+                            apply.BatchId, out _))
+                    {
+                        if (_applyJournal.AppendIfMissing(record.CommitSeq, record.Payload))
+                            needsApplyJournalFlush = true;
+                    }
+                    continue;
+                }
+
                 if (_applyJournal.AppendIfMissing(record.CommitSeq, record.Payload))
                     needsApplyJournalFlush = true;
-
-                if (record.CommitSeq <= _lastSealedCommitSeq)
-                    continue;
 
                 foreach (var field in apply.Fields)
                 {
@@ -558,7 +575,15 @@ public sealed class FldDatabase : IDisposable
                 // journal is independent of the field Run, so seal the WAL prefix
                 // without manufacturing an empty Run.
                 ulong applyOnlySeq = _pendingFlushedCommitSeq;
-                if (applyOnlySeq <= _lastSealedCommitSeq) return 0;
+                if (applyOnlySeq <= _lastSealedCommitSeq)
+                {
+                    if (_truncateSealedWal)
+                    {
+                        _wal.TruncateSealedSegments(_lastSealedCommitSeq);
+                        _applyJournal.CompactAcknowledgedRelayPayloads(_lastSealedCommitSeq);
+                    }
+                    return 0;
+                }
 
                 try
                 {
@@ -575,7 +600,10 @@ public sealed class FldDatabase : IDisposable
                 _pendingFlushedCommitSeq = applyOnlySeq;
                 _manifestDirty = false;
                 if (_truncateSealedWal)
+                {
                     _wal.TruncateSealedSegments(applyOnlySeq);
+                    _applyJournal.CompactAcknowledgedRelayPayloads(applyOnlySeq);
+                }
                 return 0;
             }
 
@@ -648,7 +676,10 @@ public sealed class FldDatabase : IDisposable
             _overlay.Clear();
             _dirty.Clear();
             if (_truncateSealedWal)
+            {
                 _wal.TruncateSealedSegments(seqHi);
+                _applyJournal.CompactAcknowledgedRelayPayloads(seqHi);
+            }
             if (_autoCompactRunCount > 0 && _runs.Count >= _autoCompactRunCount)
                 CompactUnderLock();
             return runId;
