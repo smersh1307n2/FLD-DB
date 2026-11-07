@@ -1055,6 +1055,55 @@ public sealed class FldDatabase : IDisposable
         return _outbox.VisitBatch(afterSeq, limit, visitor);
     }
 
+    /// <summary>Acquire a durable Outbox consumer lease; acquiring a new one fences older consumers.</summary>
+    public OutboxLease AcquireOutboxLease(ReadOnlySpan<byte> ownerId)
+    {
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _outbox.AcquireLease(ownerId);
+        }
+    }
+
+    /// <summary>Release a lease and immediately invalidate its token.</summary>
+    public void ReleaseOutboxLease(OutboxLease lease)
+    {
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _outbox.ReleaseLease(lease);
+        }
+    }
+
+    /// <summary>Fenced borrowed-span enumeration for an external BIN-SYNC consumer.</summary>
+    public int VisitOutboxBatch(
+        ulong afterSeq, int limit, OutboxLease lease, OutboxEntryVisitor visitor)
+    {
+        lock (_commitLock)
+            EnsureHealthy();
+        return _outbox.VisitBatch(afterSeq, limit, lease, visitor);
+    }
+
+    /// <summary>Fenced ACK for the safe contiguous prefix computed by BIN-SYNC.</summary>
+    public void AcknowledgeOutbox(ulong throughSeq, OutboxLease lease)
+    {
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _outbox.Acknowledge(throughSeq, lease);
+        }
+    }
+
+    public ulong GetOutboxHighWatermark()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _outbox.HighWatermark;
+        }
+    }
+
     public void AcknowledgeOutbox(ulong throughSeq)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
