@@ -64,7 +64,7 @@ public class OutboxBench
     private Fld1.Engine.Outbox.OutboxLease _lease = null!;
     private Fld1.Engine.Outbox.OutboxEntryVisitor _visitor = null!;
     private int _batchSize;
-    private int _visited;
+    private int _checksum;
 
     [Params(64, 1024)]
     public int BatchSize
@@ -101,14 +101,26 @@ public class OutboxBench
     }
 
     [Benchmark(Baseline = true)]
-    public int MaterializedBatch() => _db.ReadOutboxBatch(0, BatchSize).Count;
+    public int MaterializedBatch()
+    {
+        var batch = _db.ReadOutboxBatch(0, BatchSize);
+        int checksum = 0;
+        foreach (var entry in batch)
+            checksum += entry.Value.Length;
+        return checksum;
+    }
 
     [Benchmark]
-    public int BorrowedBatch() => _db.VisitOutboxBatch(0, BatchSize, _lease, _visitor);
+    public int BorrowedBatch()
+    {
+        _checksum = 0;
+        _db.VisitOutboxBatch(0, BatchSize, _lease, _visitor);
+        return _checksum;
+    }
 
     private bool Visit(in Fld1.Engine.Outbox.OutboxEntryView entry)
     {
-        _visited += entry.Value.Length;
+        _checksum += entry.Value.Length;
         return true;
     }
 }
