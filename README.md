@@ -26,6 +26,7 @@ Architecture for using FLD-DB as a generic Metadata Store (including the Storage
 
 | Module | Status |
 |--------|--------|
+| `Fld1.Storage` | Target extraction boundary; not yet split from the existing engine |
 | `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes |
 | `Fld1.Run` | Builder / reader / verify / scan |
 | `Fld1.Wal` | Micro-WAL v2 + HLC fields |
