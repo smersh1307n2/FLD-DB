@@ -270,3 +270,13 @@ Once the global ChangeId ledger became the remote dedup authority, per-peer remo
 NodePersistence remains v7. v3-v5 migration first folds every old SeenChanges identity into an explicit unknown global ledger marker, then retains only local-node replay markers. v6-v7 already contain the global ledger, so remote SeenChanges rows can be dropped while local markers survive. `MaxSeenChanges` now caps local WAL markers; `MaxGlobalChangeLedgerEntries` caps global identities. No wire or persistence layout change.
 
 GitHub Actions run [42345011358](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42345011358) passed both .NET 10 and fuzz/lab jobs. The raw duplicate remote key was approximately 33 bytes per received operation for common varint sizes (peer 16 B + ChangeId 16 B + namespace varint), plus HashSet overhead; this estimate is derived from serialization, not a benchmark.
+
+### 7.6 Compact header-bound InboxReceipt (2026-11-07)
+
+BIN-SYNC now stores a single v8 InboxReceipt per `(issuerNodeId, namespaceId, issuerEpoch, batchId)`: durable author, original cursorEnd, BLAKE3-128 header fingerprint, appliedAt and expiresAt. CursorStart, previous/records/batch digests, schema id/version, merge policy and flags are committed by the fingerprint; cursorEnd and timestamps use varint persistence encoding. The receipt does not retain full entry payloads or causal dependencies.
+
+Duplicate BatchId replay compares the stored header fingerprint and returns ACK using stored cursorEnd/author. It intentionally does not decode or apply replay-supplied entry payloads/ChangeIds/CausalDeps, preserving the existing duplicate-before-causal-gate contract. Same BatchId with unchanged committed header is acknowledged as duplicate even if its replay payload differs; changed committed header is rejected before ACK. Legacy v3-v7 receipts migrate with explicit unknown fingerprint/cursorEnd markers and preserve old duplicate behavior.
+
+New receipts currently set `expiresAt=0` (no expiry scheduled). No receipt GC or WAL-generation/materialization field is implemented; these require a safe log-segment/peer-confirmation horizon. This v8 receipt adds metadata to the old key-to-author map, so do not claim a net serialized-byte saving versus v6 solely from key consolidation; cursor/timestamp varints reduce the added cost. The key-set duplication and in-memory second collection are removed.
+
+The spec §10.2 and §10.2.2 now describe this receipt contract. No wire-format change. GitHub Actions run [42345734949](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42345734949) passed the v8 header-commitment code; a follow-up CI run is required for the final cursorEnd-varint encoding refinement.
