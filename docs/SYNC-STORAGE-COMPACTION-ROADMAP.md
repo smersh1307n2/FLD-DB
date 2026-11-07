@@ -667,3 +667,16 @@ The Storage test project currently covers 12 cases: opaque WAL replay and rotati
 CI on FLD-DB commit `81e95fbd0e763ee5e6660ab09fa16cc8fe71ccce` passed: Storage 12/12 and the existing FLD test projects remained green. BIN-SYNC's pinned integration snapshot was compiled in its own workflow; its durable Data Provider conformance adapter passed 8/8 and the Storage-backed array synchronization sample returned PASS.
 
 **Not yet complete:** the new Storage engine is not yet the persistence backend of the existing FLD Database engine; current FLD Engine/WAL/Run/Manifest projects remain in place. The next FLD-side work is to harden Storage checkpoint/fault-injection coverage, define the production transaction/snapshot API boundary, and then migrate Database-owned persistence without introducing a third runtime DLL or breaking FLD1 format compatibility. The cross-repository Metadata Store adapter remains an open integration gate as recorded in BIN-SYNC `METADATA-STORAGE-ARCHITECTURE.md`.
+
+
+#### 7.23.1 Cross-repository metadata integration update
+
+The BIN-SYNC integration branch now also has a durable Metadata Store conformance adapter backed by `Fld1.Storage`. Its physical layout stores each receipt, cursor, ChangeId fingerprint, relay/outbound item, ACK/high-watermark, lease, pending-apply intent and completed receipt under a separate logical key. Each mutation computes a key-level diff and commits the changed entries atomically; it does not rewrite the entire partition payload.
+
+The BIN-SYNC integration workflow reports 30/30 passing tests across Data Provider and Metadata Store conformance plus restart/compaction coverage. The Storage-backed array example also completes a two-replica exchange, closes/reopens both Storage and Node state, applies a later update and reports PASS.
+
+The adapter is still test-only. Public production APIs and direct Node runtime integration remain outstanding; do not mark the overall BIN-SYNC + Storage integration complete until those APIs, fault-injection/reopen tests and production array example are in place.
+
+#### 7.23.2 Snapshot-generation reclamation
+
+After the new snapshot file is flushed and the atomic manifest has been published and directory-flushed, `StorageSnapshotFile.Store` now reclaims obsolete snapshot generations for that partition. This is safe for the current API because `StorageSnapshot` owns an in-memory copy rather than a disk-generation pin. A crash before manifest publication leaves the old root authoritative; a crash after publication leaves the new root authoritative and may leave only reclaimable orphan files. The repeated-checkpoint test asserts that one current snapshot generation remains.
