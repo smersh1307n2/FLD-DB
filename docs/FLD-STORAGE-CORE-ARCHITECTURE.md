@@ -232,3 +232,8 @@ Before treating Storage Core as reusable, add tests that prove:
 7. Only after the boundary is stable, consider publishing a separate Storage assembly/package.
 
 **Core rule:** `Fld1.Storage.dll` is the durable byte engine; `Fld1.Database.dll` is one consumer of it. Storage must never need to know that a field database or a synchronization protocol exists.
+
+
+## 11. Related synchronization-history audit
+
+The code-backed analysis of FLD local Outbox, remote APPLY/relay retention, BIN-SYNC cross-peer deduplication and peer cursor storage is maintained in [SYNC-HISTORY-STORAGE-AUDIT.md](SYNC-HISTORY-STORAGE-AUDIT.md). This is a Database/BIN-SYNC integration concern, not a reason to add protocol or FLD field semantics to Storage Core. Storage remains a neutral byte engine; higher layers own ChangeId, receipts, peer cursors, relay eligibility and retention policy.
