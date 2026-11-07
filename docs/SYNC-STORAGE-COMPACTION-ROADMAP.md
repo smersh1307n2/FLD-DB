@@ -306,3 +306,16 @@ BIN-SYNC now exposes `ResourceLimits.MaxInboxReceipts` (default 1,000,000; zero 
 The former BIN-SYNC `GcNotice.PurgeBelowCutoff` deleted ordinary field values based only on HLC age. It was not tombstone-specific and could remove current live state while leaving field/record tombstones behind. Since `TombstoneCutoffWall` is not durably enforced against DELTA_BATCH/reconcile/snapshot peers, there is no proof that stale operations cannot reintroduce deleted state.
 
 The destructive helper is now disabled and returns zero; regression tests assert that old live values, field tombstones and record lifecycle tombstones remain intact. This is a safety stop, not completion of tombstone GC. The protocol still needs a durable per-namespace safe cutoff, stale-peer full-resync enforcement and tombstone/ghost-specific reclamation. CI run [42347618510](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42347618510) passed .NET 10 tests/public samples/coverage and fuzz/lab hardening at BIN-SYNC commit `6767e2da14c2951ac440ed173e9fd796fee54469`.
+
+### 7.11 APPLY single-copy encoding and relay-only journal (2026-11-07)
+
+Implemented:
+- `ApplyCommitCodec` v3 encodes the incoming `Fields` array once and represents `RelayFields` as canonical varint indexes. v2 payloads remain readable.
+- `ApplyJournal.AppendIfMissing` materializes only receipt metadata and the relay-selected fields. Non-relay operation payloads are no longer duplicated into the sidecar.
+- The journal uses a relay-only APPLY_COMMIT form; the WAL is flushed first, then the compact journal record is appended and flushed before `ApplyRemoteBatch` returns. WAL checkpoint/truncation therefore cannot lose the only durable relay copy.
+- Journal promotion is idempotent by batch identity and compares canonical receipt metadata plus relay payload. WAL replay can reconstruct the compact sidecar from old v2 and new v3 WAL records.
+- Tests verify that the sidecar is substantially smaller than the full WAL for eight incoming operations with one relay-selected operation, and that the relay subset survives restart.
+
+GitHub Actions run [42348013521](https://github.com/smersh1307n2/FLD-DB/actions/runs/42348013521) passed Release build and all tests at FLD-DB commit `4efc1985d4da633aa97a7e53d0cf9f44186257b0`.
+
+Still open: receipt and relay payload share one append-only journal file; no independent GC/compaction, bounded index or seekable paging exists. The relay payload must remain until downstream safe ACK; the receipt has its own retry/expiry horizon. Do not conflate their lifetimes.
