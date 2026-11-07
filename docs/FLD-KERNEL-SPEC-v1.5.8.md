@@ -1,10 +1,10 @@
-# FLD KERNEL SPECIFICATION — v1.5.8-DRAFT
+# FLD KERNEL SPECIFICATION — v1.5.9-DRAFT
 ## Consolidated Final Specification
 
 **Статус:** NORMATIVE DESIGN DRAFT (pre-FINAL FREEZE)
 **Формат:** FLD1 (magic `46 4C 44 31`, binaryVersion 1)
 **Целевой рантайм:** C# 12+ / .NET 10 (FLD1 Core + BinSync.Net integration)
-**Совместимость (протокол):** BIN-SYNC CORE **v2.3.6** + addendum/errata **v2.3.7** (E-1…E-13) — без изменения wire-нормы
+**Совместимость (протокол):** BIN-SYNC CORE **v2.4.17 FINAL** (включая errata v2.3.7, v2.3.8, v2.4.0, v2.4.4–v2.4.8 и v2.4.17) — без изменения формата FLD1 Run/WAL
 **Совместимость (пакет):** `BinSync.Core` **≥ 2.6.5** (типизированные `NodeId`/`RecordId`/`Digest16`, outbox compact); SemVer пакета ≠ версия протокола
 **Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–8; все errata вшиты в тело; **v1.5.8+compat-2.6.5**
 **Правило чтения:** PART I–VI — обязательства; PART VII — ADR без обязательств; PART VIII — приёмка; PART IX — реализационные заметки.
@@ -287,14 +287,56 @@ FREE→CLAIMING→ACTIVE→FREE; pin-then-deref; RetireEpoch without −1; recla
 
 ---
 
-## PART IV. BIN-SYNC / CRDT
+## PART IV. BIN-SYNC / CRDT (v2.4.17)
 
-- LWW: (Wall, Logical, AuthorNodeId full 16B)
-- Lifecycle field 0x0000; ghost/tombstone visibility per BIN-SYNC §7.4
-- Two digest canons: FldFieldDigestPayload (with stateTag) vs BinSyncFieldDigestPayload (wire)
-- Five digest roles: Delta, Run State, DB Root, Composition, Wire State
-- CertifiedWatermark vs SafeOutboxSeq dual scales
-- Outbox API: ReadOutboxBatch, AcknowledgeOutbox, GetOutboxWatermark + lease fencing
+FLD-DB implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. It MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
+
+### 4.1. Canonical identity and authorship
+- `NodeId`, `RecordId`, `ChangeId`, `BatchId` are exactly 16 bytes at the durable/wire boundary. BIN-SYNC public API normalization does not authorize FLD to hash, truncate, or regenerate an already accepted identifier.
+- `authorNodeId` is the durable 16-byte identity of the original change author, never the current relay node or session alias.
+- Session `origin` aliases are resolved by BIN-SYNC before storage. FLD persists only the resolved durable author.
+- Author tie-break is unsigned `UInt64LE(bytes[0..7])`, then unsigned `UInt64LE(bytes[8..15])`, exactly as BIN-SYNC §5.4. RecordId ordering remains unsigned BE; these orders MUST NOT be conflated.
+
+### 4.2. HLC and LWW
+- HLC wall is unsigned UTC microseconds; logical is u32. FLD does not narrow wall to Int64 or use HLC as a replication cursor.
+- Field winner order is (wall, logical, durable authorNodeId) using BIN-SYNC §5.4. FieldWrite and FieldTomb are compared by the same total order; a tombstone wins only on an exact full-key tie where the protocol specifies it.
+- Lifecycle field 0x0000 follows BIN-SYNC §7.4: lifecycle author is persisted separately; dead wins only on an exact lifecycle-key tie; ghost visibility is derived using field author versus lifecycle author.
+- FieldTomb is a distinct operation kind from an empty FieldWrite. Digest and relay logic MUST preserve this distinction.
+- Remote HLC values are not used to advance the local HLC generator as if they were locally-authored writes. Receive-side HLC validation/skew policy remains a BIN-SYNC responsibility.
+
+### 4.3. Change identity and relay provenance
+- Every accepted DELTA_BATCH record has a nonzero, unique 16-byte ChangeId. It is immutable across retries, snapshots where applicable, and every relay hop.
+- FLD MUST reject missing, zero, malformed, or conflicting ChangeId values. It MUST NOT silently generate a replacement ChangeId for remote operations.
+- Relay eligibility is based on provenance, not whether an incoming operation wins LWW. A new remote operation that loses LWW may still be required for downstream convergence.
+- Exact self-echo and already-seen ChangeId are no-ops for storage/relay. A duplicate batch still receives the original durable receipt/ACK identity.
+- Local mutations receive one ChangeId at creation and retain it through WAL, Outbox, compaction, recovery, and relay.
+
+### 4.4. Outbox and author streams
+- Outbox sequence is monotonic per (durable authorNodeId, namespaceId). A FLD database instance has one configured LocalAuthor; its local OutboxSeq is the sequence for that local author and namespace.
+- FLD OutboxSeq is an immutable local durable cursor. BIN-SYNC peer-relative StreamOffset/wire cursor mapping belongs to BIN-SYNC PeerState and MUST NOT renumber or mutate FLD Outbox entries.
+- WAL CommitSeq, OutboxSeq, HLC wall, and peer wire cursor are distinct domains and MUST NOT be substituted for one another.
+- FLD does not aggregate author streams into a namespace-wide scalar cursor. StateRootDigest excludes Outbox cursor and all ACK/peer progress.
+- SafeOutboxSeq is a local retention boundary computed from BIN-SYNC's interested-peer ACK state. Missing peer state is not an ACK and MUST hold the relevant prefix. Acknowledgement/compaction MUST be fenced against stale consumers.
+- Compaction may remove only entries at or below the proven safe local cursor; it MUST preserve sequence continuity and all ChangeId/provenance fields of retained entries.
+
+### 4.5. Inbox, batch atomicity, and durable receipt
+- Inbox idempotency key is (issuerNodeId, namespaceId, issuerEpoch, batchId). The durable receipt also preserves the author stream identity needed to replay the correct ACK after reconnect/restart.
+- Batch chain identity is scoped exactly as BIN-SYNC §12.17.2; target-peer scope MUST NOT be dropped where required by the protocol.
+- Applying a DELTA_BATCH is atomic: field state, dedup/inbox receipt, accepted cursor/digest-chain state, and relay-eligible mutations become durable together before ACK is emitted.
+- A repeated batch returns the original receipt and ACK semantics; it MUST NOT reapply mutations or enqueue duplicate relay work.
+- Snapshot chunks use the same LWW primitives, preserve field tombstones and lifecycle state, and do not create local-author Outbox entries. Snapshot installation and tail boundary must refer to one consistent state view.
+
+### 4.6. Digest domains
+- BIN-SYNC RecordDigest and StateRootDigest follow v2 domains/formulas (§9.1), including FieldWrite-vs-FieldTomb kind and lifecycle author. Outbox cursor/ACK progress is excluded from StateRootDigest.
+- FLD Run StateDigest, DB RootDigest, composition digest, and physical file checksum are private FLD integrity domains. They MUST NOT be substituted for BIN-SYNC RecordDigest, BucketDigest, or StateRootDigest.
+- E2EE values are stored and digested as received ciphertext; FLD MUST NOT decrypt/re-encrypt or normalize ciphertext bytes. KeyEpoch is preserved exactly.
+- Canonical CRDT payloads outside the FLD LWW field model are either preserved as opaque canonical bytes or rejected as unsupported. FLD MUST NOT silently coerce COUNTER_G, COUNTER_PN, SET_OR, SEQ_FRACTIONAL, or BLOB_REF into LWW_FIELD.
+
+### 4.7. Schema and protocol validation
+- BIN-SYNC validates aliases, schema descriptors, opKind/payload tag, RecordTombstone envelope identity, ChangeId, batch digest chain, and canonical payloads before durable apply.
+- FLD validates storage invariants and atomically persists only a fully validated apply request. It does not reinterpret session aliases or silently skip malformed protocol metadata.
+- Unsupported merge policies fail explicitly; they MUST NOT be treated as LWW_FIELD by fallback.
+
 
 ---
 
@@ -352,32 +394,58 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 
 ---
 
-## PART XI. COMPAT с BinSync.Core 2.6.5 (2026-11-04)
+## PART XI. COMPATIBILITY WITH BIN-SYNC CORE v2.4.17 FINAL
 
-### Разделение версий
-| Слой | Версия | Смысл |
-|------|--------|--------|
-| Протокол / спека | CORE **v2.3.6** + errata **v2.3.7** | Wire, HLC µs, LWW, digests, E-1…E-13 |
-| NuGet `BinSync.Core` | **2.6.5** | API surface, perf, typed ids, outbox compact |
+**Normative baseline:** `BIN-SYNC-SPECIFICATION.txt`, version **2.4.17 FINAL**, dated 2026-11-06. This supersedes the former v2.3.6 + v2.3.7 compatibility claim. The current baseline includes ChangeId provenance (v2.3.8), immutable per-peer cursor offsets and ACK bounds (v2.4.0), bidirectional snapshot baseline (v2.4.4), snapshot resource limits (v2.4.5), StateRoot v2 without Outbox cursor (v2.4.6), canonical STATE_DIGEST (v2.4.7), NEED_RANGE/NEED_KEYS validation (v2.4.8), and canonical CRDT/SCHEMA_MAP validation (v2.4.17).
 
-Пакет 2.3→2.6 **не** поднимал нормативную версию протокола в `BIN-SYNC-SPECIFICATION.txt`.
+### 11.1. Version layers
+| Layer | Version | Contract |
+|---|---|---|
+| Wire protocol | BIN-SYNC CORE **2.4.17 FINAL** | Identity, HLC, LWW/lifecycle, ChangeId, batch chain, digests, snapshots, ACK, CRDT canonicalization |
+| .NET package API | `BinSync.Core` **3.0.0** | Current public API/runtime profile; package SemVer is not a substitute for protocol version |
+| FLD physical format | FLD1 binaryVersion **1** | Unchanged by this compatibility alignment |
 
-### Что не ломает FLD storage
-- HLC wall = **микросекунды** UTC (совпадает)
-- Durable author = bare **16 B** `nodeId` (E-1)
-- Wire digests на стороне BIN-SYNC: **Digest16** (BLAKE3 truncated); FLD `rootDigest` run = **BLAKE3-256** (локальный Run StateDigest) — разные роли, см. PART IV
-- RecordId / NodeId на wire — 16 B; FLD RecordId sort = **unsigned BE** (UUIDv7/PGM)
+### 11.2. Explicit cursor mapping
+- Local FLD OutboxSeq maps only to the BIN-SYNC stream `(LocalAuthor, namespaceId)`.
+- FLD OutboxSeq remains immutable and local. Peer-relative StreamOffset and wire cursor are owned by BIN-SYNC per `(peer, namespaceId, authorNodeId)`.
+- `CommitSeq` is WAL ordering only. It is never a sync cursor.
+- There is no namespace-wide aggregate Outbox cursor in StateRootDigest. Legacy STATE_DIGEST OutboxCursor is zero on send and ignored on receive.
+- Missing PeerState means unacknowledged; compaction cannot infer ACK from absence.
+- ACK is validated against the exact peer/author stream pushed range before retention state can advance.
 
-### Обязательное выравнивание LWW author
-**[A-CMP-AUTHOR-NODEID]** Сравнение `authorNodeId` для LWW / HLC tie-break / intern ASC авторов =
-порядок **BinSync.NodeId**: сначала `Lo = UInt64LE(bytes[0..7])`, затем `Hi = UInt64LE(bytes[8..15])`.
-**Не** использовать BE memcmp для author (он остаётся только для RecordId).
+### 11.3. Durable change identity
+- ChangeId is mandatory, nonzero, exactly 16 bytes, and immutable from local creation through relay.
+- Remote input with absent/invalid ChangeId is rejected. FLD MUST NOT synthesize a new ChangeId.
+- ChangeId dedup and batch Inbox receipt are durable and atomic with remote apply.
+- LWW loser retention is separate from field winner publication: provenance-valid new operations remain relay-eligible even when they do not replace the current field winner, except exact self-echo/already-seen operations.
 
-### Outbox (интеграция Engine)
-- At-least-once + wire-dedup по ChangeId
-- **CompactOutbox** (2.6.5): после ACK можно удалять записи, acked всеми interested peers; peers без PeerState удерживают entry (relay-safe)
-- Self-echo: self-authored уже в storage не re-queue ([E-ECHO] / E-13)
-- FLD `SafeOutboxSeq` / `AcknowledgeOutbox` должны сохранять **OutboxSeqRef** continuity после restart (CursorEnd = gap-norm для новых peers)
+### 11.4. Local and remote commit kinds
+- LOCAL commit creates local author Outbox entries.
+- APPLY commit stores remote field state and relay provenance but MUST NOT reclassify remote mutations as locally-authored writes.
+- Snapshot installation uses APPLY semantics and never generates local Outbox entries.
+- Durable receipt, cursor/digest-chain metadata, and relay-eligible operations commit atomically with APPLY before ACK.
 
-### Public API BinSync (2.2+)
-`Storage` / `Outbox` maps **internal** на `Node`; хост ходит через engine API / Outbox API FLD, не мутирует коллекции напрямую.
+### 11.5. Digest compatibility
+- BIN-SYNC uses `BIN-SYNC/RECORD/v2` and `BIN-SYNC/STATE/v2` domains. StateRoot is derived only from replicated namespace state.
+- FLD physical Run/DB/composition digests are independent integrity mechanisms. No digest is reused across domains merely because the byte width happens to match.
+- Field tombstone kind and lifecycle author are part of the BIN-SYNC digest semantics.
+- E2EE ciphertext and KeyEpoch are preserved byte-for-byte.
+
+### 11.6. Schema and merge-policy compatibility
+- FLD's native field LWW model supports LWW_FIELD and the lifecycle semantics explicitly defined in §§4.2 and 7.4.
+- Other BIN-SYNC merge policies are not silently coerced to LWW_FIELD. They require opaque canonical preservation or explicit rejection until a matching FLD storage model exists.
+- Canonical payload validation and SCHEMA_MAP strictness follow BIN-SYNC §§8 and 18.4; malformed, duplicate, unsorted, or ambiguous descriptors are rejected before commit.
+
+### 11.7. Implementation conformance gates
+The following are mandatory before FLD-DB claims full BIN-SYNC v2.4.17 conformance:
+1. LOCAL/APPLY WAL separation and proof that remote writes never enter local Outbox.
+2. Mandatory immutable ChangeId and durable dedup across restart.
+3. Relay retention for provenance-valid LWW losers, with exact self-echo suppression.
+4. Atomic Inbox/batch receipt, accepted cursor/digest chain, and relay journal before ACK.
+5. Per-author Outbox stream mapping, peer-relative offsets outside FLD, bounded ACK and fenced safe compaction.
+6. Snapshot consistency and snapshot-tail binding across concurrent commit/compaction.
+7. BIN-SYNC v2 RecordDigest/StateRoot compatibility tests, including tombstone/lifecycle cases.
+8. Strict schema and unsupported merge-policy behavior.
+9. Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction, and concurrent snapshot acceptance tests.
+
+**Status:** specification alignment only. Items in §11.7 remain implementation gates until covered by code and tests; this document does not claim they are already implemented.
