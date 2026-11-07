@@ -384,6 +384,6 @@ Implemented the FLD side of safe relay retention:
 - WAL replay checks sealed batch receipts before attempting to append/compare the full WAL payload, so a compacted relay subset cannot conflict with a still-present sealed WAL frame. If the receipt is missing but the WAL frame remains, replay can rebuild it and the post-replay seal pass compacts again.
 - The regression test acknowledges one of two authors, restarts before checkpoint, verifies sidecar filtering, checkpoints, verifies journal size reduction, verifies the other author's relay payload remains, and confirms duplicate BatchId still returns the receipt.
 
-GitHub Actions run [42349735541](https://github.com/smersh1307n2/FLD-DB/actions/runs/42349735541) passed Release build and all tests at FLD-DB commit `23583d52a8daae5be551c687fd31981b435bf281`.
+Recovery validates persisted relay ACK watermarks against the recovered JournalSeq high-water mark, and the API rejects a watermark beyond the current journal high-water mark. GitHub Actions run [42349914253](https://github.com/smersh1307n2/FLD-DB/actions/runs/42349914253) passed Release build and all tests at FLD-DB commit `0c2542593849faba8fd3b38ed165b5c8f2597c38`.
 
 Remaining integration work: BIN-SYNC must durably map source JournalSeq to ChangeId/local OutboxSeq and compute the minimum contiguous safe ACK across all interested peers. FLD does not infer peer safety. Receipt GC remains independent and is not implemented by relay ACK.
