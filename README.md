@@ -7,12 +7,14 @@ Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.m
 
 Storage Core extraction and dependency boundaries are defined in [FLD Storage Core architecture](docs/FLD-STORAGE-CORE-ARCHITECTURE.md). The target is two independently buildable DLLs from the start: `Fld1.Storage.dll` (domain-neutral byte engine) and `Fld1.Database.dll` (FLD field database, referencing Storage). Storage-only consumers must not load the Database assembly.
 
-Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The associated [change staging, coalescing and retention policy](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md) defines which unpublished local changes may be collapsed and when Outbox entries become immutable.
+Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The associated [Metadata Store conformance contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORE-CONFORMANCE.md) and [Data Provider conformance contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/DATA-PROVIDER-CONFORMANCE.md) define their separate semantic boundaries. The [change staging, coalescing and retention policy](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md) defines which unpublished local changes may be collapsed and when Outbox entries become immutable.
+
+The cross-repository [sync storage compaction roadmap](docs/SYNC-STORAGE-COMPACTION-ROADMAP.md) owns sequencing and acceptance gates; the [sync history storage audit](docs/SYNC-HISTORY-STORAGE-AUDIT.md) records code-backed findings; [tombstone retention research](docs/TOMBSTONE-RETENTION-RESEARCH.md) provides the rationale for fail-closed E-25 behavior.
 
 | Layer | Version |
 |-------|---------|
 | FLD format / kernel | v1.5.9-DRAFT (+compat-BinSync.Core-3.0.0) |
-| BIN-SYNC **protocol** | CORE v2.4.17 FINAL |
+| BIN-SYNC **protocol** | CORE v2.4.19 FINAL |
 | `BinSync.Core` **package** | 3.0.0 |
 
 **Target:** .NET 10 / C# 13+
