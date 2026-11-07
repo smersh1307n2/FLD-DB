@@ -143,11 +143,7 @@ Existing in-memory dirty-set coalescing before one Commit remains valid. Durable
 
 **Exit:** versioned migration and crash tests pass; old/new formats produce identical streams/ACK behavior; measured total bytes improve after all overhead.
 
-### Phase 5 — Optional WAL-backed local Outbox
-
-Only after Phases 2–4. While a WAL segment is retained, Outbox may reference immutable WAL payload. Before WAL truncation, promote only still-unacknowledged payloads. ACKed entries need not be copied. Measure pinned-segment impact; reject if peak or steady-state storage/checkpoint behavior worsens. This phase is optional.
-
-### Phase 6 — Safe GC and snapshot/new-peer semantics
+### Phase 5 — Safe GC and snapshot/new-peer semantics
 
 - Define independent safe horizons for ChangeId dedup, batch receipts, peer replay state and relay payload.
 - Relay payload GC requires a validated downstream watermark.
@@ -156,6 +152,11 @@ Only after Phases 2–4. While a WAL segment is retained, Outbox may reference i
 - No TTL-only deletion of ChangeId identity or opaque ProtocolStateDelta.
 
 **Exit:** each GC decision has a durable watermark/epoch/fence or explicit protocol horizon; new-peer bootstrap is not conflated with history delivery; no crash or alternate route can resurrect compacted duplicates or lose required relay history.
+
+### Phase 6 — Optional WAL-backed local Outbox
+
+Only after Phases 2–4 and only if the Phase 5 retention contract is clear. While a WAL segment is retained, Outbox may reference immutable WAL payload. Before WAL truncation, promote only still-unacknowledged payloads. ACKed entries need not be copied. Measure pinned-segment impact; reject if peak or steady-state storage/checkpoint behavior worsens. This phase is optional.
+
 
 ## 4. Priority order
 
