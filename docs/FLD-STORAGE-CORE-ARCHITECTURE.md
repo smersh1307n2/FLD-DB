@@ -78,7 +78,20 @@ The initial reusable surface should be byte-oriented:
 - ordered range/prefix scans;
 - storage-native commit/checkpoint identifiers.
 
-The exact public interfaces are a later API-design step. Do not prematurely expose a large generic ORM, LINQ provider, schema registry, object serializer or arbitrary plug-in framework.
+The minimal public capability surface should be:
+
+- open/close a storage instance from storage-only options;
+- open a stable read snapshot;
+- begin a serialized write transaction;
+- read opaque key/value entries inside that transaction;
+- put/delete opaque entries and commit them atomically and durably;
+- perform ordered range/prefix scans through a borrowed visitor;
+- expose a storage-native CommitSeq/checkpoint watermark;
+- checkpoint/compact and release snapshots so old generations can be reclaimed safely.
+
+A write transaction must provide read-your-writes and serialize conflicting updates (or expose explicit expected-version conflicts). It must not require callers to manually coordinate WAL and manifest writes. The engine's commit is the atomic durability boundary. The adapter builds higher-level inbox/relay/peer transactions from these primitives.
+
+The exact public type and method names are a later API-design step. Do not prematurely expose a large generic ORM, LINQ provider, schema registry, object serializer or arbitrary plug-in framework.
 
 Metadata adapters can encode compact composite keys and values on top of this surface. For example, an adapter can keep peer state, inbox receipts, ChangeId indexes and relay records in separate key prefixes or logical stores while updating related records in one atomic batch.
 
@@ -146,7 +159,7 @@ The initial package can expose both namespaces from the same assembly:
 - `Fld1.Storage.*` — reusable public storage surface;
 - `Fld1.Database.*` — FLD field database surface.
 
-The public Storage API must not expose any FLD Database or BIN-SYNC type in method signatures, generic constraints, events, exceptions or callbacks. Use opaque byte keys/values and storage-native identifiers.
+The public Storage API must not expose any FLD Database or BIN-SYNC type in method signatures, generic constraints, events, exceptions or callbacks. Use opaque byte keys/values and storage-native identifiers. Its public dependencies should be BCL-only (including `System.IO.Hashing` where appropriate); do not require BinSync.Core, JSON serializers, a database facade, a network stack or a plugin host.
 
 When the boundary is proven, extraction should be:
 
