@@ -32,7 +32,7 @@ public sealed class PendingLocalBaselineTests : IDisposable
         Assert.Equal(new byte[] { 2 }, entries[1].Value);
         Assert.Equal(new byte[] { 3 }, entries[2].Value);
         Assert.Equal(new byte[] { 4 }, entries[3].Value);
-        Assert.Equal(4, entries.Select(entry => entry.ChangeId).Distinct().Count());
+        Assert.Equal(4, entries.Select(entry => Convert.ToHexString(entry.ChangeId)).Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(new ulong[] { 1, 2, 3, 4 }, entries.Select(entry => entry.OutboxSeq));
     }
 
