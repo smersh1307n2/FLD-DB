@@ -82,6 +82,7 @@ public sealed class OutboxLog : IDisposable
         string path,
         string ackPath,
         string statePath,
+        string leasePath,
         FileStream fs,
         ulong nextSeq,
         ulong ackedThrough,
@@ -89,11 +90,14 @@ public sealed class OutboxLog : IDisposable
         ulong materializedThroughCommitSeq,
         HashSet<EntryKey> entryKeys,
         List<IndexPoint> sparseIndex,
-        int recordCount)
+        int recordCount,
+        ulong leaseEpoch,
+        byte[] leaseOwnerId)
     {
         _path = path;
         _ackPath = ackPath;
         _statePath = statePath;
+        _leasePath = leasePath;
         _fs = fs;
         _writeOffset = fs.Length;
         _nextSeq = nextSeq;
@@ -103,6 +107,8 @@ public sealed class OutboxLog : IDisposable
         _entryKeys = entryKeys;
         _sparseIndex = sparseIndex;
         _recordCount = recordCount;
+        _leaseEpoch = leaseEpoch;
+        _leaseOwnerId = leaseOwnerId;
     }
 
     public static OutboxLog Open(
