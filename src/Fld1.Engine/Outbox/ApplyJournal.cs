@@ -19,6 +19,9 @@ internal sealed class ApplyJournal : IDisposable
     private const int RecordCrcSize = 4;
     private const ushort Version = 1;
     private const int SparseIndexStride = 256;
+    private const ushort RelayAckVersion = 1;
+    private const int RelayAckHeaderSize = 12;
+    private const int RelayAckRecordSize = 24;
     private static ReadOnlySpan<byte> Magic => "FLDA"u8;
 
     private readonly object _lock = new();
@@ -34,6 +37,20 @@ internal sealed class ApplyJournal : IDisposable
     private bool _faulted;
 
     private readonly record struct IndexAnchor(ulong JournalSeq, long Offset);
+    private readonly record struct AuthorKey(ulong Low, ulong High)
+    {
+        internal static AuthorKey From(ReadOnlySpan<byte> bytes)
+            => new(BinaryPrimitives.ReadUInt64LittleEndian(bytes),
+                BinaryPrimitives.ReadUInt64LittleEndian(bytes.Slice(8, 8)));
+
+        internal bool IsZero => (Low | High) == 0;
+
+        internal void WriteTo(Span<byte> bytes)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes, Low);
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes.Slice(8, 8), High);
+        }
+    }
 
     private readonly record struct BatchKey(
         ulong IssuerLo, ulong IssuerHi, uint IssuerEpoch, ushort NamespaceId,
@@ -80,6 +97,127 @@ internal sealed class ApplyJournal : IDisposable
         if (namespaceId > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(namespaceId));
         string path = Path.Combine(directory, $"ns_{namespaceId}.apply");
         return new ApplyJournal(path, (ushort)namespaceId);
+    }
+
+    private static FileStream OpenJournalStream(string path)
+        => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+    internal bool IsRelayAcknowledged(ReadOnlySpan<byte> authorNodeId, ulong journalSeq)
+    {
+        if (authorNodeId.Length != 16) return false;
+        var key = AuthorKey.From(authorNodeId);
+        lock (_lock)
+        {
+            EnsureUsable();
+            return _relayAckedThrough.TryGetValue(key, out ulong safeThrough) &&
+                   journalSeq <= safeThrough;
+        }
+    }
+
+    internal void AcknowledgeRelayBatches(ReadOnlySpan<byte> authorNodeId, ulong safeThroughJournalSeq)
+    {
+        if (authorNodeId.Length != 16)
+            throw new ArgumentException("AuthorNodeId must be 16 bytes.", nameof(authorNodeId));
+        var key = AuthorKey.From(authorNodeId);
+        if (key.IsZero)
+            throw new ArgumentException("AuthorNodeId must be nonzero.", nameof(authorNodeId));
+        if (safeThroughJournalSeq == 0) return;
+
+        lock (_lock)
+        {
+            EnsureUsable();
+            ulong highWatermark = _nextSeq - 1;
+            if (safeThroughJournalSeq > highWatermark)
+                throw new ArgumentOutOfRangeException(nameof(safeThroughJournalSeq),
+                    "Relay ACK watermark exceeds the ApplyJournal high watermark.");
+            bool hadPrevious = _relayAckedThrough.TryGetValue(key, out ulong previous);
+            if (hadPrevious && safeThroughJournalSeq < previous)
+                throw new ArgumentOutOfRangeException(nameof(safeThroughJournalSeq),
+                    "Relay ACK watermark cannot move backwards.");
+            if (hadPrevious && safeThroughJournalSeq == previous) return;
+
+            _relayAckedThrough[key] = safeThroughJournalSeq;
+            try
+            {
+                PersistRelayAckFile();
+            }
+            catch
+            {
+                if (hadPrevious) _relayAckedThrough[key] = previous;
+                else _relayAckedThrough.Remove(key);
+                throw;
+            }
+        }
+    }
+
+    private void LoadRelayAckFile()
+    {
+        if (!File.Exists(_relayAckPath)) return;
+        byte[] bytes = File.ReadAllBytes(_relayAckPath);
+        if (bytes.Length < RelayAckHeaderSize + 4 ||
+            !bytes.AsSpan(0, 4).SequenceEqual("FLRA"u8) ||
+            BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4, 2)) != RelayAckVersion ||
+            BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(6, 2)) != _namespaceId)
+            throw new InvalidDataException("Invalid ApplyJournal relay-ACK sidecar header.");
+
+        uint count = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4));
+        if (count > 1_000_000 ||
+            bytes.Length != RelayAckHeaderSize + checked((int)count * RelayAckRecordSize) + 4)
+            throw new InvalidDataException("Invalid ApplyJournal relay-ACK sidecar length.");
+        int entriesLength = checked((int)count * RelayAckRecordSize);
+        uint expectedCrc = Hashes.Crc32C(
+            bytes.AsSpan(0, RelayAckHeaderSize),
+            bytes.AsSpan(RelayAckHeaderSize, entriesLength));
+        uint storedCrc = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(bytes.Length - 4, 4));
+        if (storedCrc != expectedCrc)
+            throw new InvalidDataException("ApplyJournal relay-ACK sidecar CRC mismatch.");
+
+        int offset = RelayAckHeaderSize;
+        for (int i = 0; i < count; i++)
+        {
+            var key = AuthorKey.From(bytes.AsSpan(offset, 16));
+            ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset + 16, 8));
+            if (key.IsZero || seq == 0 || !_relayAckedThrough.TryAdd(key, seq))
+                throw new InvalidDataException("Invalid or duplicate ApplyJournal relay-ACK entry.");
+            offset += RelayAckRecordSize;
+        }
+    }
+
+    private void PersistRelayAckFile()
+    {
+        int count = _relayAckedThrough.Count;
+        int entriesLength = checked(count * RelayAckRecordSize);
+        byte[] bytes = new byte[RelayAckHeaderSize + entriesLength + 4];
+        "FLRA"u8.CopyTo(bytes);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4, 2), RelayAckVersion);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6, 2), checked((ushort)_namespaceId));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8, 4), checked((uint)count));
+        int offset = RelayAckHeaderSize;
+        foreach (var (key, seq) in _relayAckedThrough.OrderBy(x => x.Key.Low).ThenBy(x => x.Key.High))
+        {
+            key.WriteTo(bytes.AsSpan(offset, 16));
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset + 16, 8), seq);
+            offset += RelayAckRecordSize;
+        }
+        uint crc = Hashes.Crc32C(bytes.AsSpan(0, RelayAckHeaderSize),
+            bytes.AsSpan(RelayAckHeaderSize, entriesLength));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(bytes.Length - 4, 4), crc);
+
+        string temp = _relayAckPath + ".tmp";
+        try
+        {
+            using (var output = new FileStream(temp, FileMode.Create, FileAccess.Write,
+                       FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                output.Write(bytes);
+                output.Flush(true);
+            }
+            File.Move(temp, _relayAckPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temp)) File.Delete(temp);
+        }
     }
 
     public ulong HighWatermark
