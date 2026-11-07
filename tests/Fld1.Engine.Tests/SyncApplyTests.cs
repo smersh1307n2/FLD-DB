@@ -67,7 +67,8 @@ public class SyncApplyTests : IDisposable
             return false;
         }
 
-        int visited = db.VisitOutboxBatch(0, 10, Visit);
+        var lease = db.AcquireOutboxLease(Author(8));
+        int visited = db.VisitOutboxBatch(0, 10, lease, Visit);
         Assert.Equal(1, visited);
         Assert.Equal(1, callbacks);
     }
@@ -89,7 +90,8 @@ public class SyncApplyTests : IDisposable
             return false;
         }
 
-        var visitTask = Task.Run(() => db.VisitOutboxBatch(0, 1, Block));
+        var lease = db.AcquireOutboxLease(Author(9));
+        var visitTask = Task.Run(() => db.VisitOutboxBatch(0, 1, lease, Block));
         try
         {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
