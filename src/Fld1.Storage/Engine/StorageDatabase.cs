@@ -52,7 +52,7 @@ public sealed class StorageDatabase : IDisposable
                 database._snapshotCommitSeq = snapshot.CommitSeq;
                 database._lastCommitSeq = snapshot.CommitSeq;
             }
-            else if (wal.NextCommitSeq != 1)
+            else if (records.Count == 0 && wal.NextCommitSeq != 1)
             {
                 throw new InvalidDataException("Storage WAL starts after sequence 1 but no snapshot manifest exists.");
             }
