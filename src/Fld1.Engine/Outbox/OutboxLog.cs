@@ -199,6 +199,17 @@ public sealed class OutboxLog : IDisposable
             if (materializedThrough > storedMaterializedThrough)
                 WriteMaterializedWatermark(statePath, materializedThrough);
 
+            // Opening a new Outbox owner invalidates any lease left by a previous
+            // process/session before exposing the database to a new consumer.
+            if (!IsZero(leaseOwnerId))
+            {
+                if (leaseEpoch == ulong.MaxValue)
+                    throw new InvalidOperationException("Outbox lease epoch space is exhausted.");
+                leaseEpoch++;
+                leaseOwnerId = new byte[16];
+                WriteLease(leasePath, leaseEpoch, leaseOwnerId);
+            }
+
             fs.Seek(0, SeekOrigin.End);
             return new OutboxLog(
                 path, ackPath, statePath, leasePath, fs, nextSeq, ackedThrough,
