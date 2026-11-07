@@ -76,6 +76,8 @@ internal sealed class ApplyJournal : IDisposable
         _namespaceId = namespaceId;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         bool exists = File.Exists(path);
+        if (!exists && File.Exists(_relayAckPath))
+            throw new InvalidDataException("ApplyJournal relay-ACK sidecar exists without its journal.");
         _stream = OpenJournalStream(path);
         try
         {
@@ -182,7 +184,7 @@ internal sealed class ApplyJournal : IDisposable
         {
             var key = AuthorKey.From(bytes.AsSpan(offset, 16));
             ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset + 16, 8));
-            if (key.IsZero || seq == 0 || !_relayAckedThrough.TryAdd(key, seq))
+            if (key.IsZero || seq == 0 || seq >= _nextSeq || !_relayAckedThrough.TryAdd(key, seq))
                 throw new InvalidDataException("Invalid or duplicate ApplyJournal relay-ACK entry.");
             offset += RelayAckRecordSize;
         }
@@ -218,10 +220,27 @@ internal sealed class ApplyJournal : IDisposable
                 output.Flush(true);
             }
             File.Move(temp, _relayAckPath, overwrite: true);
+            TryFsyncDirectory(Path.GetDirectoryName(_relayAckPath)!);
         }
         finally
         {
             if (File.Exists(temp)) File.Delete(temp);
+        }
+    }
+
+    private static void TryFsyncDirectory(string directory)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                fs.Flush(flushToDisk: true);
+            }
+        }
+        catch
+        {
+            // Same best-effort directory durability policy as the manifest and WAL rotation.
         }
     }
 
