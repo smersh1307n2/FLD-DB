@@ -336,6 +336,6 @@ GitHub Actions run [42348683438](https://github.com/smersh1307n2/BIN-SYNC/action
 
 ### 7.13 Sparse ApplyJournal index (2026-11-07)
 
-The full per-record `_entries` List was removed. ApplyJournal now keeps one sparse `JournalSeq→offset` anchor per 256 records and uses lower-bound binary search to find the nearest anchor, then scans at most one bounded stride to the requested page. The complete `BatchKey→IndexEntry` dictionary remains for duplicate receipt lookup and is still unbounded; disk-backed/rebuildable receipt indexing and independent receipt GC remain open.
+The full per-record `_entries` List was removed. ApplyJournal now keeps one sparse `JournalSeq→offset` anchor per 256 records and uses lower-bound binary search to find the nearest anchor, then scans at most one bounded stride to the requested page. The `BatchKey` dictionary now stores only the 64-bit record offset rather than a full repeated IndexEntry; it remains one entry per receipt and is still unbounded. Disk-backed/rebuildable receipt indexing and independent receipt GC remain open.
 
 A restart regression test verifies page reads after JournalSeq 2. GitHub Actions run [42348804968](https://github.com/smersh1307n2/FLD-DB/actions/runs/42348804968) passed Release build and all tests at FLD-DB commit `ed535fef2440102ecfe84024760de3633eced484`.
