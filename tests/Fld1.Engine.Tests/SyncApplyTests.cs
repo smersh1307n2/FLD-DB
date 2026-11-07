@@ -11,6 +11,13 @@ public class SyncApplyTests : IDisposable
     public SyncApplyTests() => Directory.CreateDirectory(_dir);
     public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
 
+    private static byte[] Change(byte b)
+    {
+        var id = new byte[16];
+        id[15] = b;
+        return id;
+    }
+
     private static byte[] Author(byte b)
     {
         var a = new byte[16];
@@ -28,7 +35,7 @@ public class SyncApplyTests : IDisposable
         db.Checkpoint();
 
         int n = db.ApplyRemote([
-            new RemoteFieldWrite(rec, 1, "remote"u8.ToArray(), wall: ulong.MaxValue / 2, logical: 0, Author(9))
+            new RemoteFieldWrite(rec, 1, "remote"u8.ToArray(), wall: ulong.MaxValue / 2, logical: 0, Author(9), Change(1))
         ]);
         Assert.Equal(1, n);
         Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("remote"u8.ToArray()));
@@ -42,7 +49,7 @@ public class SyncApplyTests : IDisposable
         db.Put(rec, 1, "local-new"u8);
         // remote with wall=1 loses to local HLC from clock
         int n = db.ApplyRemote([
-            new RemoteFieldWrite(rec, 1, "old"u8.ToArray(), wall: 1, logical: 0, Author(1))
+            new RemoteFieldWrite(rec, 1, "old"u8.ToArray(), wall: 1, logical: 0, Author(1), Change(2))
         ]);
         Assert.Equal(0, n);
         Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("local-new"u8.ToArray()));
