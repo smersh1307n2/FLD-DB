@@ -156,7 +156,7 @@ The existing module names are not proof that their current contents are already 
 
 | Existing module | Storage Core candidates | Keep in FLD Database / optional layer |
 |---|---|---|
-| `Fld1.Core` | byte readers/writers, endian helpers, checksums and generic hashing | UUIDv7 policy, HLC, author ordering, RecordId/FieldId and field comparators |
+| `Fld1.Core` | `ByteUtil`'s domain-neutral byte/endian primitives; CRC32C/CRC32 and xxHash only where required by the generic Storage format | HLC, UUIDv7, `Id16`/`NamespaceId` domain types, FLD canonical tags and BLAKE3 state/protocol digests unless the Storage format independently requires them |
 | `Fld1.Run` | none may be moved wholesale based on its current API | the current RunBuilder/RunReader encode a field-specific FLD1 run (RecordId, FieldId, LWW tuple, PGM/cluster layout); keep this codec in Database unless it is deliberately split from a new generic byte-KV page/run format |
 | `Fld1.Wal` | generic WAL envelope, append/flush, framing, checksum, sequence validation, recovery scanner and torn-record handling after extraction | GroupCommit/ApplyCommit payload codecs and domain-specific replay handlers; split codec from generic WAL mechanics |
 | `Fld1.Manifest` | atomic file replacement and generic durable catalog/checkpoint publication mechanics after extraction | current RunEntry/namespace descriptors and CommitResult semantics until separated from FLD-specific metadata |
