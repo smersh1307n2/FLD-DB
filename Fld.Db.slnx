@@ -6,6 +6,7 @@
   <Folder Name="/src/">
     <Project Path="src/Fld1.Core/Fld1.Core.csproj" />
     <Project Path="src/Fld1.Engine/Fld1.Engine.csproj" />
+    <Project Path="src/Fld1.Storage/Fld1.Storage.csproj" />
     <Project Path="src/Fld1.Manifest/Fld1.Manifest.csproj" />
     <Project Path="src/Fld1.Run/Fld1.Run.csproj" />
     <Project Path="src/Fld1.Wal/Fld1.Wal.csproj" />
@@ -13,6 +14,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Fld1.Core.Tests/Fld1.Core.Tests.csproj" />
     <Project Path="tests/Fld1.Engine.Tests/Fld1.Engine.Tests.csproj" />
+    <Project Path="tests/Fld1.Storage.Tests/Fld1.Storage.Tests.csproj" />
     <Project Path="tests/Fld1.Manifest.Tests/Fld1.Manifest.Tests.csproj" />
     <Project Path="tests/Fld1.Run.Tests/Fld1.Run.Tests.csproj" />
     <Project Path="tests/Fld1.Wal.Tests/Fld1.Wal.Tests.csproj" />
