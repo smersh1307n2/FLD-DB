@@ -85,16 +85,16 @@ public class SyncApplyTests : IDisposable
         bool Block(in Fld1.Engine.Outbox.OutboxEntryView entry)
         {
             entered.Set();
-            release.Wait(TimeSpan.FromSeconds(5));
+            release.Wait();
             return false;
         }
 
         var visitTask = Task.Run(() => db.VisitOutboxBatch(0, 1, Block));
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
         try
         {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
             var writeTask = Task.Run(() => db.Put(rec, 2, "parallel"u8));
-            Assert.True(writeTask.Wait(TimeSpan.FromSeconds(5)),
+            Assert.True(writeTask.Wait(TimeSpan.FromSeconds(1)),
                 "Outbox encoding must not hold the database commit lock.");
         }
         finally
