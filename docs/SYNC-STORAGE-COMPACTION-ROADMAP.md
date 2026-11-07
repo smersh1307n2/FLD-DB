@@ -291,7 +291,7 @@ The structural reduction is deterministic but its byte impact depends on sparsit
 
 ### 7.8 BIN-SYNC tombstone GC safety gate (2026-11-07)
 
-The BIN-SYNC audit found that the existing GC path is not safe to use as tombstone reclamation: `GcNotice.Apply` does not persist/enforce `TombstoneCutoffWall`; `WatermarkGate` is not wired into DELTA_BATCH/reconcile/snapshot; and `GcNotice.PurgeBelowCutoff` deletes all old `Record.State` fields by HLC without checking whether they are tombstones or dominated ghosts. It leaves `FieldTombs` and lifecycle tombstones untouched. The existing test currently encodes this unsafe ordinary-field deletion behavior and must be revised only after the protocol gate is designed.
+The BIN-SYNC audit found that the existing GC path is not safe to use as tombstone reclamation: `GcNotice.Apply` does not persist/enforce `TombstoneCutoffWall`; `WatermarkGate` is not wired into DELTA_BATCH/reconcile/snapshot; and the former `GcNotice.PurgeBelowCutoff` deleted all old `Record.State` fields by HLC without checking whether they were tombstones or dominated ghosts. It left `FieldTombs` and lifecycle tombstones untouched. That destructive implementation is now disabled (the method returns zero until the safe gate exists), and tests assert that old live values and both tombstone forms remain intact.
 
 Do not enable destructive tombstone GC until a monotonic per-namespace cutoff is durable, peers behind it are forced through full resync/snapshot, and deletion is limited to tombstone/ghost state proven safe. Ordinary live fields must never be deleted merely because their HLC is old. Inbox receipt GC and ChangeId-ledger GC remain independent. See BIN-SYNC `METADATA-STORAGE-ARCHITECTURE.md` §8.3.
 
