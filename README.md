@@ -5,7 +5,7 @@ Embedded field-store with multi-process access via **FLD Shared Engine**.
 Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.md) and integrates with [BIN-SYNC](https://github.com/smersh1307n2/BIN-SYNC).
 
 
-Storage Core extraction and dependency boundaries are defined in [FLD Storage Core architecture](docs/FLD-STORAGE-CORE-ARCHITECTURE.md). The target is one DLL initially, with a domain-neutral `Fld1.Storage` API that can later be split into an independent package without depending on `FldDatabase`.
+Storage Core extraction and dependency boundaries are defined in [FLD Storage Core architecture](docs/FLD-STORAGE-CORE-ARCHITECTURE.md). The target is two independently buildable DLLs from the start: `Fld1.Storage.dll` (domain-neutral byte engine) and `Fld1.Database.dll` (FLD field database, referencing Storage). Storage-only consumers must not load the Database assembly.
 
 Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The associated [change staging, coalescing and retention policy](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md) defines which unpublished local changes may be collapsed and when Outbox entries become immutable.
 
@@ -26,12 +26,12 @@ Architecture for using FLD-DB as a generic Metadata Store (including the Storage
 
 | Module | Status |
 |--------|--------|
-| `Fld1.Storage` | Target extraction boundary; not yet split from the existing engine |
+| `Fld1.Storage.dll` | Independent assembly target; extraction/build boundary not yet implemented |
 | `Fld1.Core` | Uuid7, HLC, ByteUtil, Hashes |
 | `Fld1.Run` | Builder / reader / verify / scan |
 | `Fld1.Wal` | Micro-WAL v2 + HLC fields |
 | `Fld1.Manifest` | Atomic store + commit-result query |
-| `Fld1.Engine` | Single-process DB + simple write API |
+| `Fld1.Engine` | Current engine implementation; to be split behind Storage API and Database facade |
 
 ## Simple API
 
