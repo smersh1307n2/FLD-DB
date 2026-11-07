@@ -93,10 +93,6 @@ public sealed class FldDatabase : IDisposable
         Directory.CreateDirectory(Path.Combine(dbDir, "runs"));
         Directory.CreateDirectory(Path.Combine(dbDir, "tmp"));
 
-        var author = localAuthor ?? new byte[16];
-        if (localAuthor is null) Uuid7.NewUuid7(author);
-        if (author.Length != 16) throw new ArgumentException("author must be 16 bytes");
-
         var manifestStore = new AtomicManifestStore(dbDir);
         var manifest = manifestStore.Load();
 
@@ -117,8 +113,18 @@ public sealed class FldDatabase : IDisposable
         OutboxLog? outbox = null;
         try
         {
+            string outboxDir = Path.Combine(dbDir, "outbox");
+            string outboxPath = Path.Combine(outboxDir, $"ns_{namespaceId}.obx");
+            bool hasOutboxHistory = File.Exists(outboxPath) && new FileInfo(outboxPath).Length > 16
+                                    || File.Exists(outboxPath + ".ack")
+                                    || File.Exists(outboxPath + ".state");
+            bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
+                                  || walRecords.Count != 0
+                                  || hasOutboxHistory;
+            byte[] author = LocalAuthorStore.LoadOrCreate(dbDir, localAuthor, hasDurableData);
+
             outbox = OutboxLog.Open(
-                Path.Combine(dbDir, "outbox"), namespaceId, checkpointedThroughCommitSeq);
+                outboxDir, namespaceId, checkpointedThroughCommitSeq);
 
             var db = new FldDatabase(
                 dbDir, namespaceId, author, wal, outbox, manifestStore,
