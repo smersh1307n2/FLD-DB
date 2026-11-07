@@ -40,16 +40,19 @@ public sealed class PendingLocalBaselineTests : IDisposable
     }
 
     [Fact]
-    public void Multiple_puts_inside_one_commit_are_already_coalesced_to_final_value()
+    public void Multiple_puts_inside_one_commit_are_coalesced_to_final_value_after_restart()
     {
         var recordId = FldDatabase.NewRecordId();
-        using var db = FldDatabase.Open(_dir);
 
-        for (byte value = 1; value <= 4; value++)
-            db.Put(recordId, 5, [value]);
-        db.Commit();
+        using (var db = FldDatabase.Open(_dir))
+        {
+            for (byte value = 1; value <= 4; value++)
+                db.Put(recordId, 5, [value]);
+            db.Commit();
+        }
 
-        var entry = Assert.Single(db.ReadOutboxBatch(afterSeq: 0, limit: 10));
+        using var reopened = FldDatabase.Open(_dir);
+        var entry = Assert.Single(reopened.ReadOutboxBatch(afterSeq: 0, limit: 10));
         Assert.Equal(new byte[] { 4 }, entry.Value);
         Assert.Equal(1UL, entry.OutboxSeq);
     }
