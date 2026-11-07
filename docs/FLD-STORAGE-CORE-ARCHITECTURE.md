@@ -1,0 +1,211 @@
+# FLD Storage Core — extraction and dependency architecture
+
+**Status:** Architecture decision draft v0.1.  
+**Purpose:** make the durable storage engine independently reusable without loading or depending on the FLD field-database implementation.  
+**Initial packaging:** one DLL. The source and public API must nevertheless have a clean extraction boundary.
+
+## 1. Decision
+
+FLD-DB will be organized as two logical layers in one assembly:
+
+1. **Storage Core** — a small, domain-neutral embedded storage engine.
+2. **FLD Database** — the field/document semantics implemented on top of Storage Core.
+
+The first release does not need a separate `.Storage.dll`. It does need a separate namespace, source subtree, public API boundary, tests and one-way dependency direction. Later, Storage Core must be movable into its own project/package without changing its storage algorithms or requiring the FLD database code.
+
+The Storage Core is not a thin wrapper around `FldDatabase`. It is the lower-level engine used by `FldDatabase` and independently by applications that need durable metadata or another compact embedded store.
+
+## 2. Target dependency graph
+
+```text
+Application
+  |                          BIN-SYNC integration (separate adapter/package)
+  |                                      |
+  +---- Fld1.Database -------------------+---- BinSync.Core contracts
+  |       |
+  |       +---- field/record model
+  |       +---- LWW/lifecycle/HLC
+  |       +---- local Outbox / remote APPLY semantics
+  |       +---- FldDatabase facade and convenience API
+  |
+  +---- Fld1.Storage
+          |
+          +---- atomic byte-key/value transactions
+          +---- WAL, recovery and checkpointing
+          +---- immutable runs/pages and ordered scans
+          +---- snapshots and generation lifetime
+          +---- file/manifest primitives and integrity checks
+          +---- optional writer coordination / leases
+```
+
+Allowed dependency direction:
+
+- `Fld1.Database -> Fld1.Storage`.
+- A BIN-SYNC adapter may depend on `Fld1.Storage` and `BinSync.Core`.
+- `Fld1.Storage` MUST NOT depend on `Fld1.Database`, `FldDatabase`, BIN-SYNC, or the adapter.
+- BIN-SYNC Core MUST NOT depend on FLD.
+
+The adapter should normally live outside FLD-DB (for example, in a BIN-SYNC integration package). This prevents the storage engine from acquiring protocol dependencies just because its first consumer is BIN-SYNC.
+
+## 3. What belongs in Storage Core
+
+Storage Core owns only physical durability and generic storage mechanics:
+
+- opening/closing a storage directory and validating its format;
+- atomic write batches and commit ordering;
+- WAL append, flush, recovery and torn/corrupt record handling;
+- immutable run/page creation, manifest publication and checkpointing;
+- byte-oriented keys and values, ordered point/range/prefix reads;
+- bounded batch writes and efficient visitor-based scans;
+- stable read snapshots and safe reclamation of old generations;
+- storage-native commit sequence numbers;
+- optional append-only streams or log primitives with explicit sequence and compaction boundaries;
+- fenced leases/ownership primitives where required by the storage engine;
+- checksums, format versions, crash consistency and file lifecycle;
+- bounded indexes and seek-from-cursor paging.
+
+A caller must be able to store opaque metadata records without asking the engine to understand their meaning. The engine may optimize byte keys, values, batches, prefixes and ranges, but it must not interpret protocol or field semantics.
+
+### 3.1 Minimal data model
+
+The initial reusable surface should be byte-oriented:
+
+- a logical store/partition identifier;
+- an opaque ordered key;
+- an opaque value or immutable value reference;
+- atomic batches containing put/delete operations;
+- read snapshots;
+- ordered range/prefix scans;
+- storage-native commit/checkpoint identifiers.
+
+The exact public interfaces are a later API-design step. Do not prematurely expose a large generic ORM, LINQ provider, schema registry, object serializer or arbitrary plug-in framework.
+
+Metadata adapters can encode compact composite keys and values on top of this surface. For example, an adapter can keep peer state, inbox receipts, ChangeId indexes and relay records in separate key prefixes or logical stores while updating related records in one atomic batch.
+
+The engine must not require a user-data table, RecordId, FieldId, NodeId, HLC or ChangeId.
+
+## 4. What does not belong in Storage Core
+
+The following are FLD Database or BIN-SYNC responsibilities, not storage primitives:
+
+- RecordId / FieldId and field/document APIs;
+- HLC generation or comparison;
+- NodeId, author identity, ChangeId, BatchId and namespace protocol rules;
+- LWW comparison, lifecycle/ghost/tombstone semantics;
+- schema mapping, CRDT merge policies and canonical protocol payloads;
+- local pending-change coalescing and frozen Outbox policy;
+- Inbox duplicate rules, SeenChanges/ChangeIdLedger semantics and peer cursors;
+- relay eligibility, author streams, ACK validation and protocol GC;
+- network frames, sessions, transport, cryptography and peer state machines;
+- LINQ/typed-record convenience APIs.
+
+Storage Core may persist opaque bytes supplied by these layers. It must not construct, validate or reinterpret their values.
+
+## 5. Source layout while keeping one DLL
+
+Keep one build output initially, but organize source and namespaces as if the boundary already existed:
+
+```text
+src/
+  Fld1.Storage/
+    Abstractions/
+    Engine/
+    Wal/
+    Runs/
+    Manifest/
+    Snapshots/
+    Indexes/
+    Coordination/
+    Integrity/
+  Fld1.Database/
+    Records/
+    Fields/
+    Merge/
+    Lifecycle/
+    Outbox/
+    Apply/
+    FldDatabase.cs
+  Fld1.Shared/
+    // only utilities genuinely shared by both layers
+```
+
+These are source/module boundaries, not a requirement to create multiple assemblies now. Namespaces should mirror the intended future assembly names (for example, `Fld1.Storage` and `Fld1.Database`).
+
+Do not leave domain-specific types in a catch-all `Fld1.Core` namespace merely because both layers currently compile into one DLL. Audit the existing Core helpers individually:
+
+- byte encoding, checksum and storage-format helpers may belong in Storage;
+- HLC, UUIDv7 generation, author ordering and field-specific comparison belong above Storage;
+- a helper belongs in a shared namespace only if it has no dependency on either domain and is used by both.
+
+Storage implementation details remain internal. The small public Storage API is the extraction boundary; Database code must use that API rather than reaching into Storage implementation classes. This is what makes later project separation mechanical instead of a redesign.
+
+## 6. One DLL now, independent package later
+
+The initial package can expose both namespaces from the same assembly:
+
+- `Fld1.Storage.*` — reusable public storage surface;
+- `Fld1.Database.*` — FLD field database surface.
+
+The public Storage API must not expose any FLD Database or BIN-SYNC type in method signatures, generic constraints, events, exceptions or callbacks. Use opaque byte keys/values and storage-native identifiers.
+
+When the boundary is proven, extraction should be:
+
+1. Move `src/Fld1.Storage/**` and its tests into `Fld1.Storage.csproj`.
+2. Keep the public namespace and API stable.
+3. Make the FLD Database project reference the new Storage package/project.
+4. Move only genuinely shared low-level utilities with Storage; keep field/HLC/identity code in Database.
+5. Publish the Storage package independently if desired.
+
+No source-level algorithm rewrite should be necessary. Avoid circular references and `InternalsVisibleTo` as a permanent way for Database to reach into Storage internals.
+
+## 7. Physical format and engine reuse
+
+Do not create a second storage engine solely for Storage-only mode. The same WAL/run/manifest/recovery machinery should serve both modes.
+
+- FLD Database stores its field-state records using its own key/value encoding over Storage Core.
+- A metadata-only consumer stores opaque metadata records using its own compact key/value encoding.
+- Both use the same atomic batch, WAL, checkpoint and snapshot guarantees.
+- Storage-native CommitSeq is not a BIN-SYNC author cursor, OutboxSeq, HLC or peer cursor.
+- Storage-only writes do not synthesize a LocalAuthor, HLC, ChangeId, Outbox entry or field lifecycle state.
+
+The existing FLD1 physical format can be reused only where its primitives are genuinely domain-neutral. If the current run format hardcodes field-specific assumptions, split the generic page/record mechanics from the field codec rather than forcing metadata records through fake RecordId/FieldId values. Do not create dummy namespaces or synthetic field records to represent metadata.
+
+The single-process storage path must remain usable without starting the FLD Shared Engine process. Multi-process coordination may be an optional layer over Storage Core; it must not become a mandatory dependency for a simple embedded consumer.
+
+## 8. Performance and API constraints
+
+- Prefer `ReadOnlySpan<byte>`, `ReadOnlyMemory<byte>`, bounded batch APIs and visitor-based scans on hot paths.
+- Avoid mandatory object materialization for each key/value during scans.
+- Avoid copying large values when an immutable page/blob reference can safely pin its generation.
+- Do not hold writer locks while callers perform network I/O or long-running processing over a snapshot.
+- Keep indexes bounded or rebuildable; never retain one in-memory object per historical journal entry without a retention bound.
+- Separate WAL recovery lifetime from receipt, relay and application metadata lifetimes.
+- Events/diagnostics are optional and must not run synchronously on the commit/read hot path.
+- Fail closed on checksum, manifest, sequence or recovery inconsistencies.
+
+## 9. Dependency and conformance tests
+
+Before treating Storage Core as reusable, add tests that prove:
+
+1. Storage Core can be opened and used without constructing `FldDatabase`.
+2. A small standalone consumer can write, commit, close, reopen, read and scan opaque records using only the Storage API.
+3. Crash/reopen tests pass for atomic batches, WAL recovery and manifest/checkpoint publication.
+4. A snapshot remains readable while newer commits/checkpoints occur; old generations are reclaimed only after the last snapshot releases them.
+5. Range/prefix scans are ordered and page from the requested cursor without rescanning the full historical prefix.
+6. Storage-only writes create no field/HLC/author/Outbox metadata.
+7. The Storage namespace/public API has no reference to Database or BIN-SYNC domain types.
+8. A dependency-architecture test rejects references from Storage source/types to Database namespaces and BIN-SYNC assemblies.
+9. The FLD Database uses the Storage public surface; it does not bypass it to manipulate WAL/manifest internals.
+10. Storage can be compiled into a separate project in a test branch without moving or rewriting database algorithms.
+
+## 10. Implementation order
+
+1. Inventory existing source files and classify every type as Storage, Database or genuinely shared.
+2. Establish namespaces/source folders and dependency tests without changing physical behavior.
+3. Define the minimal byte-oriented Storage API around the current WAL/run/manifest implementation.
+4. Move the FLD engine internals behind that API; keep one DLL and preserve the current public FldDatabase API.
+5. Add a standalone Storage-only sample/test that never references FldDatabase.
+6. Implement metadata key/value encoding and the BIN-SYNC adapter outside the field database layer.
+7. Only after the boundary is stable, consider publishing a separate Storage assembly/package.
+
+**Core rule:** Storage Core is the durable byte engine; FLD Database is one consumer of it. The engine must never need to know that a field database or a synchronization protocol exists.
