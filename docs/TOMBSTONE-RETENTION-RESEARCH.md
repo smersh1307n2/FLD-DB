@@ -33,7 +33,7 @@ Documented behavior:
 - When a tombstone is removed, the provider records its version in ForgottenKnowledge.
 - ForgottenKnowledge is deliberately an overestimate: it may describe versions whose tombstones were removed even if some corresponding active metadata still exists.
 - During synchronization, the framework compares the source's forgotten knowledge with the destination's current knowledge.
-- If the destination does not contain the forgotten knowledge, it is considered out of date and a full enumeration/recovery synchronization is initiated.
+- If the destination does not contain the forgotten knowledge, it is considered out of date and a recovery synchronization is initiated. A full enumeration is authoritative: the source enumerates all current items, and destination items with no corresponding source item are deleted.
 - When a source sends an item that a destination previously knew but has since deleted and forgotten, the destination compares the item's **creation version** with its current knowledge. If that creation version is already known, the item is treated as an update-delete conflict rather than a new item.
 
 The central lesson: **physical tombstone removal is safe only because a separate compact knowledge structure preserves the information needed to detect stale replicas and resurrection attempts.** ForgottenKnowledge is not equivalent to a TTL, tombstone-count limit, or ACK cache.
@@ -129,7 +129,7 @@ A tombstone may become a purge candidate only when all applicable conditions are
 1. **Exact identity:** the database can identify the tombstone's semantic operation, author and ChangeId, and resolve it to the retained local outbound stream position. HLC wall time alone is not an identity or a stream frontier.
 2. **Durable peer baseline:** the namespace has a durable membership/baseline generation identifying the peers whose state must be protected.
 3. **Contiguous processed ACK:** every peer still in that baseline has durably acknowledged a contiguous stream position covering the tombstone. An absent peer state, missing ACK, unresolved provenance entry or non-contiguous range blocks reclamation.
-4. **Explicit fencing for exclusions:** a peer removed from the baseline is durably fenced from sending old-generation deltas. On return it must complete a full snapshot/bootstrap before ordinary incremental traffic or old local state is accepted.
+4. **Explicit fencing for exclusions:** a peer removed from the baseline is durably fenced from sending old-generation deltas. On return it must complete a full snapshot/bootstrap before ordinary incremental traffic or old local state is accepted. The bootstrap must reconcile destination-only items, not merely merge source values into the stale destination.
 5. **Snapshot/feed barrier:** the snapshot and its feed/frontier watermark are captured at one atomic logical barrier. A snapshot of current winners alone must not silently imply that LWW-loser relay history or unprocessed operations were delivered.
 6. **Type-specific proof:** only field tombstones, record lifecycle tombstones and ghost state covered by the proof may be reclaimed. Ordinary live values must never be deleted because their HLC is old.
 7. **Durable forgotten knowledge:** the frontier/epoch that explains the purge is persisted before physical tombstone removal becomes irreversible.
@@ -147,7 +147,7 @@ There are only two safe choices:
 
 A time-based offline threshold may trigger an administrative proposal to fence a peer, but the threshold itself is not the proof. The durable generation transition and receive-path enforcement are the proof.
 
-New peers should enter through a snapshot/bootstrap contract. They are not retroactive recipients of every historical relay operation unless the product explicitly promises event-history replication.
+New peers should enter through a snapshot/bootstrap contract. It must be an authoritative namespace baseline with a generation-bound cut, not a merge-only stream of current winners: destination-only stale items must be identified and reconciled as absent. Any offline local changes that must survive recovery need an explicit conflict/quarantine/rebase path before the authoritative replacement; they must not be silently discarded or accepted as ordinary current-generation deltas. New peers are not retroactive recipients of every historical relay operation unless the product explicitly promises event-history replication.
 
 ### 4.4 Forgotten frontier representation
 
