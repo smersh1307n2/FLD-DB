@@ -33,7 +33,6 @@ public static class WalHeader
     public static ushort ReadVersion(ReadOnlySpan<byte> h) => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffWalVersion));
     public static ushort ReadFlags(ReadOnlySpan<byte> h) => BinaryPrimitives.ReadUInt16LittleEndian(h.Slice(OffFlags));
     public static ulong ReadPartitionId(ReadOnlySpan<byte> h) => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffPartitionId));
-    public static ulong ReadNamespaceId(ReadOnlySpan<byte> h) => ReadPartitionId(h);
     public static ulong ReadFirstCommitSeq(ReadOnlySpan<byte> h) => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffFirstCommitSeq));
     public static uint ReadHeaderCrc(ReadOnlySpan<byte> h) => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffHeaderCrc32C));
     public static bool VerifyCrc(ReadOnlySpan<byte> h)
