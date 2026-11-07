@@ -3,6 +3,7 @@
 **Date:** 2026-11-07  
 **Status:** agreed target architecture; BIN-SYNC metadata P1 and FLD remote APPLY P2 implementation slices are complete on their working branches without a DELTA_BATCH wire-format change. Remaining: durable PendingLocal coalescing, FLD Outbox physical encoding/benchmarks, and protocol-safe receipt/dedup/tombstone reclamation.  
 **Primary audit:** [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).  
+**Tombstone research:** [Tombstone Retention and Safe Garbage Collection](TOMBSTONE-RETENTION-RESEARCH.md) — Microsoft ForgottenKnowledge, CRDT causal stability/commitment, Cassandra, CouchDB and Couchbase.  
 **Companion documents:** [FLD Storage Core](FLD-STORAGE-CORE-ARCHITECTURE.md), [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).
 
 ## 1. Goal
@@ -417,3 +418,22 @@ A focused test now verifies alias independence and sensitivity to author, namesp
 BIN-SYNC CORE v2.4.19 E-25 now makes the fail-closed rule normative: a seven-day TTL or scalar HLC cutoff/GC_NOTICE is not proof that a tombstone can be deleted. Reclamation requires a durable namespace frontier covering all relevant author streams, confirmation by every peer in the current baseline, stale-peer fencing and mandatory full resync, plus an atomic snapshot/feed barrier. Until that protocol is implemented and enforced on every delta/snapshot path, field tombstones, record lifecycle tombstones and ghost state remain durable; the current PurgeBelowCutoff helper is intentionally a no-op. BIN-SYNC GitHub Actions run [42355154761](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42355154761) passed 609 .NET 10 tests, public samples, coverage and fuzz/lab hardening at commit `e398c49be95950e98528cc617d24650b91dae5f1`.
 
 This also fixes the Storage ownership distinction: `Fld1.Storage.dll` stores opaque durable bytes/pages and does not interpret tombstones. `Fld1.Database.dll` owns tombstone/ghost semantics, merge visibility and any future safe reclamation decision. Storage must faithfully persist the Database's tombstone representation; it must not independently TTL-delete it.
+
+
+### 7.18 Tombstone retention research (2026-11-07)
+
+Added [Tombstone Retention and Safe Garbage Collection](TOMBSTONE-RETENTION-RESEARCH.md), comparing Microsoft Sync Framework ForgottenKnowledge, WinFS P2P knowledge/vector summaries, CRDT causal stability versus commitment, Cassandra grace-period behavior, CouchDB revision/purge semantics and Couchbase Sync Gateway mobile-client retention.
+
+The research reinforces E-25 and clarifies the adaptation:
+
+- Microsoft does not equate tombstone cleanup with forgetting the deletion. It records cleaned tombstone versions in ForgottenKnowledge, detects stale destinations and invokes full enumeration; it also checks item creation versions to prevent resurrection.
+- CRDT literature distinguishes collecting metadata for causally stable updates from removing tombstones/resetting replicated state, which requires a commitment protocol and known membership assumptions.
+- Cassandra's ten-day grace period is an operational repair window, not protection against replicas absent longer than the configured period.
+- CouchDB distinguishes replicated deletion from physical purge; its internal purge uses sequence/checkpoint propagation, while external purge is not replicated automatically.
+- No finite TTL is safe for an indefinitely disconnected peer that remains authorized to submit old state.
+
+**Recommended direction:** durable namespace membership/baseline generation + explicit stale-peer fencing + mandatory full snapshot/bootstrap + atomic snapshot/feed barrier + compact forgotten-frontier knowledge. The frontier must be scoped to the node/namespace/generation that owns its sequence positions. Do not treat local OutboxSeq, JournalSeq, CommitSeq or relay-local Seq as a globally comparable origin sequence. Do not add OriginSeq or change ChangeId generation as part of this work.
+
+Keep five lifetimes independent: current field/record tombstones, relay payload, global ChangeId dedup ledger, Inbox batch receipts, and forgotten frontier/GC epoch. Relay ACK does not authorize dedup-ledger or receipt deletion. TTL may mark a tombstone as a GC candidate but cannot authorize physical purge.
+
+The existing fail-closed behavior remains mandatory. The research note is a design proposal, not implementation approval. Tombstone GC remains disabled until membership fencing, snapshot/feed enforcement, durable forgotten-frontier recovery and adversarial tests cover every delta/reconcile/snapshot acceptance path.
