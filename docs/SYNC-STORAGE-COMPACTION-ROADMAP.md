@@ -689,3 +689,19 @@ The BIN-SYNC integration branch has promoted the provider and metadata-store con
 The public array sample now exercises the runtime adapters and coordinator across two nodes, two independent Storage partitions, close/reopen and a later remote update. BIN-SYNC integration CI passed 32/32 tests at the current adapter milestone.
 
 **Boundary still open:** the legacy Node/Transport path has not yet been migrated to use `IMetadataStore` for its own freeze, receive/relay, ACK/lease and Pending Apply transitions. The explicit coordinator does not replace that protocol-owned metadata path. Complete the migration only with wire-compatibility, restart and fault-injection coverage; do not claim automatic NodeBuilder/Transport integration yet.
+
+### 7.23.4 Storage-backed real TCP array sample (2026-11-07)
+
+The BIN-SYNC integration branch now includes `samples/StorageArrayTcpSync`, executed by the FLD Storage Integration workflow. Unlike the earlier `StorageArraySync` sample, this one uses `TcpSyncListener`, `TcpSync.ConnectAsync` and the production transport-independent `SyncSession` path over a real loopback TCP connection.
+
+The sample keeps one independent `Fld1.Storage` database per replica and stores the `StorageDataProvider`, `StorageMetadataStore` and complete Node checkpoint in that database. It verifies:
+
+- bidirectional synchronization of two array items with multiple stable fields;
+- receiver ordering through the TCP `beforeAck` boundary: Node checkpoint → provider apply → Metadata Store PendingApply finalization → ACK;
+- draining all available batches before closing a session (one `PushBatchAsync` call is one batch attempt, not a complete synchronization round);
+- close/reopen of both databases and Node checkpoints, then a later field update on the same author stream;
+- record lifecycle tombstone propagation over a subsequent TCP session.
+
+At BIN-SYNC commit `aa5c52e2daa85638326f4df94c0fdec5e312b467`, FLD Storage Integration workflow run [42377636914](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42377636914) passed: 47/47 integration tests, the existing in-process StorageArraySync sample, and the new real-TCP sample. The TCP sample reported PASS for initial bidirectional exchange, restart + subsequent update, and record tombstone propagation.
+
+**Boundary unchanged:** this proves the public Storage adapters and coordinator can participate in real TCP synchronization with durable reopen. It does not make `IMetadataStore` the authoritative source for Node's own Outbox, receive/relay, ACK/lease or peer-progress state. NodePersistence remains a complete Node checkpoint stored in Storage, and the direct Node runtime migration remains the next architectural gate.
