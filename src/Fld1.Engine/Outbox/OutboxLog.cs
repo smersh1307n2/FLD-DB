@@ -563,54 +563,28 @@ public sealed class OutboxLog : IDisposable
 
     private List<OutboxEntry> ReadBatchUnlocked(ulong afterSeq, int limit)
     {
-        ulong minimumExclusive = Math.Max(afterSeq, _ackedThrough);
         var result = new List<OutboxEntry>(Math.Min(limit, 64));
-        long fileLength = _writeOffset;
-        long position = FindReadStartOffset(minimumExclusive);
-        Span<byte> fixedPart = stackalloc byte[FixedRecordSize];
 
-        while (position < fileLength && result.Count < limit)
+        bool AddEntry(in OutboxEntryView view)
         {
-            long remaining = fileLength - position;
-            if (remaining < FixedRecordSize + RecordCrcSize)
-                throw new InvalidDataException($"Outbox has an incomplete record at offset {position}.");
-
-            _fs.Position = position;
-            _fs.ReadExactly(fixedPart);
-            uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(
-                fixedPart.Slice(FixedRecordSize - 4, 4));
-            if (valueLength > MaxValueLength)
-                throw new InvalidDataException($"Outbox value length {valueLength} exceeds limit at offset {position}.");
-
-            long recordLength = (long)FixedRecordSize + valueLength + RecordCrcSize;
-            if (recordLength > remaining)
-                throw new InvalidDataException($"Outbox record is truncated at offset {position}.");
-
-            ValidateFixedRecord(fixedPart, position);
-            ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
-            if (seq == 0)
-                throw new InvalidDataException($"Outbox sequence zero at offset {position}.");
-
-            int length = checked((int)recordLength);
-            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
-            try
+            result.Add(new OutboxEntry
             {
-                _fs.Position = position;
-                _fs.ReadExactly(rented.AsSpan(0, length));
-                ReadOnlySpan<byte> record = rented.AsSpan(0, length);
-                VerifyRecordCrc(record, position);
-
-                if (seq > minimumExclusive)
-                    result.Add(DecodeEntry(record, valueLength));
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-
-            position += recordLength;
+                OutboxSeq = view.OutboxSeq,
+                CommitSeq = view.CommitSeq,
+                ChangeId = view.ChangeId.ToArray(),
+                RecordId = view.RecordId.ToArray(),
+                FieldId = view.FieldId,
+                OpKind = view.OpKind,
+                AuthorNodeId = view.AuthorNodeId.ToArray(),
+                Wall = view.Wall,
+                Logical = view.Logical,
+                KeyEpoch = view.KeyEpoch,
+                Value = view.Value.IsEmpty ? Array.Empty<byte>() : view.Value.ToArray()
+            });
+            return true;
         }
 
+        VisitBatchUnlocked(afterSeq, limit, AddEntry);
         return result;
     }
 
