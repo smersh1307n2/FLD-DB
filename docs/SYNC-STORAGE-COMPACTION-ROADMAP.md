@@ -125,7 +125,7 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 **2.3 Bounded indexes and seekable paging — partially implemented**
 - Implemented lower-bound binary search by JournalSeq in ReadBatches, so a page starts at the first entry after the cursor instead of rescanning the consumed prefix.
 - The in-memory List/Dictionary still retain every historical entry and remain unbounded/rebuildable-index work.
-- Add validated downstream safe watermark before relay payload GC; receipt expiry remains independent.
+- Before relay payload GC, persist source provenance mapping (author, JournalSeq, ChangeId → BIN-SYNC OutboxSeq) across restart. BIN-SYNC must compute per-author minimum safe ACK across all interested peers and pass a JournalSeq watermark; receipt expiry remains independent.
 
 **Exit:** payload single-encoding and relay-only promotion are implemented and tested; seek cost is now O(log N + page size), but independent receipt/relay retention, bounded indexes and crash-tested safe GC remain open.
 
