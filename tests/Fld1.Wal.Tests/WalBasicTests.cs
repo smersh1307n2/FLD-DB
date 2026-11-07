@@ -131,6 +131,63 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Apply_commit_codec_roundtrip_and_wal_recovery()
+    {
+        var apply = new WalApplyCommit
+        {
+            SenderPeer = Id(1),
+            SenderEpoch = 3,
+            NamespaceId = 7,
+            IssuerNodeId = Id(2),
+            IssuerEpoch = 4,
+            BatchId = Id(3),
+            CursorStart = 10,
+            CursorEnd = 11,
+            PreviousBatchDigest = new byte[16],
+            BatchDigest = Id(4),
+            RecordsRoot = Id(5),
+            ProtocolStateDelta = [0xA1, 0xB2],
+            AppliedCount = 1,
+            Fields =
+            [
+                new WalFieldMutation
+                {
+                    RecordId = Id(6), FieldId = 7, OpKind = 1, KeyEpoch = 2,
+                    Wall = 123, Logical = 4, AuthorNodeId = Id(8),
+                    ChangeId = Id(9), Value = "value"u8.ToArray()
+                }
+            ],
+            RelayFields =
+            [
+                new WalFieldMutation
+                {
+                    RecordId = Id(6), FieldId = 7, OpKind = 1, KeyEpoch = 2,
+                    Wall = 123, Logical = 4, AuthorNodeId = Id(8),
+                    ChangeId = Id(9), Value = "value"u8.ToArray()
+                }
+            ]
+        };
+        byte[] payload = ApplyCommitCodec.Encode(apply);
+        var decoded = ApplyCommitCodec.Decode(payload);
+        Assert.Equal(apply.BatchId, decoded.BatchId);
+        Assert.Equal(apply.ProtocolStateDelta, decoded.ProtocolStateDelta);
+        Assert.Single(decoded.Fields);
+        Assert.Single(decoded.RelayFields);
+
+        var path = PathOf("apply.log");
+        using (var writer = WalWriter.Create(path, 7, 1))
+        {
+            Assert.Equal(1UL, writer.Append(WalConstants.KindApplyCommit, payload));
+            writer.Flush();
+        }
+        var recovered = WalRecovery.Recover(path);
+        Assert.Equal(WalRecoveryStatus.Ok, recovered.Status);
+        Assert.Single(recovered.Records);
+        Assert.Equal(WalConstants.KindApplyCommit, recovered.Records[0].Kind);
+        Assert.Single(ApplyCommitCodec.Decode(recovered.Records[0].Payload).RelayFields);
+    }
+
+    [Fact]
     public void Codec_roundtrip_empty_group()
     {
         var p = EmptyPayload();
