@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Fld1.Wal.Codec;
 using Fld1.Wal.Format;
 using Fld1.Wal.IO;
