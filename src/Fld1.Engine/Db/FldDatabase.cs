@@ -1000,9 +1000,7 @@ public sealed class FldDatabase : IDisposable
                         continue;
                 }
 
-                byte[] changeId = write.ChangeId is { Length: 16 }
-                    ? write.ChangeId.ToArray()
-                    : NewChangeId();
+                byte[] changeId = write.ChangeId.ToArray();
 
                 _overlay.Put(key, new MemFieldValue
                 {
