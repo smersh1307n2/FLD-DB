@@ -16,6 +16,9 @@ public sealed class StorageDatabase : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<StorageKey, byte[]> _values = new();
     private readonly WalManager _wal;
+    private readonly string _directory;
+    private ulong _snapshotGeneration;
+    private ulong _snapshotCommitSeq;
     private bool _disposed;
     private bool _faulted;
     private ulong _lastCommitSeq;
@@ -24,8 +27,9 @@ public sealed class StorageDatabase : IDisposable
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
     public int Count { get { lock (_gate) { EnsureUsable(); return _values.Count; } } }
 
-    private StorageDatabase(WalManager wal)
+    private StorageDatabase(string directory, WalManager wal)
     {
+        _directory = directory;
         _wal = wal;
     }
 
@@ -35,16 +39,35 @@ public sealed class StorageDatabase : IDisposable
         if (walRotateAfterBytes < 0) throw new ArgumentOutOfRangeException(nameof(walRotateAfterBytes));
         Directory.CreateDirectory(directory);
         string walDirectory = Path.Combine(directory, "wal");
+        var snapshot = StorageSnapshotFile.Load(directory, partitionId);
         var (wal, records) = WalManager.Open(walDirectory, partitionId, walRotateAfterBytes);
-        var database = new StorageDatabase(wal);
+        var database = new StorageDatabase(directory, wal);
         try
         {
+            if (snapshot is not null)
+            {
+                foreach (var pair in snapshot.Values)
+                    database._values.Add(pair.Key, pair.Value);
+                database._snapshotGeneration = snapshot.Generation;
+                database._snapshotCommitSeq = snapshot.CommitSeq;
+                database._lastCommitSeq = snapshot.CommitSeq;
+            }
+            else if (wal.NextCommitSeq != 1)
+            {
+                throw new InvalidDataException("Storage WAL starts after sequence 1 but no snapshot manifest exists.");
+            }
+
             foreach (var record in records)
             {
+                if (record.CommitSeq <= database._lastCommitSeq)
+                    continue;
                 if (record.Kind != BatchCommitKind)
                     throw new InvalidDataException($"Unknown Storage WAL record kind {record.Kind}.");
                 database.ApplyRecovered(record.CommitSeq, record.Payload);
             }
+
+            if (wal.NextCommitSeq != checked(database._lastCommitSeq + 1))
+                throw new InvalidDataException("Storage snapshot and WAL commit sequence do not form a contiguous recovery chain.");
 
             return database;
         }
@@ -74,6 +97,28 @@ public sealed class StorageDatabase : IDisposable
 
             value = null;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Publish an immutable on-disk checkpoint, then reclaim only WAL segments
+    /// fully covered by its independently durable manifest root.
+    /// </summary>
+    public void Checkpoint()
+    {
+        lock (_gate)
+        {
+            EnsureUsable();
+            if (_lastCommitSeq == _snapshotCommitSeq) return;
+
+            _wal.Flush();
+            _wal.Rotate();
+            ulong generation = checked(_snapshotGeneration + 1);
+            StorageSnapshotFile.Store(_directory, PartitionId, generation, _lastCommitSeq,
+                new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance));
+            _snapshotGeneration = generation;
+            _snapshotCommitSeq = _lastCommitSeq;
+            _wal.TruncateSealedSegments(_snapshotCommitSeq);
         }
     }
 
