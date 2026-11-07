@@ -188,44 +188,45 @@ Removing AuthorNodeId (16), deriving OutboxSeq (8), and moving CommitSeq to a gr
 
 FLD Outbox has one consumer ACK watermark and a fenced consumer lease. That is appropriate if BIN-SYNC owns all peer-level delivery state and only sends FLD a safe aggregate ACK. Do not copy per-peer cursors into FLD merely to duplicate BIN-SYNC's responsibility.
 
-## 6. FLD remote APPLY: largest confirmed payload amplification
+## 6. FLD remote APPLY: payload amplification and current reduction
 
-### 6.1 Duplicate relay subset inside APPLY_COMMIT
+### 6.1 APPLY_COMMIT v3 stores incoming operations once
 
-RemoteBatchCommit validates RelayWrites as an exact subset of Writes by ChangeId and byte-identical operation data. But ApplyCommitCodec v2 serializes both Fields and RelayFields as separate full arrays.
+RemoteBatchCommit still validates RelayWrites as an exact subset of Writes by ChangeId and byte-identical operation data. ApplyCommitCodec v3 now serializes Fields once and stores the relay subset as canonical varint indexes into that array. Decode reconstructs RelayFields as references to the corresponding Fields entries; it does not allocate a second set of payload arrays.
 
-Thus every relay-selected operation is serialized twice inside the same APPLY_COMMIT payload. A non-relay operation is serialized once.
+The codec remains backward-compatible with v2 payloads. It validates unique/in-range relay indexes and validates the old v2 RelayFields array as an exact subset during migration/read.
 
-### 6.2 Same full payload in WAL and ApplyJournal
+### 6.2 ApplyJournal now stores receipt metadata plus relay-only payload
 
-The same encoded APPLY_COMMIT payload is then persisted in the WAL and in ApplyJournal. ApplyJournal retains the complete Fields array even though relay enumeration needs only RelayFields and duplicate-batch lookup needs a compact receipt.
+ApplyRemoteBatch still flushes the full authoritative APPLY_COMMIT to WAL first. ApplyJournal.AppendIfMissing then canonicalizes the commit into a relay-only form:
+- batch identity, cursor range, issuer, digest-chain fields, RecordsRoot, ProtocolStateDelta, AppliedCount and commit sequence metadata remain available for duplicate receipt lookup;
+- only RelayFields payloads are materialized into the journal;
+- non-relay Fields are not copied into ApplyJournal;
+- the relay-only form is encoded once, without a second field array or relay-index list.
 
-At the operation-payload level, before counting the current-state run/overlay:
+This is flushed before ApplyRemoteBatch returns, so a later checkpoint/WAL truncation cannot remove the only durable copy of relay-eligible operations. Journal promotion is idempotent by batch identity; when an existing record is encountered, canonical receipt metadata plus relay payload are compared. WAL recovery rebuilds the compact journal representation from both old v2 and new v3 APPLY_COMMIT payloads. Relay-eligible LWW losers remain retained.
 
-- non-relay operation: two copies (WAL + ApplyJournal);
-- relay-selected operation: four copies (Fields + RelayFields in WAL, and the same two arrays in ApplyJournal).
+The operation-payload multiplicity is now:
+- non-relay operation: one WAL copy until WAL checkpoint/truncation, then no journal copy;
+- relay-selected operation: one WAL copy plus one relay-only journal copy until WAL checkpoint/truncation, then one journal copy.
 
-This is the clearest large storage-amplification target found in the current code.
+The receipt and relay payload are logically distinct but still physically co-located in the same append-only ApplyJournal record/file. They do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
 
-### 6.3 ApplyJournal also has unbounded index and paging costs
+### 6.3 ApplyJournal still has unbounded index and paging costs
 
-The current ApplyJournal maintains a List of every historical index entry and a Dictionary keyed by batch identity. It has no public ACK/compaction/truncation boundary. ReadBatches(afterJournalSeq, limit) iterates the list from its beginning and skips entries until it reaches the requested cursor. Repeated paging therefore becomes increasingly expensive, while the in-memory list/dictionary grow with every accepted batch.
+ApplyJournal still maintains a List of every historical index entry and a Dictionary keyed by batch identity. It has no public ACK/compaction/truncation boundary. ReadBatches(afterJournalSeq, limit) iterates the list from its beginning and skips entries until it reaches the requested cursor. Repeated paging therefore becomes increasingly expensive, while the in-memory list/dictionary grow with every accepted batch.
 
-A receipt lookup and a relay payload log must have separate retention. Do not retain all non-relay fields forever merely to answer duplicate-batch retries.
+Receipt lookup and relay-payload retention still share one physical append-only file. They need separate logical lifetimes and eventually independently reclaimable segments/indexes.
 
-### 6.4 Preferred target decomposition
+### 6.4 Implemented representation and remaining target
 
-Do not make a second full copy of APPLY_COMMIT in a permanent relay journal.
+1. **WAL is authoritative during the uncheckpointed interval.** Implemented: one Fields array plus compact relay indexes in APPLY_COMMIT v3.
+2. **Batch receipt is metadata-only with respect to operation payload.** Implemented in ApplyJournal: it retains batch identity, cursor range, issuer, digest-chain fields, RecordsRoot, ProtocolStateDelta and applied result, but no non-relay operation payload.
+3. **Relay payload is relay-only.** Implemented: ApplyJournal stores only selected operations, including eligible LWW losers. Durable WAL flush precedes journal materialization; promotion is idempotent by batch identity.
+4. **Then truncate WAL.** Existing checkpoint/recovery path keeps relay-only materialization durable before WAL truncation; tests cover journal rebuild from WAL.
+5. **Reclaim relay payload only after a validated downstream safe watermark.** Open. Reclaim batch receipts according to independent retry/Inbox expiry rules. Keep ChangeId dedup facts for their separate protocol-safe horizon.
 
-1. **WAL is authoritative during the uncheckpointed interval.** Encode each incoming operation once. Store relay selection as a compact bitmap or delta-encoded operation indexes, not as a second full operation array.
-2. **Batch receipt is metadata-only.** Store batch identity, cursor range, issuer/author, digest-chain fields, RecordsRoot, applied result and the durable commit marker needed for duplicate ACK.
-3. **Relay payload is relay-only.** Before truncating the WAL segment that contains an accepted batch, materialize only relay-selected operations into a compact relay payload log (or retain a safe immutable reference to their bytes). This promotion must be durable and idempotent by CommitSeq/batch identity.
-4. **Then truncate WAL.** Never truncate the only durable copy of a relay-eligible operation.
-5. **Reclaim relay payload only after BIN-SYNC supplies a validated safe downstream retention watermark.** Reclaim batch receipts according to their independent retry/Inbox expiry rules. Keep ChangeId dedup facts for their separate protocol-safe horizon.
-
-The relay-selection bitmap/index and receipt can be committed atomically with the APPLY result. The relay payload log can use one operation record per selected ChangeId. It must include LWW losers whenever BIN-SYNC selects them for relay.
-
-This is an internal storage-format redesign. It does not require changing DELTA_BATCH.
+The reduction is an internal storage-format change and does not require changing DELTA_BATCH. The remaining gates are independently reclaimable receipt/relay retention, bounded indexes, seekable paging and safe downstream GC.
 
 ## 7. Local WAL and Outbox payload duplication
 
