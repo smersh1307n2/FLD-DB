@@ -23,6 +23,7 @@ public sealed class WalApplyCommit
     public required byte[] ProtocolStateDelta { get; init; }
     public required uint AppliedCount { get; init; }
     public required List<WalFieldMutation> Fields { get; init; }
+    public required List<WalFieldMutation> RelayFields { get; init; }
 }
 
 public static class ApplyCommitCodec
@@ -41,11 +42,12 @@ public static class ApplyCommitCodec
         ValidateId(commit.RecordsRoot, nameof(commit.RecordsRoot));
         ArgumentNullException.ThrowIfNull(commit.ProtocolStateDelta);
         ArgumentNullException.ThrowIfNull(commit.Fields);
+        ArgumentNullException.ThrowIfNull(commit.RelayFields);
         if (commit.CursorStart == 0 || commit.CursorEnd < commit.CursorStart)
             throw new ArgumentOutOfRangeException(nameof(commit.CursorStart), "Invalid incoming cursor range.");
         if (commit.ProtocolStateDelta.Length > MaxProtocolStateDelta)
             throw new ArgumentOutOfRangeException(nameof(commit.ProtocolStateDelta));
-        if (commit.Fields.Count > WalConstants.MaxMutations)
+        if (commit.Fields.Count > WalConstants.MaxMutations || commit.RelayFields.Count > WalConstants.MaxMutations)
             throw new ArgumentOutOfRangeException(nameof(commit.Fields));
 
         using var ms = new MemoryStream();
@@ -64,33 +66,8 @@ public static class ApplyCommitCodec
         WriteU32(ms, (uint)commit.ProtocolStateDelta.Length);
         ms.Write(commit.ProtocolStateDelta);
         WriteU32(ms, commit.AppliedCount);
-        WriteU32(ms, (uint)commit.Fields.Count);
-
-        foreach (var field in commit.Fields)
-        {
-            ValidateId(field.RecordId, nameof(field.RecordId));
-            ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
-            ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
-            if (field.OpKind is not (1 or 2))
-                throw new ArgumentOutOfRangeException(nameof(field.OpKind));
-            if (field.Value.Length > WalConstants.MaxValLen)
-                throw new ArgumentOutOfRangeException(nameof(field.Value));
-            if (field.OpKind == 2 && field.Value.Length != 0)
-                throw new ArgumentException("Tombstone payload must be empty.", nameof(field));
-
-            ms.Write(field.RecordId);
-            WriteU16(ms, field.FieldId);
-            ms.WriteByte(field.OpKind);
-            WriteU16(ms, field.KeyEpoch);
-            WriteU64(ms, field.Wall);
-            WriteU32(ms, field.Logical);
-            ms.Write(field.AuthorNodeId);
-            ms.Write(field.ChangeId);
-            WriteU32(ms, (uint)field.Value.Length);
-            ms.Write(field.Value);
-            if (ms.Length > WalConstants.MaxPayloadLen)
-                throw new ArgumentException("APPLY_COMMIT payload exceeds WAL limit.", nameof(commit));
-        }
+        WriteFields(ms, commit.Fields);
+        WriteFields(ms, commit.RelayFields);
 
         return ms.ToArray();
     }
@@ -117,38 +94,8 @@ public static class ApplyCommitCodec
             throw new InvalidDataException("ProtocolStateDelta exceeds limit.");
         var delta = ReadBytes(payload, ref pos, checked((int)deltaLength));
         uint appliedCount = ReadU32(payload, ref pos);
-        uint fieldCount = ReadU32(payload, ref pos);
-        if (fieldCount > WalConstants.MaxMutations)
-            throw new InvalidDataException("APPLY_COMMIT field count exceeds limit.");
-
-        var fields = new List<WalFieldMutation>((int)fieldCount);
-        for (uint i = 0; i < fieldCount; i++)
-        {
-            var recordId = ReadBytes(payload, ref pos, 16);
-            ushort fieldId = ReadU16(payload, ref pos);
-            byte opKind = ReadByte(payload, ref pos);
-            ushort keyEpoch = ReadU16(payload, ref pos);
-            ulong wall = ReadU64(payload, ref pos);
-            uint logical = ReadU32(payload, ref pos);
-            var author = ReadBytes(payload, ref pos, 16);
-            var changeId = ReadBytes(payload, ref pos, 16);
-            uint valueLength = ReadU32(payload, ref pos);
-            if (valueLength > WalConstants.MaxValLen)
-                throw new InvalidDataException("APPLY_COMMIT field value exceeds limit.");
-            var value = ReadBytes(payload, ref pos, checked((int)valueLength));
-            fields.Add(new WalFieldMutation
-            {
-                RecordId = recordId,
-                FieldId = fieldId,
-                OpKind = opKind,
-                KeyEpoch = keyEpoch,
-                Wall = wall,
-                Logical = logical,
-                AuthorNodeId = author,
-                ChangeId = changeId,
-                Value = value
-            });
-        }
+        var fields = ReadFields(payload, ref pos);
+        var relayFields = ReadFields(payload, ref pos);
 
         if (pos != payload.Length)
             throw new InvalidDataException("Trailing bytes in APPLY_COMMIT payload.");
@@ -168,7 +115,8 @@ public static class ApplyCommitCodec
             RecordsRoot = recordsRoot,
             ProtocolStateDelta = delta,
             AppliedCount = appliedCount,
-            Fields = fields
+            Fields = fields,
+            RelayFields = relayFields
         };
 
         ValidateId(result.SenderPeer, nameof(result.SenderPeer), nonzero: true);
@@ -179,7 +127,7 @@ public static class ApplyCommitCodec
         ValidateId(result.RecordsRoot, nameof(result.RecordsRoot));
         if (cursorStart == 0 || cursorEnd < cursorStart)
             throw new InvalidDataException("Invalid APPLY_COMMIT cursor range.");
-        foreach (var field in fields)
+        foreach (var field in fields.Concat(relayFields))
         {
             ValidateId(field.RecordId, nameof(field.RecordId));
             ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
@@ -188,6 +136,65 @@ public static class ApplyCommitCodec
                 throw new InvalidDataException("Invalid APPLY_COMMIT operation.");
         }
         return result;
+    }
+
+    private static void WriteFields(Stream stream, List<WalFieldMutation> fields)
+    {
+        WriteU32(stream, (uint)fields.Count);
+        foreach (var field in fields)
+        {
+            ValidateId(field.RecordId, nameof(field.RecordId));
+            ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
+            ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
+            if (field.OpKind is not (1 or 2))
+                throw new ArgumentOutOfRangeException(nameof(field.OpKind));
+            if (field.Value.Length > WalConstants.MaxValLen)
+                throw new ArgumentOutOfRangeException(nameof(field.Value));
+            if (field.OpKind == 2 && field.Value.Length != 0)
+                throw new ArgumentException("Tombstone payload must be empty.", nameof(field));
+            stream.Write(field.RecordId);
+            WriteU16(stream, field.FieldId);
+            stream.WriteByte(field.OpKind);
+            WriteU16(stream, field.KeyEpoch);
+            WriteU64(stream, field.Wall);
+            WriteU32(stream, field.Logical);
+            stream.Write(field.AuthorNodeId);
+            stream.Write(field.ChangeId);
+            WriteU32(stream, (uint)field.Value.Length);
+            stream.Write(field.Value);
+            if (stream.Length > WalConstants.MaxPayloadLen)
+                throw new ArgumentException("APPLY_COMMIT payload exceeds WAL limit.");
+        }
+    }
+
+    private static List<WalFieldMutation> ReadFields(ReadOnlySpan<byte> payload, ref int pos)
+    {
+        uint count = ReadU32(payload, ref pos);
+        if (count > WalConstants.MaxMutations)
+            throw new InvalidDataException("APPLY_COMMIT field count exceeds limit.");
+        var fields = new List<WalFieldMutation>((int)count);
+        for (uint i = 0; i < count; i++)
+        {
+            var recordId = ReadBytes(payload, ref pos, 16);
+            ushort fieldId = ReadU16(payload, ref pos);
+            byte opKind = ReadByte(payload, ref pos);
+            ushort keyEpoch = ReadU16(payload, ref pos);
+            ulong wall = ReadU64(payload, ref pos);
+            uint logical = ReadU32(payload, ref pos);
+            var author = ReadBytes(payload, ref pos, 16);
+            var changeId = ReadBytes(payload, ref pos, 16);
+            uint valueLength = ReadU32(payload, ref pos);
+            if (valueLength > WalConstants.MaxValLen)
+                throw new InvalidDataException("APPLY_COMMIT field value exceeds limit.");
+            var value = ReadBytes(payload, ref pos, checked((int)valueLength));
+            fields.Add(new WalFieldMutation
+            {
+                RecordId = recordId, FieldId = fieldId, OpKind = opKind,
+                KeyEpoch = keyEpoch, Wall = wall, Logical = logical,
+                AuthorNodeId = author, ChangeId = changeId, Value = value
+            });
+        }
+        return fields;
     }
 
     private static void ValidateId(byte[]? value, string name, bool nonzero = false)
