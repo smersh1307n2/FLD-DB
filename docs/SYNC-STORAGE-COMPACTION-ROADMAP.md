@@ -439,9 +439,9 @@ Keep five lifetimes independent: current field/record tombstones, relay payload,
 The existing fail-closed behavior remains mandatory. The research note is a design proposal, not implementation approval. Tombstone GC remains disabled until membership fencing, snapshot/feed enforcement, durable forgotten-frontier recovery and adversarial tests cover every delta/reconcile/snapshot acceptance path.
 
 
-### 7.19 Durable BIN-SYNC ↔ FLD provenance adapter — next execution checkpoint (2026-11-07)
+### 7.19 Durable BIN-SYNC ↔ FLD provenance adapter — required later integration gate (2026-11-07)
 
-This section restores the active work order from the integration handoff. The next implementation task is **not** PendingLocal: first complete the durable adapter mapping that connects FLD ApplyJournal coordinates to BIN-SYNC retained author-stream Outbox positions. PendingLocal remains Phase 3 and follows this integration slice in the current execution sequence.
+This section preserves the adapter requirements from the integration handoff. The provenance mapping remains mandatory, but it is **not the next cross-repository implementation task**. The higher-level Metadata Store architecture sequence takes precedence: define and test neutral semantic operations; define Data Provider atomicity modes; move BIN-SYNC persistence behind that boundary; extract FLD Storage-only semantics; implement the Metadata Store adapter; then complete this FLD synchronized-database provenance integration. PendingLocal remains deferred until the applicable storage/adapter gates are closed.
 
 **Verified branch checkpoint:**
 - FLD-DB fix/crash-consistency-outbox: code baseline eacff36; current branch head ca98ec79 contains documentation-only commits after that code baseline.
@@ -455,7 +455,7 @@ This section restores the active work order from the integration handoff. The ne
 - BIN-SYNC Node.TryResolveOutboxSequences(namespaceId, identities, sequences) resolves retained (author, ChangeId) identities to local OutboxSeq and clears the output/returns false if any identity is no longer retained.
 - OutboxChangeIdentity is (NodeId AuthorNodeId, BatchId ChangeId). ChangeId remains the stable operation identity; OutboxSeq is only the local author-stream retention coordinate.
 
-**Implementation boundary:** the adapter is an optional integration layer that depends on both FLD Database and BIN-SYNC. It must not be placed inside Fld1.Storage.dll, and it must not make Fld1.Storage.dll or Fld1.Database.dll depend on BinSync.Core. The two-DLL database architecture remains unchanged; the adapter is not a third database engine/runtime layer.
+**Implementation boundary:** this particular JournalSeq → ChangeId → OutboxSeq adapter is for the FLD *synchronized-database mode* and therefore coordinates the FLD Database durability boundary with BIN-SYNC. It is distinct from the BIN-SYNC Metadata Store adapter for FLD *Storage-only mode*. The latter depends on the neutral `Fld1.Storage` API and BIN-SYNC contracts, must not instantiate `FldDatabase`, and must not create synthetic HLC/author/Outbox state. Neither adapter may be placed inside `Fld1.Storage.dll`; neither may make `Fld1.Storage.dll` depend on BinSync.Core. The two-DLL database architecture remains unchanged; adapters are optional integration packages, not additional database runtime assemblies.
 
 **Required durable adapter state, scoped by namespace and original author:**
 - ScannedThroughJournalSeq;
@@ -493,3 +493,32 @@ Author identity may be stored once per author group. Mapping rows must remain un
 - ensure no public transport path can call Node batch creation/send outside the adapter-owned gate.
 
 **Exit:** durable mapping and scan cursor recover correctly; all outbound publication is gated until mapping is durable; safe ACK translation is contiguous and monotonic; FLD ACK precedes mapping pruning; all adversarial/crash tests pass. Only then resume Phase 3 PendingLocal work.
+
+
+### 7.20 Correct cross-repository implementation order — Metadata Store boundary first (2026-11-07)
+
+A source and architecture revalidation found that the provenance adapter requirements in 7.19 are correct but were incorrectly promoted to the immediate next implementation task. The controlling sequence is BIN-SYNC Metadata Storage Architecture §16 and FLD-DB Integration Contract §9.
+
+**New durable design artifact:** BIN-SYNC `docs/METADATA-STORE-CONFORMANCE.md` defines provider-independent semantic operations and a conformance matrix. It explicitly separates Data Provider, Metadata Store, physical Storage and BIN-SYNC Runtime. It is a semantic contract, not a frozen public API.
+
+**Required order:**
+
+1. Approve the Metadata Store semantic contract and resolve remaining transaction/recovery decisions.
+2. Finalize local change staging/coalescing and its crash/relay tests.
+3. Implement a provider-independent conformance fixture plus a test-only volatile Metadata Store. Volatile storage is for semantic tests only and must not advertise restart durability.
+4. Define Data Provider change capture and shared-transaction / separate-store idempotent apply modes.
+5. Refactor BIN-SYNC persistence behind the neutral Metadata Store boundary without changing wire behavior; existing Node/WAL tests remain regression coverage, not proof of arbitrary-store conformance.
+6. Extract FLD's two-assembly physical Storage Core and implement explicit Storage-only semantics.
+7. Implement the BIN-SYNC Metadata Store adapter over neutral Storage APIs.
+8. Separately complete the FLD synchronized-database integration from 7.19, including durable provenance mapping, publication gate and ACK translation.
+9. Validate external SQL, file, array and custom-provider scenarios.
+10. Freeze public API/package contracts only after conformance passes.
+
+**Two FLD modes must remain distinct:**
+
+- *Storage-only Metadata Store:* uses `Fld1.Storage.dll` directly; no `FldDatabase`, LocalAuthor, HLC, user records or FLD Outbox. BIN-SYNC protocol metadata is stored as opaque records through the neutral semantic adapter.
+- *Synchronized FLD Database:* uses `Fld1.Database.dll` as both Data Provider and transaction owner for field state plus protocol metadata. The 7.19 relay provenance adapter belongs here.
+
+The current FLD source tree still builds `Fld1.Core`, `Fld1.Engine`, `Fld1.Manifest`, `Fld1.Run` and `Fld1.Wal` as separate projects; it does not yet match the approved two-public-DLL packaging boundary. The current BIN-SYNC Node remains backed by internal in-memory collections plus NodePersistence/WAL. Therefore, do not create a direct Node↔FldDatabase callback bridge or a premature NuGet integration project. First establish the neutral semantic boundary and actual Storage API. This avoids locking the adapter to the current pre-extraction FLD project graph or duplicating durable user field state inside Node.
+
+**Exit condition for this phase:** the semantic contract has an executable provider-independent conformance suite; transaction modes and recovery behavior are testable; existing Node/WAL behavior is preserved as a regression baseline. Only then proceed to the persistence refactor and Storage-only implementation.
