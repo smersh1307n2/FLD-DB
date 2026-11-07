@@ -157,6 +157,13 @@ public sealed class RemoteBatchReceipt
     public required bool IsDuplicate { get; init; }
 }
 
+/// <summary>A page of relay history. ScannedThroughJournalSeq advances across nonmatching batches too.</summary>
+public sealed class RelayBatchPage
+{
+    public required IReadOnlyList<RelayJournalBatch> Batches { get; init; }
+    public required ulong ScannedThroughJournalSeq { get; init; }
+}
+
 /// <summary>One durable journal batch; JournalSeq is a local paging token, not a sync cursor.</summary>
 public sealed class RelayJournalBatch
 {
