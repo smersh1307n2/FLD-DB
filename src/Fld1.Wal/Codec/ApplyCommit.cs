@@ -28,7 +28,7 @@ public sealed class WalApplyCommit
 
 public static class ApplyCommitCodec
 {
-    private const uint BodyVersion = 1;
+    private const uint BodyVersion = 2;
     private const int MaxProtocolStateDelta = 4 * 1024 * 1024;
 
     public static byte[] Encode(WalApplyCommit commit)
