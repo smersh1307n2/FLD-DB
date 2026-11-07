@@ -313,3 +313,19 @@ Do not begin by changing ChangeId or introducing OriginSeq. First remove known d
 - No new Storage dependency on FLD or BIN-SYNC semantics.
 
 **Core principle:** store the logical operation once; store the identity once; store batch receipts once per batch; store delivery progress once per peer/author stream. Preserve independent lifetimes and never confuse an operation identity, a stream cursor, a WAL commit sequence or a batch idempotency key.
+
+## 12. Compaction decisions and implementation roadmap (2026-11-07)
+
+The cross-repository target and phase order are maintained in [Sync Storage Compaction Roadmap](SYNC-STORAGE-COMPACTION-ROADMAP.md). This section records decisions closing the audit's open design direction; it does not claim implementation.
+
+- Keep current field state, unpublished local staging, immutable published payload, relay payload and protocol metadata as distinct logical data planes.
+- Current state stores the winner, not a duplicate full operation history. Pending local LWW stores at most one latest unpublished operation per canonical field key. Freeze/publication is the immutability boundary.
+- One published payload is shared across all peers. Per-peer/per-author progress remains O(P × A), not one delivery record or payload copy per operation/peer. No per-operation ACK bitmap.
+- Global ChangeId identity/fingerprint is independent of sender route. Batch receipt remains issuer-specific. Peer progress is a compact per-peer/namespace/author tuple.
+- Outgoing replay mappings exist only for unacknowledged cursor ranges; prune atomically with validated contiguous ACK while preserving the digest-chain checkpoint.
+- Relay selection references accepted APPLY operations by compact indexes/bitmap; it does not duplicate payload. WAL replay markers remain separate.
+- Payload, receipt, dedup, replay-cache and peer-state retention have independent safe reclamation rules. Physical co-location is acceptable only when atomicity and lifetime remain enforceable.
+
+Implementation order: (1) reproducible baseline; (2) route-independent ChangeId dedup, replay-cache pruning and receipt audit; (3) APPLY payload dedup, metadata-only receipt, relay-only payload and bounded paging; (4) durable PendingLocal coalescing before publication; (5) versioned compact peer-state and FLD Outbox encodings; (6) safe GC and snapshot/new-peer semantics; (7) optional WAL-backed Outbox.
+
+Open gates: no protocol-safe global dedup GC horizon is proven; relay GC requires a validated downstream watermark; snapshot completion does not prove delivery of relay-eligible LWW losers without a per-author cut/tail proof; the 60–65-byte Outbox estimate is unmeasured and must include framing/CRC/index overhead. ChangeId generation, OriginSeq and wire format remain unchanged.
