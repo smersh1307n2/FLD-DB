@@ -141,7 +141,8 @@ public sealed class OutboxLog : IDisposable
                 materializedThroughCommitSeq: 0,
                 entryKeys: new HashSet<EntryKey>(),
                 sparseIndex: new List<IndexPoint>(),
-                recordCount: 0,\n                leaseEpoch, leaseOwnerId);
+                recordCount: 0,
+                leaseEpoch, leaseOwnerId);
         }
 
         var fs = new FileStream(
@@ -201,7 +202,8 @@ public sealed class OutboxLog : IDisposable
             return new OutboxLog(
                 path, ackPath, statePath, leasePath, fs, nextSeq, ackedThrough,
                 Math.Max(scan.MaxCommitSeq, materializedThrough),
-                materializedThrough, scan.EntryKeys, scan.SparseIndex, scan.RecordCount,\n                leaseEpoch, leaseOwnerId);
+                materializedThrough, scan.EntryKeys, scan.SparseIndex, scan.RecordCount,
+                leaseEpoch, leaseOwnerId);
         }
         catch
         {
