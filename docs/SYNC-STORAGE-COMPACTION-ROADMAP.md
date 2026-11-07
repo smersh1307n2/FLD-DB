@@ -110,23 +110,25 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 
 ### Phase 2 — FLD remote APPLY payload amplification
 
-**2.1 Single APPLY payload**
-- Encode each incoming operation once in authoritative APPLY WAL.
-- Replace duplicate full RelayFields array with compact indexes/bitmap into Fields.
-- Validate relay selection before durable commit.
+**2.1 Single APPLY payload — implemented**
+- APPLY_COMMIT body v3 stores every incoming operation once and represents relay selection as canonical varint indexes into Fields.
+- The decoder remains backward-compatible with v2 payloads, validates that relay indexes are unique/in-range and reconstructs RelayFields as references to the original decoded field objects.
+- Relay-only journal records use a compact flag and store the selected operations once, without a second index list.
 
-**2.2 Metadata-only receipt and relay-only payload**
-- Receipt stores batch identity, cursor/author, digest-chain/RecordsRoot, outcome and commit marker needed for duplicate ACK; no full field payload.
-- Before truncating an APPLY WAL segment, durably and idempotently promote only relay-selected operations to a relay payload log, including eligible LWW losers.
-- Promotion is keyed by CommitSeq + batch identity.
-- Do not retain non-relay fields solely for duplicate retries.
-- Add validated downstream safe watermark before relay payload GC.
+**2.2 Metadata receipt plus relay-only materialization — implemented, retention still coupled**
+- ApplyJournal now stores batch receipt metadata and only relay-selected operations. Non-relay field payloads are not copied into the journal.
+- The full APPLY WAL record is flushed first; the compact journal materialization is then flushed before ApplyRemoteBatch returns. This makes relay payload durable before a later checkpoint can truncate the WAL.
+- Journal materialization is idempotent by batch identity and compares canonical receipt metadata plus relay payload. WAL recovery rebuilds the same compact journal representation from both v2 and v3 APPLY_COMMIT records.
+- Relay-eligible LWW losers remain in the relay-only materialization.
+- Receipt metadata and relay payload still share one append-only journal record/file and therefore do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
 
-**2.3 Bounded indexes and seekable paging**
+**2.3 Bounded indexes and seekable paging — open**
 - Replace unbounded all-history in-memory List/Dictionary assumptions with bounded/rebuildable indexes.
 - Seek from JournalSeq/cursor; do not rescan history from the beginning on every page.
+- Add validated downstream safe watermark before relay payload GC; receipt expiry remains independent.
 
-**Exit:** each incoming payload encoded once; relay selection stores indexes; WAL truncation cannot lose the only relay copy; receipt survives without non-relay payload; crash at every promotion boundary rebuilds exactly once; paging cost is independent of already-consumed history.
+**Exit:** payload single-encoding and relay-only promotion are implemented and tested; remaining exit gates are independent receipt/relay retention, bounded indexes, seekable paging and crash-tested safe GC.
+
 
 ### Phase 3 — Durable local PendingLocal coalescing
 
