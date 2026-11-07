@@ -1037,16 +1037,14 @@ public sealed class FldDatabase : IDisposable
 
     /// <summary>
     /// Enumerate Outbox records as borrowed spans for allocation-light BIN-SYNC
-    /// encoding. The callback is synchronous; it must not retain the view.
+    /// encoding. The callback runs synchronously under the Outbox read lock; it must
+    /// not retain the view or call back into this database.
     /// </summary>
     public int VisitOutboxBatch(ulong afterSeq, int limit, OutboxEntryVisitor visitor)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
-        {
             EnsureHealthy();
-            return _outbox.VisitBatch(afterSeq, limit, visitor);
-        }
+        return _outbox.VisitBatch(afterSeq, limit, visitor);
     }
 
     public void AcknowledgeOutbox(ulong throughSeq)
