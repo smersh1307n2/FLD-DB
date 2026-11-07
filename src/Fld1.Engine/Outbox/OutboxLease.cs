@@ -11,9 +11,9 @@ public sealed class OutboxLease
     public ulong Epoch { get; }
     public ReadOnlySpan<byte> OwnerId => _ownerId;
 
-    internal OutboxLease(ulong epoch, ReadOnlySpan<byte> ownerId)
+    internal OutboxLease(ulong epoch, byte[] ownerId)
     {
         Epoch = epoch;
-        _ownerId = ownerId.ToArray();
+        _ownerId = ownerId;
     }
 }
