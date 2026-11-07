@@ -64,9 +64,14 @@ Application A                    Application B
 ```
 <dbdir>/
   manifest.fldm                // binary manifest + NsRegistry + CommitResultLog metadata
+  local-author.flda            // stable 16-byte LocalAuthor identity + CRC
   .fld_engine.lock             // ownership lock (Engine держит до exit)
   .fld_bootstrap.lock          // bootstrap lock (только на время запуска)
   wal/ns_<id>.<gen>.log        // WAL per namespace, с ротацией
+  outbox/ns_<id>.obx           // local-author Outbox
+  outbox/ns_<id>.obx.ack       // safe local-Outbox ACK watermark
+  outbox/ns_<id>.obx.state     // WAL materialization watermark
+  outbox/ns_<id>.obx.lease     // fenced consumer owner + epoch
   runs/<runId>.fld1            // immutable runs
   del/<runId>.fld1.deleted     // EBR-deferred unlink
   shm.fldm                     // shared memory segment
