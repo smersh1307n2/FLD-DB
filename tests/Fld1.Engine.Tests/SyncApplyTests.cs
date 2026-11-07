@@ -141,11 +141,12 @@ public class SyncApplyTests : IDisposable
             first = db.AcquireOutboxLease(Author(3));
 
         using var reopened = FldDatabase.Open(_dir);
-        var second = reopened.AcquireOutboxLease(Author(4));
-        Assert.True(second.Epoch > first.Epoch);
         bool Visit(in Fld1.Engine.Outbox.OutboxEntryView entry) => true;
         Assert.Throws<InvalidOperationException>(
             () => reopened.VisitOutboxBatch(0, 10, first, Visit));
+
+        var second = reopened.AcquireOutboxLease(Author(4));
+        Assert.True(second.Epoch > first.Epoch);
     }
 
     [Fact]
