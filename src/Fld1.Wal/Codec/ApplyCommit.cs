@@ -211,7 +211,7 @@ public static class ApplyCommitCodec
         var seen = new HashSet<ChangeKey>();
         foreach (var relay in relayFields)
         {
-            ValidateId(relay.ChangeId, nameof(relay.ChangeId), nonzero: true);
+            ValidateRelayField(relay);
             var key = ChangeKey.From(relay.ChangeId);
             if (!seen.Add(key) || !byChangeId.TryGetValue(key, out int index) ||
                 !SameField(fields[index], relay))
@@ -219,6 +219,24 @@ public static class ApplyCommitCodec
             indices.Add((uint)index);
         }
         return indices;
+    }
+
+    private static void ValidateRelayField(WalFieldMutation field)
+    {
+        if (field.RecordId is null || field.RecordId.Length != 16 ||
+            field.AuthorNodeId is null || field.AuthorNodeId.Length != 16 ||
+            field.ChangeId is null || field.ChangeId.Length != 16 ||
+            field.Value is null)
+            throw new InvalidDataException("Malformed APPLY_COMMIT relay field identity or value.");
+
+        byte authorBits = 0;
+        foreach (byte value in field.AuthorNodeId) authorBits |= value;
+        byte changeBits = 0;
+        foreach (byte value in field.ChangeId) changeBits |= value;
+        if (authorBits == 0 || changeBits == 0 ||
+            field.OpKind is not (1 or 2) ||
+            (field.OpKind == 2 && field.Value.Length != 0))
+            throw new InvalidDataException("Invalid APPLY_COMMIT relay field.");
     }
 
     private static bool SameFieldLists(
