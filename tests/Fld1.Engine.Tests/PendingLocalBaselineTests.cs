@@ -15,18 +15,21 @@ public sealed class PendingLocalBaselineTests : IDisposable
     }
 
     [Fact]
-    public void Separate_commits_publish_separate_immutable_operations_for_same_field()
+    public void Separate_commits_publish_separate_immutable_operations_for_same_field_after_restart()
     {
         var recordId = FldDatabase.NewRecordId();
-        using var db = FldDatabase.Open(_dir);
 
-        for (byte value = 1; value <= 4; value++)
+        using (var db = FldDatabase.Open(_dir))
         {
-            db.Put(recordId, 5, [value]);
-            db.Commit();
+            for (byte value = 1; value <= 4; value++)
+            {
+                db.Put(recordId, 5, [value]);
+                db.Commit();
+            }
         }
 
-        var entries = db.ReadOutboxBatch(afterSeq: 0, limit: 10);
+        using var reopened = FldDatabase.Open(_dir);
+        var entries = reopened.ReadOutboxBatch(afterSeq: 0, limit: 10);
         Assert.Equal(4, entries.Count);
         Assert.Equal(new byte[] { 1 }, entries[0].Value);
         Assert.Equal(new byte[] { 2 }, entries[1].Value);
