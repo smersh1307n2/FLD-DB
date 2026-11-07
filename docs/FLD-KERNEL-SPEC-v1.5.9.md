@@ -293,6 +293,9 @@ FREE→CLAIMING→ACTIVE→FREE; pin-then-deref; RetireEpoch without −1; recla
 
 ---
 
+
+**Storage extraction boundary:** the physical engine is being separated from field/database semantics. See [FLD Storage Core architecture](FLD-STORAGE-CORE-ARCHITECTURE.md). `Fld1.Storage` is the domain-neutral byte engine; `Fld1.Database` owns RecordId/FieldId, HLC/LWW, lifecycle, Outbox and APPLY semantics. Both remain in one DLL initially, but Storage must be independently usable without constructing `FldDatabase`.
+
 ## PART IV. BIN-SYNC / CRDT (v2.4.17)
 
 When FLD-DB stores synchronized user data, it implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. This PART IV defines that synchronized-database role only. A separate use case — FLD-DB as a generic Metadata Store for an external Data Provider — is defined by the BIN-SYNC Metadata Storage and External Data Provider Architecture (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The related pending-change lifecycle and safe LWW coalescing policy are defined in the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md). That use case requires an explicit Storage-only role and MUST NOT be implemented by routing metadata writes through ordinary synchronized FldDatabase semantics. FLD-DB MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
