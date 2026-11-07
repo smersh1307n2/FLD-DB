@@ -143,7 +143,7 @@ public sealed class OutboxLog : IDisposable
                 entryKeys: new HashSet<EntryKey>(),
                 sparseIndex: new List<IndexPoint>(),
                 recordCount: 0,
-                leaseEpoch, leaseOwnerId);
+                leaseEpoch: leaseEpoch, leaseOwnerId: leaseOwnerId);
         }
 
         var fs = new FileStream(
