@@ -1,7 +1,7 @@
 using Fld1.Storage.Wal.Format;
 using Fld1.Storage.Wal.Recovery;
 
-partition Fld1.Storage.Wal.IO;
+namespace Fld1.Storage.Wal.IO;
 
 /// <summary>
 /// Multi-segment WAL for one partition. Rotation: fsync active → new segment file.
