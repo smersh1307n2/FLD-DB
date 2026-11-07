@@ -4,7 +4,7 @@ Embedded field-store with multi-process access via **FLD Shared Engine**.
 
 Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.md) and integrates with [BIN-SYNC](https://github.com/smersh1307n2/BIN-SYNC).
 
-Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md).
+Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The associated [change staging, coalescing and retention policy](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md) defines which unpublished local changes may be collapsed and when Outbox entries become immutable.
 
 | Layer | Version |
 |-------|---------|
