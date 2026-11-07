@@ -295,6 +295,7 @@ FLD-DB implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. I
 - `NodeId`, `RecordId`, `ChangeId`, `BatchId` are exactly 16 bytes at the durable/wire boundary. BIN-SYNC public API normalization does not authorize FLD to hash, truncate, or regenerate an already accepted identifier.
 - `authorNodeId` is the durable 16-byte identity of the original change author, never the current relay node or session alias.
 - Session `origin` aliases are resolved by BIN-SYNC before storage. FLD persists only the resolved durable author.
+- `LocalAuthor` is persisted once per physical FLD database and remains stable across reopen. When migrating a non-empty legacy database without persisted author identity, opening requires an explicit original `LocalAuthor`; a conflicting configured author fails closed. In external-storage mode it MUST equal `BinSync.NodeId`.
 - Author tie-break is unsigned `UInt64LE(bytes[0..7])`, then unsigned `UInt64LE(bytes[8..15])`, exactly as BIN-SYNC §5.4. RecordId ordering remains unsigned BE; these orders MUST NOT be conflated.
 
 ### 4.2. HLC and LWW
