@@ -119,9 +119,13 @@ public sealed class FldDatabase : IDisposable
                                 || File.Exists(outboxPath + ".state");
         bool hasWalData = Directory.EnumerateFiles(walDir, $"ns_{namespaceId}.*.log")
             .Any(path => new FileInfo(path).Length > WalHeader.Size);
+        string applyJournalPath = Path.Combine(outboxDir, $"ns_{namespaceId}.apply");
+        bool hasApplyHistory = File.Exists(applyJournalPath)
+                               && new FileInfo(applyJournalPath).Length > 16;
         bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
                               || hasWalData
-                              || hasOutboxHistory;
+                              || hasOutboxHistory
+                              || hasApplyHistory;
         byte[] author = LocalAuthorStore.LoadOrCreate(dbDir, localAuthor, hasDurableData);
 
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
@@ -184,10 +188,53 @@ public sealed class FldDatabase : IDisposable
     private void ReplayWalIntoOverlay(List<WalRecoveredRecord> records)
     {
         bool needsOutboxFlush = false;
+        bool needsApplyJournalFlush = false;
         ulong materializedThrough = _outbox.MaterializedThroughCommitSeq;
 
         foreach (var record in records)
         {
+            if (record.Kind == WalConstants.KindApplyCommit)
+            {
+                var apply = ApplyCommitCodec.Decode(record.Payload);
+                if (apply.NamespaceId != _namespaceId)
+                    throw new InvalidDataException("APPLY_COMMIT namespace does not match database.");
+
+                if (_applyJournal.AppendIfMissing(record.CommitSeq, record.Payload))
+                    needsApplyJournalFlush = true;
+
+                if (record.CommitSeq <= _lastSealedCommitSeq)
+                    continue;
+
+                foreach (var field in apply.Fields)
+                {
+                    var key = new MemFieldKey(field.RecordId, field.FieldId);
+                    if (TryResolveUnlocked(field.RecordId, field.FieldId, out var resolved)
+                        && resolved.Found
+                        && !FieldResolver.IsNewer(
+                            field.Wall, field.Logical, field.AuthorNodeId,
+                            resolved.Wall, resolved.Logical,
+                            resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
+                        continue;
+
+                    _overlay.Put(key, new MemFieldValue
+                    {
+                        Value = field.OpKind == 2 ? Array.Empty<byte>() : field.Value,
+                        Wall = field.Wall,
+                        Logical = field.Logical,
+                        AuthorNodeId = field.AuthorNodeId,
+                        KeyEpoch = field.KeyEpoch,
+                        IsTombstone = field.OpKind == 2,
+                        ChangeId = field.ChangeId
+                    });
+                }
+
+                // Even an all-LWW-loser APPLY is durable work: its relay journal
+                // record is already materialized and its WAL prefix can be sealed.
+                _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
+                _manifestDirty = true;
+                continue;
+            }
+
             if (record.Kind != WalConstants.KindGroupCommit)
                 continue;
 
@@ -240,6 +287,8 @@ public sealed class FldDatabase : IDisposable
 
         if (needsOutboxFlush)
             _outbox.Flush();
+        if (needsApplyJournalFlush)
+            _applyJournal.Flush();
     }
 
     private static byte[] GetDurableChangeId(uint namespaceId, ulong commitSeq, WalFieldMutation field)
@@ -1018,6 +1067,213 @@ public sealed class FldDatabase : IDisposable
             }
 
             return applied;
+        }
+    }
+
+    /// <summary>
+    /// Atomically persist a validated remote batch, its opaque BIN-SYNC protocol delta,
+    /// and all relay-eligible source mutations. This is the only supported durable
+    /// receive boundary; it never creates local-author Outbox entries.
+    /// </summary>
+    public RemoteBatchReceipt ApplyRemoteBatch(RemoteBatchCommit batch)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (batch.NamespaceId != _namespaceId)
+            throw new ArgumentException("Remote batch namespace does not match this database.", nameof(batch));
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+
+            if (_applyJournal.TryFindBatch(
+                    batch.IssuerNodeId, batch.IssuerEpoch, batch.NamespaceId, batch.BatchId,
+                    out var existing))
+            {
+                var prior = existing!.Commit;
+                if (prior.CursorStart != batch.CursorStart
+                    || prior.CursorEnd != batch.CursorEnd
+                    || !prior.BatchDigest.AsSpan().SequenceEqual(batch.BatchDigest)
+                    || !prior.RecordsRoot.AsSpan().SequenceEqual(batch.RecordsRoot)
+                    || !prior.PreviousBatchDigest.AsSpan().SequenceEqual(batch.PreviousBatchDigest))
+                    throw new InvalidDataException("Conflicting metadata for an already committed remote batch.");
+
+                return new RemoteBatchReceipt
+                {
+                    CommitSeq = existing.CommitSeq,
+                    CursorStart = prior.CursorStart,
+                    CursorEnd = prior.CursorEnd,
+                    BatchId = prior.BatchId.ToArray(),
+                    ProtocolStateDelta = prior.ProtocolStateDelta.ToArray(),
+                    AppliedCount = checked((int)prior.AppliedCount),
+                    IsDuplicate = true
+                };
+            }
+
+            var fields = new List<WalFieldMutation>(batch.Writes.Count);
+            int appliedCount = 0;
+            foreach (var write in batch.Writes)
+            {
+                if (write.IsTombstone && write.Value.Length != 0)
+                    throw new ArgumentException("Remote tombstone payload must be empty.", nameof(batch));
+
+                fields.Add(new WalFieldMutation
+                {
+                    RecordId = write.RecordId,
+                    FieldId = write.FieldId,
+                    OpKind = write.IsTombstone ? (byte)2 : (byte)1,
+                    KeyEpoch = write.KeyEpoch,
+                    Wall = write.Wall,
+                    Logical = write.Logical,
+                    AuthorNodeId = write.AuthorNodeId,
+                    ChangeId = write.ChangeId,
+                    Value = write.IsTombstone ? Array.Empty<byte>() : write.Value
+                });
+
+                if (!TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved)
+                    || !resolved.Found
+                    || FieldResolver.IsNewer(
+                        write.Wall, write.Logical, write.AuthorNodeId,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
+                    appliedCount++;
+            }
+
+            var walCommit = new WalApplyCommit
+            {
+                SenderPeer = batch.SenderPeer,
+                SenderEpoch = batch.SenderEpoch,
+                NamespaceId = batch.NamespaceId,
+                IssuerNodeId = batch.IssuerNodeId,
+                IssuerEpoch = batch.IssuerEpoch,
+                BatchId = batch.BatchId,
+                CursorStart = batch.CursorStart,
+                CursorEnd = batch.CursorEnd,
+                PreviousBatchDigest = batch.PreviousBatchDigest,
+                BatchDigest = batch.BatchDigest,
+                RecordsRoot = batch.RecordsRoot,
+                ProtocolStateDelta = batch.ProtocolStateDelta,
+                AppliedCount = checked((uint)appliedCount),
+                Fields = fields
+            };
+            byte[] walPayload = ApplyCommitCodec.Encode(walCommit);
+
+            ulong commitSeq;
+            try
+            {
+                commitSeq = _wal.Append(WalConstants.KindApplyCommit, walPayload);
+                _wal.Flush();
+
+                if (!_applyJournal.AppendIfMissing(commitSeq, walPayload))
+                    throw new InvalidDataException("Remote batch appeared in apply journal during serialized commit.");
+                _applyJournal.Flush();
+
+                foreach (var write in batch.Writes)
+                {
+                    var key = new MemFieldKey(write.RecordId, write.FieldId);
+                    if (TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved)
+                        && resolved.Found
+                        && !FieldResolver.IsNewer(
+                            write.Wall, write.Logical, write.AuthorNodeId,
+                            resolved.Wall, resolved.Logical,
+                            resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
+                        continue;
+
+                    _overlay.Put(key, new MemFieldValue
+                    {
+                        Value = write.IsTombstone ? Array.Empty<byte>() : write.Value,
+                        Wall = write.Wall,
+                        Logical = write.Logical,
+                        AuthorNodeId = write.AuthorNodeId,
+                        KeyEpoch = write.KeyEpoch,
+                        IsTombstone = write.IsTombstone,
+                        ChangeId = write.ChangeId
+                    });
+                }
+            }
+            catch
+            {
+                // WAL may already be durable. Recovery will finish journal materialization.
+                _faulted = true;
+                throw;
+            }
+
+            _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, commitSeq);
+            _manifestDirty = true;
+            return new RemoteBatchReceipt
+            {
+                CommitSeq = commitSeq,
+                CursorStart = batch.CursorStart,
+                CursorEnd = batch.CursorEnd,
+                BatchId = batch.BatchId.ToArray(),
+                ProtocolStateDelta = batch.ProtocolStateDelta.ToArray(),
+                AppliedCount = appliedCount,
+                IsDuplicate = false
+            };
+        }
+    }
+
+    /// <summary>
+    /// Read durable relay batches for one original author. JournalSeq is only an
+    /// internal paging token; BIN-SYNC owns the author-stream sequence.
+    /// </summary>
+    public IReadOnlyList<RelayJournalBatch> ReadRelayBatches(
+        ReadOnlySpan<byte> authorNodeId, ulong afterJournalSeq = 0, int limit = 256)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (authorNodeId.Length != 16)
+            throw new ArgumentException("AuthorNodeId must be 16 bytes.", nameof(authorNodeId));
+        if (limit <= 0) return Array.Empty<RelayJournalBatch>();
+        if (authorNodeId.SequenceEqual(_localAuthor))
+            return Array.Empty<RelayJournalBatch>();
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            var result = new List<RelayJournalBatch>(Math.Min(limit, 256));
+            ulong cursor = afterJournalSeq;
+            while (result.Count < limit && cursor < _applyJournal.HighWatermark)
+            {
+                var page = _applyJournal.ReadBatches(cursor, 128);
+                if (page.Count == 0) break;
+                foreach (var item in page)
+                {
+                    cursor = item.JournalSeq;
+                    var matching = item.Commit.Fields
+                        .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorNodeId))
+                        .Select(f => new RemoteFieldWrite(
+                            f.RecordId, f.FieldId, f.Value, f.Wall, f.Logical,
+                            f.AuthorNodeId, f.ChangeId, f.KeyEpoch, f.OpKind == 2))
+                        .ToArray();
+                    if (matching.Length == 0) continue;
+
+                    var source = item.Commit;
+                    var batchCopy = new RemoteBatchCommit(
+                        source.SenderPeer, source.SenderEpoch, source.NamespaceId,
+                        source.IssuerNodeId, source.IssuerEpoch, source.BatchId,
+                        source.CursorStart, source.CursorEnd, source.PreviousBatchDigest,
+                        source.BatchDigest, source.RecordsRoot, matching, source.ProtocolStateDelta);
+                    result.Add(new RelayJournalBatch
+                    {
+                        JournalSeq = item.JournalSeq,
+                        CommitSeq = item.CommitSeq,
+                        Batch = batchCopy
+                    });
+                    if (result.Count == limit) break;
+                }
+                if (page.Count < 128) break;
+            }
+            return result;
+        }
+    }
+
+    public ulong GetRelayJournalHighWatermark()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return _applyJournal.HighWatermark;
         }
     }
 
