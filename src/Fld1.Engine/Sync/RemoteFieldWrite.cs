@@ -19,14 +19,17 @@ public readonly struct RemoteFieldWrite
     public RemoteFieldWrite(
         byte[] recordId, ushort fieldId, byte[] value,
         ulong wall, uint logical, byte[] authorNodeId,
-        ushort keyEpoch = 0, bool isTombstone = false, byte[]? changeId = null)
+        byte[] changeId, ushort keyEpoch = 0, bool isTombstone = false)
     {
         ArgumentNullException.ThrowIfNull(recordId);
         ArgumentNullException.ThrowIfNull(authorNodeId);
         if (recordId.Length != 16) throw new ArgumentException("RecordId");
         if (authorNodeId.Length != 16) throw new ArgumentException("AuthorNodeId");
-        if (changeId is not null && changeId.Length != 16)
+        ArgumentNullException.ThrowIfNull(changeId);
+        if (changeId.Length != 16)
             throw new ArgumentException("ChangeId must be 16 bytes.", nameof(changeId));
+        if (IsZero(changeId))
+            throw new ArgumentException("ChangeId must be nonzero.", nameof(changeId));
         RecordId = recordId;
         FieldId = fieldId;
         Value = value ?? Array.Empty<byte>();
@@ -36,5 +39,12 @@ public readonly struct RemoteFieldWrite
         KeyEpoch = keyEpoch;
         IsTombstone = isTombstone;
         ChangeId = changeId;
+    }
+
+    private static bool IsZero(ReadOnlySpan<byte> value)
+    {
+        byte aggregate = 0;
+        foreach (byte b in value) aggregate |= b;
+        return aggregate == 0;
     }
 }
