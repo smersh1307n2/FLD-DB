@@ -1,7 +1,7 @@
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
 **Date:** 2026-11-07  
-**Status:** agreed target architecture and implementation roadmap; no code or wire-format change is authorized.  
+**Status:** agreed target architecture; BIN-SYNC P1 global dedup and replay-cache pruning are implemented without a wire-format change; receipt consolidation and APPLY payload compaction remain next.  
 **Primary audit:** [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).  
 **Companion documents:** [FLD Storage Core](FLD-STORAGE-CORE-ARCHITECTURE.md), [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).
 
@@ -180,8 +180,8 @@ Only after Phases 2–4 and only if the Phase 5 retention contract is clear. Whi
 | Priority | Work |
 |---|---|
 | P0 | Baseline measurements and invariants |
-| P1 | Global ChangeId dedup, replay-cache pruning, receipt-path audit |
-| P2 | APPLY payload dedup, receipt/relay split, bounded paging |
+| P1 | Global ChangeId dedup and ACK-covered replay-cache pruning — implemented; receipt-path audit remains open |
+| P2 | Inbox/InboxAuthors receipt consolidation, APPLY payload dedup, receipt/relay split, bounded paging |
 | P3 | Durable pre-publication PendingLocal coalescing |
 | P4 | Versioned compact peer-state and FLD Outbox encodings |
 | P5 | Safe GC and snapshot/new-peer contract |
@@ -242,3 +242,13 @@ Implemented in BIN-SYNC:
 Commits: `dc9a1304de00e75bacb0d2bdd864e0f48e687361` (implementation), `402b801e4b2d2781e048f3785766c0abf0425016` (test). GitHub Actions run [42342495367](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42342495367) completed successfully: .NET 10 build/tests, public samples, coverage threshold, fuzz/lab/hardening jobs all passed.
 
 This closes only the replay-cache pruning subtask. Global route-independent ChangeId dedup and receipt consolidation remain open. No wire format or NodePersistence version changed.
+
+### 7.3 Global ChangeId deduplication implementation (2026-11-07)
+
+BIN-SYNC `feature/fld-external-storage` now implements the route-independent per-replica ledger keyed by `(namespaceId, ChangeId)`. Each entry stores a canonical BLAKE3-128 fingerprint over the resolved-author FULL_AUTHOR_ID operation, namespace, RecordId, OpKind and normalized causal dependency set. Same-ID/same-fingerprint operations are suppressed after Outbox compaction and on local-origin echoes; same-ID/different-known-fingerprint batches are rejected before WAL/state publication.
+
+Local operations, remote WAL commit/replay and NodePersistence v6 are integrated. v3-v5 state migration preserves explicit unknown markers and reconstructs fingerprints only from complete retained Outbox payloads. Causal dependencies are included in identity and survive relay and WAL replay. No ChangeId or wire format changed. No dedup GC/TTL is implemented because the protocol-safe retention horizon remains unproven.
+
+Focused tests cover cross-route duplicate suppression after origin Outbox compaction, returned local echoes, conflict rejection without partial mutation, v5 migration, v6 persistence, causal metadata relay and WAL recovery. GitHub Actions run [42344100307](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42344100307) passed .NET 10 build/tests, public samples, coverage and fuzz/lab hardening. Code commit at the time of that CI run: `468d26988dee370aef4f7266b76bcbc6a5e5c77a`; later documentation-only changes do not alter that tested code.
+
+This closes the global-dedup implementation gate, not the full BIN-SYNC metadata audit. Next: remove redundant Inbox/InboxAuthors key duplication after auditing every duplicate-ACK/recovery path, then address APPLY payload amplification and relay/receipt separation.
