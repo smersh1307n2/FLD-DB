@@ -160,7 +160,9 @@ public class SyncApplyTests : IDisposable
         db.Commit();
         var batch = db.ReadOutboxBatch(0, 10);
         Assert.Equal(2, batch.Count);
+        Assert.Equal(batch[1].OutboxSeq, db.GetOutboxHighWatermark());
         db.AcknowledgeOutbox(batch[0].OutboxSeq);
+        Assert.Equal(batch[0].OutboxSeq, db.GetOutboxWatermark());
         int kept = db.CompactOutbox();
         Assert.Equal(1, kept);
         var rest = db.ReadOutboxBatch(0, 10);
