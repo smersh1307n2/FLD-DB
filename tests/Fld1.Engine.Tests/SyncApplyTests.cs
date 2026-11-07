@@ -112,6 +112,57 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void ApplyJournal_stores_only_relay_payload_not_all_incoming_fields()
+    {
+        var writes = new List<RemoteFieldWrite>(8);
+        for (byte i = 1; i <= 8; i++)
+        {
+            writes.Add(new RemoteFieldWrite(
+                FldDatabase.NewRecordId(), (ushort)i,
+                Enumerable.Repeat(i, 4096).ToArray(),
+                (ulong)(100 + i), 0, Author(9), Change(i)));
+        }
+
+        var batch = new RemoteBatchCommit(
+            senderPeer: Author(8),
+            senderEpoch: 1,
+            namespaceId: 0,
+            issuerNodeId: Author(8),
+            issuerEpoch: 2,
+            batchId: Change(30),
+            cursorStart: 1,
+            cursorEnd: 8,
+            previousBatchDigest: new byte[16],
+            batchDigest: Change(31),
+            recordsRoot: Change(32),
+            writes: writes,
+            relayWrites: [writes[3]],
+            protocolStateDelta: [0xA1, 0xB2]);
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.ApplyRemoteBatch(batch);
+
+            long walBytes = Directory.EnumerateFiles(Path.Combine(_dir, "wal"), "ns_0.*.log")
+                .Sum(path => new FileInfo(path).Length);
+            long journalBytes = new FileInfo(Path.Combine(_dir, "outbox", "ns_0.apply")).Length;
+            Assert.True(walBytes > 0);
+            Assert.True(journalBytes < walBytes / 2,
+                $"Relay-only journal should be much smaller than the full WAL commit (journal={journalBytes}, WAL={walBytes}).");
+
+            var relay = Assert.Single(db.ReadRelayBatches(Author(9), 0, 10));
+            var relayedWrite = Assert.Single(relay.Batch.Writes);
+            Assert.Equal(Change(4), relayedWrite.ChangeId);
+            Assert.Equal(writes[3].Value, relayedWrite.Value);
+        }
+
+        using var reopened = FldDatabase.Open(_dir);
+        var restoredRelay = Assert.Single(reopened.ReadRelayBatches(Author(9), 0, 10));
+        Assert.Single(restoredRelay.Batch.Writes);
+        Assert.Equal(Change(4), restoredRelay.Batch.Writes[0].ChangeId);
+    }
+
+    [Fact]
     public void ApplyJournal_is_rebuilt_from_wal_if_materialization_is_missing()
     {
         var recordId = FldDatabase.NewRecordId();
