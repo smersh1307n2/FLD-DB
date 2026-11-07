@@ -63,8 +63,8 @@ public sealed class OutboxLog : IDisposable
         public static EntryKey From(ReadOnlySpan<byte> fixedPart)
             => new(
                 BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(8, 8)),
-                BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(24, 8)),
                 BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(32, 8)),
+                BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(40, 8)),
                 BinaryPrimitives.ReadUInt16LittleEndian(fixedPart.Slice(48, 2)));
     }
 
