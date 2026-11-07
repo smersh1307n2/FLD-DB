@@ -632,8 +632,9 @@ public sealed class OutboxLog : IDisposable
                     rented = ArrayPool<byte>.Shared.Rent(length);
                 }
 
-                _fs.Position = position;
-                _fs.ReadExactly(rented.AsSpan(0, length));
+                fixedPart.CopyTo(rented);
+                _fs.Position = position + FixedRecordSize;
+                _fs.ReadExactly(rented.AsSpan(FixedRecordSize, length - FixedRecordSize));
                 ReadOnlySpan<byte> record = rented.AsSpan(0, length);
                 VerifyRecordCrc(record, position);
 
