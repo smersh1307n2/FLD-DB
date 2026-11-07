@@ -488,54 +488,62 @@ public sealed class OutboxLog : IDisposable
         long position = FindReadStartOffset(minimumExclusive);
         Span<byte> fixedPart = stackalloc byte[FixedRecordSize];
         int visited = 0;
+        byte[]? rented = null;
 
-        while (position < fileLength && visited < limit)
+        try
         {
-            long remaining = fileLength - position;
-            if (remaining < FixedRecordSize + RecordCrcSize)
-                throw new InvalidDataException($"Outbox has an incomplete record at offset {position}.");
-
-            _fs.Position = position;
-            _fs.ReadExactly(fixedPart);
-            uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(
-                fixedPart.Slice(FixedRecordSize - 4, 4));
-            if (valueLength > MaxValueLength)
-                throw new InvalidDataException($"Outbox value length {valueLength} exceeds limit at offset {position}.");
-
-            long recordLength = (long)FixedRecordSize + valueLength + RecordCrcSize;
-            if (recordLength > remaining)
-                throw new InvalidDataException($"Outbox record is truncated at offset {position}.");
-
-            ValidateFixedRecord(fixedPart, position);
-            ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
-            if (seq == 0)
-                throw new InvalidDataException($"Outbox sequence zero at offset {position}.");
-
-            int length = checked((int)recordLength);
-            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
-            bool keepReading = true;
-            try
+            while (position < fileLength && visited < limit)
             {
+                long remaining = fileLength - position;
+                if (remaining < FixedRecordSize + RecordCrcSize)
+                    throw new InvalidDataException($"Outbox has an incomplete record at offset {position}.");
+
+                _fs.Position = position;
+                _fs.ReadExactly(fixedPart);
+                uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(
+                    fixedPart.Slice(FixedRecordSize - 4, 4));
+                if (valueLength > MaxValueLength)
+                    throw new InvalidDataException($"Outbox value length {valueLength} exceeds limit at offset {position}.");
+
+                long recordLength = (long)FixedRecordSize + valueLength + RecordCrcSize;
+                if (recordLength > remaining)
+                    throw new InvalidDataException($"Outbox record is truncated at offset {position}.");
+
+                ValidateFixedRecord(fixedPart, position);
+                ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(fixedPart.Slice(0, 8));
+                if (seq == 0)
+                    throw new InvalidDataException($"Outbox sequence zero at offset {position}.");
+
+                int length = checked((int)recordLength);
+                if (rented is null || rented.Length < length)
+                {
+                    if (rented is not null)
+                        ArrayPool<byte>.Shared.Return(rented);
+                    rented = ArrayPool<byte>.Shared.Rent(length);
+                }
+
                 _fs.Position = position;
                 _fs.ReadExactly(rented.AsSpan(0, length));
                 ReadOnlySpan<byte> record = rented.AsSpan(0, length);
                 VerifyRecordCrc(record, position);
 
+                bool keepReading = true;
                 if (seq > minimumExclusive)
                 {
                     var view = new OutboxEntryView(record, valueLength);
                     visited++;
                     keepReading = visitor(in view);
                 }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
 
-            if (!keepReading)
-                break;
-            position += recordLength;
+                position += recordLength;
+                if (!keepReading)
+                    break;
+            }
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
         }
 
         return visited;
