@@ -18,13 +18,16 @@ internal sealed class ApplyJournal : IDisposable
     private const int RecordHeaderSize = 20;
     private const int RecordCrcSize = 4;
     private const ushort Version = 1;
+    private const int SparseIndexStride = 256;
     private static ReadOnlySpan<byte> Magic => "FLDA"u8;
 
     private readonly object _lock = new();
     private readonly ushort _namespaceId;
     private readonly FileStream _stream;
-    private readonly List<IndexEntry> _entries = new();
+    private readonly List<IndexAnchor> _anchors = new();
     private readonly Dictionary<BatchKey, IndexEntry> _batches = new();
+    private ulong _recordCount;
+    private ulong _lastCommitSeq;
     private long _writeOffset;
     private ulong _nextSeq = 1;
     private bool _disposed;
@@ -32,6 +35,7 @@ internal sealed class ApplyJournal : IDisposable
 
     private readonly record struct IndexEntry(
         ulong JournalSeq, ulong CommitSeq, long Offset, int PayloadLength, BatchKey Key);
+    private readonly record struct IndexAnchor(ulong JournalSeq, long Offset);
 
     private readonly record struct BatchKey(
         ulong IssuerLo, ulong IssuerHi, uint IssuerEpoch, ushort NamespaceId,
@@ -132,7 +136,7 @@ internal sealed class ApplyJournal : IDisposable
                 return false;
             }
 
-            if (commitSeq == 0 || (_entries.Count != 0 && commitSeq < _entries[^1].CommitSeq))
+            if (commitSeq == 0 || (_recordCount != 0 && commitSeq < _lastCommitSeq))
                 throw new InvalidDataException("Apply journal CommitSeq must be positive and monotonic.");
             ulong seq = _nextSeq;
             if (seq == ulong.MaxValue)
@@ -155,8 +159,11 @@ internal sealed class ApplyJournal : IDisposable
                 _stream.Write(journalPayload);
                 _stream.Write(crcBytes);
                 var index = new IndexEntry(seq, commitSeq, offset, journalPayload.Length, key);
-                _entries.Add(index);
+                if ((_recordCount % SparseIndexStride) == 0)
+                    _anchors.Add(new IndexAnchor(seq, offset));
                 _batches.Add(key, index);
+                _recordCount++;
+                _lastCommitSeq = commitSeq;
                 _writeOffset = nextOffset;
                 _nextSeq = seq + 1;
                 return true;
@@ -197,19 +204,28 @@ internal sealed class ApplyJournal : IDisposable
             EnsureUsable();
             if (limit <= 0) return Array.Empty<ApplyJournalRecord>();
             var result = new List<ApplyJournalRecord>(Math.Min(limit, 256));
+            if (afterJournalSeq >= _nextSeq - 1)
+                return result;
+
             int low = 0;
-            int high = _entries.Count;
+            int high = _anchors.Count;
             while (low < high)
             {
                 int middle = low + ((high - low) >> 1);
-                if (_entries[middle].JournalSeq <= afterJournalSeq)
+                if (_anchors[middle].JournalSeq <= afterJournalSeq)
                     low = middle + 1;
                 else
                     high = middle;
             }
 
-            for (int i = low; i < _entries.Count && result.Count < limit; i++)
-                result.Add(ReadRecord(_entries[i]));
+            long offset = low == 0 ? HeaderSize : _anchors[low - 1].Offset;
+            while (offset < _writeOffset && result.Count < limit)
+            {
+                var (record, nextOffset) = ReadRecordAtOffset(offset);
+                offset = nextOffset;
+                if (record.JournalSeq > afterJournalSeq)
+                    result.Add(record);
+            }
             return result;
         }
     }
@@ -222,6 +238,35 @@ internal sealed class ApplyJournal : IDisposable
             try { _stream.Flush(flushToDisk: true); }
             catch { _faulted = true; throw; }
         }
+    }
+
+    private (ApplyJournalRecord Record, long NextOffset) ReadRecordAtOffset(long offset)
+    {
+        Span<byte> header = stackalloc byte[RecordHeaderSize];
+        Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
+        _stream.Position = offset;
+        _stream.ReadExactly(header);
+        uint payloadLength = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(16, 4));
+        if (payloadLength > WalConstants.MaxPayloadLen)
+            throw new InvalidDataException($"Apply journal payload length exceeds limit at {offset}.");
+        byte[] payload = new byte[checked((int)payloadLength)];
+        _stream.ReadExactly(payload);
+        _stream.ReadExactly(crcBytes);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(crcBytes) != Hashes.Crc32C(header, payload))
+            throw new InvalidDataException($"Apply journal CRC mismatch at offset {offset}.");
+
+        ulong journalSeq = BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(0, 8));
+        ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(8, 8));
+        var commit = ApplyCommitCodec.Decode(payload);
+        if (commit.NamespaceId != _namespaceId)
+            throw new InvalidDataException("Apply journal contains a different namespace.");
+        long nextOffset = checked(offset + RecordHeaderSize + (long)payloadLength + RecordCrcSize);
+        return (new ApplyJournalRecord
+        {
+            JournalSeq = journalSeq,
+            CommitSeq = commitSeq,
+            Commit = commit
+        }, nextOffset);
     }
 
     private ApplyJournalRecord ReadRecord(IndexEntry index)
@@ -319,7 +364,11 @@ internal sealed class ApplyJournal : IDisposable
             var index = new IndexEntry(seq, commitSeq, position, (int)payloadLength, key);
             if (!_batches.TryAdd(key, index))
                 throw new InvalidDataException("Duplicate remote batch identity in apply journal.");
-            _entries.Add(index);
+            if (((seq - 1) % SparseIndexStride) == 0)
+                _anchors.Add(new IndexAnchor(seq, position));
+            _batches.Add(key, index);
+            _recordCount++;
+            _lastCommitSeq = commitSeq;
             previousSeq = seq;
             previousCommitSeq = commitSeq;
             position += recordLength;
@@ -332,6 +381,8 @@ internal sealed class ApplyJournal : IDisposable
         }
         _writeOffset = position;
         _nextSeq = previousSeq + 1;
+        _recordCount = previousSeq;
+        _lastCommitSeq = previousCommitSeq;
     }
 
     private void EnsureUsable()
