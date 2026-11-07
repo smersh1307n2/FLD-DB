@@ -3,8 +3,10 @@
 **Date:** 2026-11-07  
 **Status:** BIN-SYNC metadata P1 (current NodePersistence/Node implementation) and FLD remote APPLY P2 slices are complete on their working branches without a DELTA_BATCH wire-format change. This is not yet a completed neutral Metadata Store integration. Remaining cross-repository work: complete/extend the initial Metadata Store conformance fixture, Data Provider boundary, BIN-SYNC persistence refactor, FLD two-DLL Storage Core extraction and Storage-only role, then the Storage-only and synchronized-Database adapters. PendingLocal coalescing, FLD Outbox physical encoding/benchmarks, and protocol-safe receipt/dedup/tombstone reclamation remain separate follow-on gates.  
 **Primary audit:** [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).  
-**Tombstone research:** [Tombstone Retention and Safe Garbage Collection](TOMBSTONE-RETENTION-RESEARCH.md) — Microsoft ForgottenKnowledge, CRDT causal stability/commitment, Cassandra, CouchDB and Couchbase.  
-**Companion documents:** [FLD Storage Core](FLD-STORAGE-CORE-ARCHITECTURE.md), [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Metadata Store Semantic Contract and Conformance Plan](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORE-CONFORMANCE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).
+**FLD normative design:** [FLD Kernel Specification v1.5.9](FLD-KERNEL-SPEC-v1.5.9.md) and [FLD Storage Core Architecture](FLD-STORAGE-CORE-ARCHITECTURE.md).  
+**BIN-SYNC normative protocol:** [BIN-SYNC CORE v2.4.19 FINAL](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/BIN-SYNC-SPECIFICATION.txt), including E-24 (global ChangeId identity/equivocation) and E-25 (fail-closed tombstone retention).  
+**Cross-layer contracts:** [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Metadata Store Semantic Contract and Conformance Plan](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORE-CONFORMANCE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), and [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).  
+**Retention research:** [Tombstone Retention and Safe Garbage Collection](TOMBSTONE-RETENTION-RESEARCH.md) — Microsoft ForgottenKnowledge, CRDT causal stability/commitment, Cassandra, CouchDB and Couchbase. These sources support the E-25 design; the normative protocol rule remains BIN-SYNC E-25.
 
 ## 1. Goal
 
@@ -522,3 +524,54 @@ A source and architecture revalidation found that the provenance adapter require
 The current FLD source tree still builds `Fld1.Core`, `Fld1.Engine`, `Fld1.Manifest`, `Fld1.Run` and `Fld1.Wal` as separate projects; it does not yet match the approved two-public-DLL packaging boundary. The current BIN-SYNC Node remains backed by internal in-memory collections plus NodePersistence/WAL. Therefore, do not create a direct Node↔FldDatabase callback bridge or a premature NuGet integration project. First establish the neutral semantic boundary and actual Storage API. This avoids locking the adapter to the current pre-extraction FLD project graph or duplicating durable user field state inside Node.
 
 **Exit condition for this phase:** the initial harness is only a starting slice. The full provider-independent suite must also cover frozen outbound changes, leases/fencing, safe contiguous ACK, snapshot lifetime and separate-store pending-apply recovery; durable adapters must add crash/reopen tests. Existing Node/WAL behavior remains a regression baseline. Only then proceed to the persistence refactor and Storage-only implementation.
+
+
+### 7.21 Cross-repository documentation map and authority (2026-11-07)
+
+Storage optimization is specified across multiple documents. This map prevents implementation work from omitting a contract or treating a research note, historical addendum or stale audit statement as normative.
+
+#### 7.21.1 Source-of-truth map
+
+| Document | Authority / responsibility | Use in this roadmap |
+|---|---|---|
+| BIN-SYNC `BIN-SYNC-SPECIFICATION.txt` — **v2.4.19 FINAL** | Normative wire protocol and protocol-level identity, ACK, snapshot, ChangeId and tombstone-retention rules; E-24 and E-25 are active | Check before changing protocol-visible identity, cursor, dedup, snapshot or GC behavior. No storage optimization may weaken E-24/E-25. |
+| FLD-DB `FLD-KERNEL-SPEC-v1.5.9.md` | Normative FLD1 physical format and FLD database/engine behavior, including WAL, APPLY, snapshots, digest boundaries and BIN-SYNC integration obligations | Defines what FLD persists and which semantics belong to Database rather than generic Storage. Must align with the current BIN-SYNC protocol. |
+| FLD-DB `FLD-STORAGE-CORE-ARCHITECTURE.md` | Binding assembly/dependency decision and extraction map | Exactly two runtime DLLs: `Fld1.Storage.dll` and `Fld1.Database.dll`; Database → Storage only; no third Common DLL; Storage-only consumers must not load Database or BIN-SYNC. |
+| BIN-SYNC `docs/METADATA-STORAGE-ARCHITECTURE.md` | Cross-role architecture: Data Provider, Metadata Store, Physical Storage and Runtime; scope/identity inventory; transaction modes and implementation sequence | Governs the Metadata Store boundary and shared-transaction versus separate-store recovery. It is not a physical Storage format specification. |
+| BIN-SYNC `docs/CHANGE-STAGING-AND-RETENTION.md` | Logical change lifecycle, safe LWW coalescing, immutable freeze boundary, payload ownership, metadata cardinality and independent retention | Governs pending versus frozen changes, one-payload/many-peers model, and which metadata can be compacted independently. |
+| BIN-SYNC `docs/FLD-DB-INTEGRATION-CONTRACT.md` | Specialized contract when FLD Database is the synchronized Data Provider/transaction owner | Governs Outbox/ApplyJournal cursor domains, durable relay provenance mapping, publication gate, ACK translation and atomic APPLY. Does not define Storage-only mode. |
+| BIN-SYNC `docs/METADATA-STORE-CONFORMANCE.md` | Provider-independent semantic contract and executable conformance requirements | Governs required behavior and crash/reopen tests before a durable Metadata Store or provider adapter can be called conformant. Existing Node tests remain regression tests, not a substitute. |
+| FLD-DB `docs/SYNC-HISTORY-STORAGE-AUDIT.md` | Code-backed findings, logical representation accounting, source hot spots and optimization candidates | Evidence and implementation audit. Estimates are not benchmarks; recommendations become binding only when accepted into this roadmap or a normative contract. |
+| FLD-DB `docs/TOMBSTONE-RETENTION-RESEARCH.md` | External research and rationale for safe deletion/forgotten-history design | Research input to E-25 and Phase 5; it does not independently authorize tombstone, receipt or dedup GC. |
+| BIN-SYNC `docs/PRODUCTION-STATUS.md` and `docs/CHANGELOG.md` | Implementation/release status and historical change trace | Useful for checking current implementation state and migration history; neither overrides the normative protocol or semantic contracts. |
+
+Historical BIN-SYNC `BIN-SYNC-v2.3.7-ADDENDUM.txt` and `docs/ERRATA-v2.3.7.md` are retained for provenance only. Their requirements were consolidated into the current specification; do not apply them as a second independent normative layer over v2.4.19.
+
+#### 7.21.2 Authority and conflict resolution
+
+Resolve conflicts by subject:
+
+1. **Wire/protocol semantics:** current BIN-SYNC specification v2.4.19 FINAL (including E-24/E-25).
+2. **FLD file format and FLD-owned semantics:** FLD Kernel Specification, constrained by the two-DLL Storage Core architecture.
+3. **Cross-component API/transaction behavior:** Metadata Store Conformance for generic provider semantics; FLD-DB Integration Contract for the synchronized-FLD-specific path.
+4. **Logical storage lifecycle and minimization:** Change Staging and Retention.
+5. **Execution order and acceptance gates:** this roadmap.
+6. **Evidence and rationale:** Sync History Storage Audit and Tombstone Retention Research.
+
+A code audit can reveal that implementation has changed, but cannot silently amend a normative contract. A design document also does not prove that code or tests implement it. Update the relevant contract and matching tests whenever an implementation changes an observable guarantee.
+
+#### 7.21.3 Storage optimization topics that must remain connected
+
+- **Metadata cardinality:** one shared operation payload for many peers; per-peer/per-author progress; compact issuer-specific batch receipts; route-independent global ChangeId ledger; bounded outgoing replay mappings; separate local WAL replay markers.
+- **Pending/frozen lifecycle:** coalesce only unpublished local LWW changes; preserve pending payload independently from the current winner; freeze atomically; never rewrite a published Outbox entry.
+- **Payload amplification:** APPLY_COMMIT v3 stores incoming operations once; relay selection uses indexes; ApplyJournal retains receipt metadata plus relay-only payload; relay payload ACK/compaction is independent from receipt retention.
+- **Physical encoding:** compact peer progress, receipt grouping, author/sequence/CommitSeq encoding, bounded indexes, sparse journal anchors, versioned formats and legacy readers. Each candidate requires byte accounting and workload benchmarks before adoption.
+- **Retention:** separate lifetimes for Outbox payload, relay payload, Inbox receipts, global ChangeId facts, replay cache, WAL replay markers, peer membership and forgotten frontier. No one ACK, snapshot completion, TTL or HLC timestamp is a universal GC proof.
+- **Provider/Storage boundaries:** Data Provider captures and applies user changes; Metadata Store owns BIN-SYNC durable state; Physical Storage owns generic atomic byte durability. Do not conflate Storage-only metadata mode with synchronized FldDatabase mode.
+- **Crash consistency:** every freeze, incoming acceptance, pending-apply transition, snapshot lifetime, provenance page, ACK and compaction boundary needs deterministic fault injection and restart assertions.
+
+#### 7.21.4 Reconciliation findings
+
+1. FLD Kernel Specification still named BIN-SYNC v2.4.17 as its compatibility baseline, while the current normative protocol is v2.4.19 FINAL. The kernel spec must name v2.4.19 and include E-24/E-25.
+2. FLD Kernel Specification still said Storage and Database remain in one DLL. This conflicts with the binding two-DLL decision in the Storage Core Architecture, roadmap §2.6 and BIN-SYNC Integration Contract §7.1.
+3. A code-backed audit statement that suggests the durable FLD JournalSeq → BIN-SYNC OutboxSeq provenance adapter is already implemented must not be treated as evidence of completion. The source mapping, atomic scan-cursor persistence and outbound publication gate remain a separate integration gate as specified in §7.19 and FLD-DB Integration Contract §3.1.1–3.1.2.

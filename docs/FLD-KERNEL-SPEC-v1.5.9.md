@@ -4,9 +4,9 @@
 **Статус:** NORMATIVE DESIGN DRAFT (pre-FINAL FREEZE)
 **Формат:** FLD1 (magic `46 4C 44 31`, binaryVersion 1)
 **Целевой рантайм:** C# 12+ / .NET 10 (FLD1 Core + BinSync.Net integration)
-**Совместимость (протокол):** BIN-SYNC CORE **v2.4.17 FINAL** (включая errata v2.3.7, v2.3.8, v2.4.0, v2.4.4–v2.4.8 и v2.4.17) — без изменения формата FLD1 Run/WAL
-**Совместимость (пакет):** `BinSync.Core` **3.0.0**; SemVer пакета ≠ версия протокола. Нормативная совместимость wire-протокола определяется BIN-SYNC CORE v2.4.17 FINAL, а не номером NuGet-пакета.
-**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–9; совместимость с runtime API `BinSync.Core` 3.0.0; wire baseline — BIN-SYNC CORE v2.4.17 FINAL.
+**Совместимость (протокол):** BIN-SYNC CORE **v2.4.19 FINAL** (включая исторические errata v2.3.7, v2.3.8, v2.4.0, v2.4.4–v2.4.8, а также нормативные E-24 (v2.4.18) и E-25 (v2.4.19)) — без изменения формата FLD1 Run/WAL
+**Совместимость (пакет):** `BinSync.Core` **3.0.0**; SemVer пакета ≠ версия протокола. Нормативная совместимость wire-протокола определяется BIN-SYNC CORE v2.4.19 FINAL, а не номером NuGet-пакета.
+**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–9; совместимость с runtime API `BinSync.Core` 3.0.0; wire baseline — BIN-SYNC CORE v2.4.19 FINAL.
 **Правило чтения:** PART I–VI — обязательства; PART VII — ADR без обязательств; PART VIII — приёмка; PART IX — реализационные заметки.
 **Конвенция:** диапазоны inclusive; байтовые индексы перечисляются явно.
 
@@ -294,11 +294,11 @@ FREE→CLAIMING→ACTIVE→FREE; pin-then-deref; RetireEpoch without −1; recla
 ---
 
 
-**Storage extraction boundary:** the physical engine is being separated from field/database semantics. See [FLD Storage Core architecture](FLD-STORAGE-CORE-ARCHITECTURE.md). `Fld1.Storage` is the domain-neutral byte engine; `Fld1.Database` owns RecordId/FieldId, HLC/LWW, lifecycle, Outbox and APPLY semantics. Both remain in one DLL initially, but Storage must be independently usable without constructing `FldDatabase`.
+**Storage extraction boundary:** the physical engine is separated from field/database semantics into exactly two independently buildable runtime DLLs. See [FLD Storage Core architecture](FLD-STORAGE-CORE-ARCHITECTURE.md). `Fld1.Storage.dll` is the domain-neutral byte engine; `Fld1.Database.dll` owns RecordId/FieldId, HLC/LWW, lifecycle, Outbox and APPLY semantics. Dependency is one-way (Database → Storage); no third Common/Shared runtime DLL is introduced. Storage must be independently usable without constructing or loading `FldDatabase`.
 
-## PART IV. BIN-SYNC / CRDT (v2.4.17)
+## PART IV. BIN-SYNC / CRDT (v2.4.19)
 
-When FLD-DB stores synchronized user data, it implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. This PART IV defines that synchronized-database role only. A separate use case — FLD-DB as a generic Metadata Store for an external Data Provider — is defined by the BIN-SYNC Metadata Storage and External Data Provider Architecture (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The related pending-change lifecycle and safe LWW coalescing policy are defined in the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md). That use case requires an explicit Storage-only role and MUST NOT be implemented by routing metadata writes through ordinary synchronized FldDatabase semantics. FLD-DB MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
+When FLD-DB stores synchronized user data, it implements the durable field-store side of BIN-SYNC CORE v2.4.19 FINAL. This PART IV defines that synchronized-database role only. A separate use case — FLD-DB as a generic Metadata Store for an external Data Provider — is defined by the BIN-SYNC Metadata Storage and External Data Provider Architecture (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The related pending-change lifecycle and safe LWW coalescing policy are defined in the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md). That use case requires an explicit Storage-only role and MUST NOT be implemented by routing metadata writes through ordinary synchronized FldDatabase semantics. FLD-DB MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
 
 ### 4.1. Canonical identity and authorship
 - `NodeId`, `RecordId`, `ChangeId`, `BatchId` are exactly 16 bytes at the durable/wire boundary. BIN-SYNC public API normalization does not authorize FLD to hash, truncate, or regenerate an already accepted identifier.
@@ -415,14 +415,14 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 
 ---
 
-## PART XI. COMPATIBILITY WITH BIN-SYNC CORE v2.4.17 FINAL
+## PART XI. COMPATIBILITY WITH BIN-SYNC CORE v2.4.19 FINAL
 
-**Normative baseline:** `BIN-SYNC-SPECIFICATION.txt`, version **2.4.17 FINAL**, dated 2026-11-06. The storage boundary additionally follows the project contract [`FLD-DB-INTEGRATION-CONTRACT.md`](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md); FLD stores its protocol extension opaquely and does not own BIN-SYNC semantics. This supersedes the former v2.3.6 + v2.3.7 compatibility claim. The current baseline includes ChangeId provenance (v2.3.8), immutable per-peer cursor offsets and ACK bounds (v2.4.0), bidirectional snapshot baseline (v2.4.4), snapshot resource limits (v2.4.5), StateRoot v2 without Outbox cursor (v2.4.6), canonical STATE_DIGEST (v2.4.7), NEED_RANGE/NEED_KEYS validation (v2.4.8), and canonical CRDT/SCHEMA_MAP validation (v2.4.17).
+**Normative baseline:** `BIN-SYNC-SPECIFICATION.txt`, version **2.4.19 FINAL**, dated 2026-11-06. The storage boundary additionally follows the project contract [`FLD-DB-INTEGRATION-CONTRACT.md`](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md); FLD stores its protocol extension opaquely and does not own BIN-SYNC semantics. This supersedes the former v2.3.6 + v2.3.7 compatibility claim. The current baseline includes ChangeId provenance (v2.3.8), immutable per-peer cursor offsets and ACK bounds (v2.4.0), bidirectional snapshot baseline (v2.4.4), snapshot resource limits (v2.4.5), StateRoot v2 without Outbox cursor (v2.4.6), canonical STATE_DIGEST (v2.4.7), NEED_RANGE/NEED_KEYS validation (v2.4.8), and canonical CRDT/SCHEMA_MAP validation (v2.4.17), route-independent ChangeId deduplication and equivocation rejection (E-24 / v2.4.18), and fail-closed tombstone retention (E-25 / v2.4.19).
 
 ### 11.1. Version layers
 | Layer | Version | Contract |
 |---|---|---|
-| Wire protocol | BIN-SYNC CORE **2.4.17 FINAL** | Identity, HLC, LWW/lifecycle, ChangeId, batch chain, digests, snapshots, ACK, CRDT canonicalization |
+| Wire protocol | BIN-SYNC CORE **2.4.19 FINAL** | Identity, HLC, LWW/lifecycle, ChangeId/E-24, batch chain, digests, snapshots, ACK, CRDT canonicalization, tombstone retention/E-25 |
 | .NET package API | `BinSync.Core` **3.0.0** | Current public API/runtime profile; package SemVer is not a substitute for protocol version |
 | FLD physical format | FLD1 binaryVersion **1** | Unchanged by this compatibility alignment |
 
@@ -465,12 +465,12 @@ The following gates are tracked independently; partial implementation is not ful
 |---|---|
 | LOCAL/APPLY WAL separation; remote writes never enter local Outbox | **Implemented.** KindApplyCommit is separate from KindGroupCommit; recovery dispatches by kind. Only local group commits materialize to .obx. |
 | Mandatory immutable ChangeId; durable batch dedup | **Partial.** Remote ChangeId is required, nonzero and immutable. Apply Journal deduplicates the durable inbox key (IssuerNodeId, NamespaceId, IssuerEpoch, BatchId) across restart; global SeenChanges/ChangeId dedup remains BIN-SYNC-owned. |
-| Relay retention for LWW losers; self-echo suppression | **Partial.** RelayWrites is an explicit BIN-SYNC-prepared subset, independent of LWW winners; LWW losers are retained. BIN-SYNC must exclude already-seen/self-echo operations before constructing the subset. Relay ACK/compaction is not implemented yet. |
+| Relay retention for LWW losers; self-echo suppression | **Partial.** RelayWrites is an explicit BIN-SYNC-prepared subset, independent of LWW winners; LWW losers are retained. BIN-SYNC excludes already-seen/self-echo operations. FLD per-author relay ACK sidecar and post-WAL-seal payload compaction are implemented; durable JournalSeq → OutboxSeq provenance mapping and publication gate remain open adapter work. |
 | Atomic ProtocolStateDelta + field state + relay data before ACK | **Partial.** ApplyRemoteBatch writes APPLY_COMMIT to WAL, flushes, materializes the complete payload in outbox/ns_<id>.apply, then publishes field winners and returns a durable receipt. Recovery rematerializes a missing journal record from WAL. Full protocol-state GC/retention remains open. |
-| Local Outbox cursor; relay author streams; peer offsets; bounded ACK/fenced retention | **Partial.** Local Outbox remains LocalAuthor-only and has a fenced lease. Relay journal paging uses an internal JournalSeq (not a sync cursor); relay lease, ACK watermark and safe compaction remain open. |
+| Local Outbox cursor; relay author streams; peer offsets; bounded ACK/fenced retention | **Partial.** Local Outbox remains LocalAuthor-only and has a fenced lease. Relay paging uses internal JournalSeq (not a sync cursor); per-author ACK watermark persistence and safe post-WAL-seal payload compaction are implemented. The adapter-owned durable JournalSeq → ChangeId → OutboxSeq mapping, publication gate and ACK translation remain open. |
 | Snapshot consistency and snapshot-tail binding | **Not implemented.** |
 | BIN-SYNC v2 RecordDigest/StateRoot compatibility tests | **Not implemented.** |
 | Strict schema and unsupported merge-policy behavior | **Not implemented.** |
-| Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction and concurrent snapshot tests | **Partial.** APPLY WAL recovery, journal rematerialization, duplicate batch receipt, LWW-loser retention and local-Outbox isolation have tests; mesh, relay ACK/compaction and snapshot concurrency remain open. |
+| Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction and concurrent snapshot tests | **Partial.** APPLY WAL recovery, journal rematerialization, duplicate batch receipt, LWW-loser retention, local-Outbox isolation and per-author relay ACK/compaction recovery have tests; end-to-end mesh/provenance-gate and snapshot concurrency remain open. |
 
-**Current status:** LOCAL/APPLY separation and the first durable remote-apply path are implemented, but FLD-DB does **not** yet claim full BIN-SYNC v2.4.17 conformance. The remaining gates above are still required.
+**Current status:** LOCAL/APPLY separation and the first durable remote-apply path are implemented, but FLD-DB does **not** yet claim full BIN-SYNC v2.4.19 conformance. The remaining gates above are still required.
