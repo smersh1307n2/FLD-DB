@@ -261,4 +261,12 @@ NodePersistence is v7. v3-v6 loaders read the former Inbox key set and InboxAuth
 
 GitHub Actions run [42344555045](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42344555045) passed .NET 10 build/tests, public samples, coverage and fuzz/lab hardening. Code commit tested: `9d58f8d6791c7cb03e36e8d63f4696449aa7a354`.
 
-This does not implement the complete receipt tuple (cursor range, batch/records/previous digests, expiry and WAL generation), conflicting payload validation under an already accepted BatchId, or receipt GC. ReceivedStreams remains a separate author-stream cursor. Next: complete receipt-path audit and APPLY WAL/ApplyJournal payload de-duplication.
+This does not implement the complete receipt tuple (cursor range, batch/records/previous digests, expiry and WAL generation), conflicting payload validation under an already accepted BatchId, or receipt GC. ReceivedStreams remains a separate author-stream cursor. Next: complete receipt-tuple audit (range/digest/expiry semantics), then APPLY WAL/ApplyJournal payload de-duplication.
+
+### 7.5 Remove redundant remote SeenChanges provenance (2026-11-07)
+
+Once the global ChangeId ledger became the remote dedup authority, per-peer remote `SeenChanges(senderPeer, ns, ChangeId)` rows no longer contributed correctness. New ApplyBatch paths no longer insert or consult them. `SeenChanges` is now only the local WAL replay marker set; this preserves its separate replay lifetime. The global ledger already records local ChangeIds as well, so a remote echo returning to its origin is suppressed without a peer-specific marker.
+
+NodePersistence remains v7. v3-v5 migration first folds every old SeenChanges identity into an explicit unknown global ledger marker, then retains only local-node replay markers. v6-v7 already contain the global ledger, so remote SeenChanges rows can be dropped while local markers survive. `MaxSeenChanges` now caps local WAL markers; `MaxGlobalChangeLedgerEntries` caps global identities. No wire or persistence layout change.
+
+GitHub Actions run [42345011358](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42345011358) passed both .NET 10 and fuzz/lab jobs. The raw duplicate remote key was approximately 33 bytes per received operation for common varint sizes (peer 16 B + ChangeId 16 B + namespace varint), plus HashSet overhead; this estimate is derived from serialization, not a benchmark.
