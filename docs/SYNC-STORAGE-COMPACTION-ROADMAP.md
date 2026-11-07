@@ -298,3 +298,9 @@ Do not enable destructive tombstone GC until a monotonic per-namespace cutoff is
 ### 7.9 Inbox receipt admission cap (2026-11-07)
 
 BIN-SYNC now exposes `ResourceLimits.MaxInboxReceipts` (default 1,000,000; zero disables the cap). A newly accepted batch consumes one receipt even when all its ChangeIds are global duplicates, so the cap is checked before WAL commit and rejects the entire batch without publishing record, cursor, receipt, ledger or relay changes. This is admission backpressure only: no receipts are evicted and no disk space is reclaimed. The dedicated test covers a new BatchId carrying an already-known ChangeId and verifies atomic rejection at capacity. GitHub Actions run [42347223586](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42347223586) passed .NET 10 tests/public samples/coverage and fuzz/lab hardening at BIN-SYNC commit `59e896a89a9b26ed57854df0d70ace5787f5f405`.
+
+### 7.10 Fail-closed tombstone GC until safe watermark enforcement (2026-11-07)
+
+The former BIN-SYNC `GcNotice.PurgeBelowCutoff` deleted ordinary field values based only on HLC age. It was not tombstone-specific and could remove current live state while leaving field/record tombstones behind. Since `TombstoneCutoffWall` is not durably enforced against DELTA_BATCH/reconcile/snapshot peers, there is no proof that stale operations cannot reintroduce deleted state.
+
+The destructive helper is now disabled and returns zero; regression tests assert that old live values, field tombstones and record lifecycle tombstones remain intact. This is a safety stop, not completion of tombstone GC. The protocol still needs a durable per-namespace safe cutoff, stale-peer full-resync enforcement and tombstone/ghost-specific reclamation. CI run [42347618510](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42347618510) passed .NET 10 tests/public samples/coverage and fuzz/lab hardening at BIN-SYNC commit `6767e2da14c2951ac440ed173e9fd796fee54469`.
