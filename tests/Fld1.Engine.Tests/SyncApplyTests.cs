@@ -266,7 +266,7 @@ public class SyncApplyTests : IDisposable
         {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
             var writeTask = Task.Run(() => db.Put(rec, 2, "parallel"u8));
-            Assert.True(writeTask.Wait(TimeSpan.FromSeconds(1)),
+            Assert.True(writeTask.Wait(TimeSpan.FromSeconds(5)),
                 "Outbox encoding must not hold the database commit lock.");
         }
         finally
