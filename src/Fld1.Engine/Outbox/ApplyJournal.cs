@@ -109,6 +109,19 @@ internal sealed class ApplyJournal : IDisposable
     private static FileStream OpenJournalStream(string path)
         => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
 
+    internal void ValidateRelayAckWatermarks()
+    {
+        lock (_lock)
+        {
+            EnsureUsable();
+            ulong highWatermark = _nextSeq - 1;
+            foreach (ulong safeThrough in _relayAckedThrough.Values)
+                if (safeThrough > highWatermark)
+                    throw new InvalidDataException(
+                        "ApplyJournal relay-ACK watermark exceeds the recovered journal high watermark.");
+        }
+    }
+
     internal bool IsRelayAcknowledged(ReadOnlySpan<byte> authorNodeId, ulong journalSeq)
     {
         if (authorNodeId.Length != 16) return false;
