@@ -15,6 +15,7 @@ public sealed class OutboxLog : IDisposable
     private static ReadOnlySpan<byte> LeaseMagic => "FLDL"u8;
 
     private const ushort Version = 1;
+    private const ushort LeaseVersion = 1;
     private const int HeaderSize = 16;
     private const int FixedRecordSize = 88;
     private const int RecordCrcSize = 4;
@@ -235,7 +236,7 @@ public sealed class OutboxLog : IDisposable
 
         byte[] bytes = File.ReadAllBytes(path);
         if (bytes.Length != LeaseSize || !bytes.AsSpan(0, 4).SequenceEqual(LeaseMagic)
-            || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4, 2)) != Version
+            || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4, 2)) != LeaseVersion
             || bytes[6] != 0 || bytes[7] != 0)
             throw new InvalidDataException("Outbox lease file has invalid magic, version, reserved bytes, or length.");
 
@@ -254,7 +255,7 @@ public sealed class OutboxLog : IDisposable
         Span<byte> bytes = stackalloc byte[LeaseSize];
         bytes.Clear();
         LeaseMagic.CopyTo(bytes);
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(4, 2), Version);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(4, 2), LeaseVersion);
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.Slice(8, 8), epoch);
         ownerId.CopyTo(bytes.Slice(16, 16));
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.Slice(32, 4), Hashes.Crc32C(bytes.Slice(0, 32)));
@@ -562,24 +563,6 @@ public sealed class OutboxLog : IDisposable
                 _faulted = true;
                 throw;
             }
-        }
-    }
-
-    /// <summary>
-    /// Enumerate Outbox records as borrowed spans without allocating one object and
-    /// several byte arrays per entry. The callback runs under the Outbox lock and
-    /// must not retain the view or call back into this Outbox instance.
-    /// </summary>
-    public int VisitBatch(ulong afterSeq, int limit, OutboxEntryVisitor visitor)
-    {
-        ArgumentNullException.ThrowIfNull(visitor);
-        if (limit <= 0)
-            return 0;
-
-        lock (_lock)
-        {
-            EnsureUsable();
-            return VisitBatchUnlocked(afterSeq, limit, visitor);
         }
     }
 
