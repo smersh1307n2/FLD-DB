@@ -219,3 +219,14 @@ The original audit records FLD-DB implementation baseline 196628a49d6034559a7041
 Every implementation batch must state exact code baseline and files changed, add focused correctness/crash tests, run relevant tests/benchmarks, report measured disk/RAM/CPU separately from estimates, and update this roadmap plus the owning contract.
 
 **Current status:** target architecture and order are documented. No code, persistence format or wire format is changed by this roadmap.
+
+
+### 7.1 Revalidation before implementation (2026-11-07)
+
+The current working refs were rechecked against the audited code baselines before starting implementation:
+
+- FLD-DB working ref `fix/crash-consistency-outbox` is at `625b678632a0e7d35b3caa6225396f66b9a65c56`; comparison from audited code baseline `196628a49d6034559a7041237af7feec36fd9b20` shows 28 commits ahead, 0 behind, and the changed paths are documentation-only (README and docs; no `src/` or `tests/` paths).
+- BIN-SYNC working ref `feature/fld-external-storage` is at `d2e884a7f63e323da93efe3c20f72d08b64044b2`; comparison from audited code baseline `dd2dd969d70b6fd46371679903855a69ae9399c3` shows 6 commits ahead, 0 behind, and changed paths are documentation-only.
+- Backup refs `backup/pre-compaction-2026-11-07` in both repositories were compared to the working refs and are identical at the time of this revalidation.
+
+Therefore the source-code findings in the audit remain applicable to the current working branches. No tests or benchmarks have been run in this revalidation; it verifies source baselines and changed-path scope only.
