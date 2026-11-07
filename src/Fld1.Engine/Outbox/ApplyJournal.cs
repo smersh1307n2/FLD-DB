@@ -25,7 +25,7 @@ internal sealed class ApplyJournal : IDisposable
     private readonly ushort _namespaceId;
     private readonly FileStream _stream;
     private readonly List<IndexAnchor> _anchors = new();
-    private readonly Dictionary<BatchKey, IndexEntry> _batches = new();
+    private readonly Dictionary<BatchKey, long> _batches = new();
     private ulong _recordCount;
     private ulong _lastCommitSeq;
     private long _writeOffset;
@@ -33,8 +33,6 @@ internal sealed class ApplyJournal : IDisposable
     private bool _disposed;
     private bool _faulted;
 
-    private readonly record struct IndexEntry(
-        ulong JournalSeq, ulong CommitSeq, long Offset, int PayloadLength);
     private readonly record struct IndexAnchor(ulong JournalSeq, long Offset);
 
     private readonly record struct BatchKey(
@@ -111,7 +109,7 @@ internal sealed class ApplyJournal : IDisposable
                 return false;
             }
 
-            record = ReadRecord(index);
+            record = ReadRecordAtOffset(index).Record;
             return true;
         }
     }
@@ -129,7 +127,7 @@ internal sealed class ApplyJournal : IDisposable
             EnsureUsable();
             if (_batches.TryGetValue(key, out var existing))
             {
-                var prior = ApplyCommitCodec.Decode(ReadPayload(existing));
+                var prior = ReadRecordAtOffset(existing).Record.Commit;
                 byte[] priorJournalPayload = ApplyCommitCodec.Encode(ToRelayOnly(prior));
                 if (!priorJournalPayload.AsSpan().SequenceEqual(journalPayload))
                     throw new InvalidDataException("Conflicting receipt or relay payload for an existing remote batch identity.");
@@ -158,10 +156,9 @@ internal sealed class ApplyJournal : IDisposable
                 _stream.Write(header);
                 _stream.Write(journalPayload);
                 _stream.Write(crcBytes);
-                var index = new IndexEntry(seq, commitSeq, offset, journalPayload.Length);
                 if ((_recordCount % SparseIndexStride) == 0)
                     _anchors.Add(new IndexAnchor(seq, offset));
-                _batches.Add(key, index);
+                _batches.Add(key, offset);
                 _recordCount++;
                 _lastCommitSeq = commitSeq;
                 _writeOffset = nextOffset;
@@ -269,32 +266,6 @@ internal sealed class ApplyJournal : IDisposable
         }, nextOffset);
     }
 
-    private ApplyJournalRecord ReadRecord(IndexEntry index)
-        => new()
-        {
-            JournalSeq = index.JournalSeq,
-            CommitSeq = index.CommitSeq,
-            Commit = ApplyCommitCodec.Decode(ReadPayload(index))
-        };
-
-    private byte[] ReadPayload(IndexEntry index)
-    {
-        Span<byte> header = stackalloc byte[RecordHeaderSize];
-        Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
-        byte[] payload = new byte[index.PayloadLength];
-        _stream.Position = index.Offset;
-        _stream.ReadExactly(header);
-        if (BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(0, 8)) != index.JournalSeq
-            || BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(8, 8)) != index.CommitSeq
-            || BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(16, 4)) != index.PayloadLength)
-            throw new InvalidDataException("Apply journal index no longer matches its record.");
-        _stream.ReadExactly(payload);
-        _stream.ReadExactly(crcBytes);
-        uint stored = BinaryPrimitives.ReadUInt32LittleEndian(crcBytes);
-        if (stored != Hashes.Crc32C(header, payload))
-            throw new InvalidDataException($"Apply journal CRC mismatch at offset {index.Offset}.");
-        return payload;
-    }
 
     private void WriteHeader()
     {
@@ -361,8 +332,7 @@ internal sealed class ApplyJournal : IDisposable
             if (commit.NamespaceId != _namespaceId)
                 throw new InvalidDataException("Apply journal contains a different namespace.");
             var key = BatchKey.From(commit);
-            var index = new IndexEntry(seq, commitSeq, position, (int)payloadLength);
-            if (!_batches.TryAdd(key, index))
+            if (!_batches.TryAdd(key, position))
                 throw new InvalidDataException("Duplicate remote batch identity in apply journal.");
             if (((seq - 1) % SparseIndexStride) == 0)
                 _anchors.Add(new IndexAnchor(seq, position));
