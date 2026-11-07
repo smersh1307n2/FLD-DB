@@ -333,3 +333,9 @@ BIN-SYNC NodePersistence now writes accepted-batch receipts grouped by `(issuer,
 For each additional receipt in a shared group, the raw key saving is approximately 16 bytes plus namespace and epoch varint widths; for each additional ledger entry in a namespace, it is the namespace varint width. Group count fields offset a small amount, and singleton groups may be slightly larger. These are format-derived estimates, not measured benchmark results. The v10 reader accepts v3-v9 flat layouts and validates receipt cursor overflow, expiry ordering, group counts and identity fields. Tests cover multi-group roundtrip, unknown legacy markers, expiry fields, v9 compatibility and malformed cursor rejection.
 
 GitHub Actions run [42348683438](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42348683438) passed .NET 10 build/tests/public samples/coverage and fuzz/lab hardening at BIN-SYNC commit `287cb86c349859a934f8fc33b6f62e13c28f6f17`.
+
+### 7.13 Sparse ApplyJournal index (2026-11-07)
+
+The full per-record `_entries` List was removed. ApplyJournal now keeps one sparse `JournalSeq→offset` anchor per 256 records and uses lower-bound binary search to find the nearest anchor, then scans at most one bounded stride to the requested page. The complete `BatchKey→IndexEntry` dictionary remains for duplicate receipt lookup and is still unbounded; disk-backed/rebuildable receipt indexing and independent receipt GC remain open.
+
+A restart regression test verifies page reads after JournalSeq 2. GitHub Actions run [42348804968](https://github.com/smersh1307n2/FLD-DB/actions/runs/42348804968) passed Release build and all tests at FLD-DB commit `ed535fef2440102ecfe84024760de3633eced484`.
