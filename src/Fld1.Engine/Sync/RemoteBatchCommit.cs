@@ -19,6 +19,8 @@ public sealed class RemoteBatchCommit
     public byte[] RecordsRoot { get; }
     public byte[] ProtocolStateDelta { get; }
     public IReadOnlyList<RemoteFieldWrite> Writes { get; }
+    /// <summary>BIN-SYNC-selected relay subset; includes LWW losers, excludes seen/self-echo operations.</summary>
+    public IReadOnlyList<RemoteFieldWrite> RelayWrites { get; }
 
     public RemoteBatchCommit(
         byte[] senderPeer,
@@ -33,6 +35,7 @@ public sealed class RemoteBatchCommit
         byte[] batchDigest,
         byte[] recordsRoot,
         IReadOnlyList<RemoteFieldWrite> writes,
+        IReadOnlyList<RemoteFieldWrite> relayWrites,
         byte[] protocolStateDelta)
     {
         SenderPeer = CopyId(senderPeer, nameof(senderPeer), nonzero: true);
@@ -50,29 +53,38 @@ public sealed class RemoteBatchCommit
         NamespaceId = namespaceId;
 
         ArgumentNullException.ThrowIfNull(writes);
-        if (writes.Count == 0)
-            throw new ArgumentException("A remote batch must contain at least one mutation.", nameof(writes));
-        var copy = new RemoteFieldWrite[writes.Count];
-        for (int i = 0; i < writes.Count; i++)
-        {
-            var write = writes[i];
-            copy[i] = new RemoteFieldWrite(
-                CopyId(write.RecordId, nameof(write.RecordId)),
-                write.FieldId,
-                write.Value.ToArray(),
-                write.Wall,
-                write.Logical,
-                CopyId(write.AuthorNodeId, nameof(write.AuthorNodeId)),
-                CopyId(write.ChangeId, nameof(write.ChangeId), nonzero: true),
-                write.KeyEpoch,
-                write.IsTombstone);
-        }
-        Writes = copy;
+        Writes = CopyWrites(writes, nameof(writes));
+        RelayWrites = CopyWrites(relayWrites, nameof(relayWrites));
 
         ArgumentNullException.ThrowIfNull(protocolStateDelta);
         if (protocolStateDelta.Length > 4 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(protocolStateDelta));
         ProtocolStateDelta = protocolStateDelta.ToArray();
+    }
+
+    private static RemoteFieldWrite[] CopyWrites(
+        IReadOnlyList<RemoteFieldWrite>? writes, string name)
+    {
+        ArgumentNullException.ThrowIfNull(writes, name);
+        var copy = new RemoteFieldWrite[writes.Count];
+        for (int i = 0; i < writes.Count; i++)
+        {
+            var write = writes[i];
+            var value = write.Value.ToArray();
+            if (write.IsTombstone && value.Length != 0)
+                throw new ArgumentException("Tombstone payload must be empty.", name);
+            copy[i] = new RemoteFieldWrite(
+                CopyId(write.RecordId, nameof(write.RecordId)),
+                write.FieldId,
+                value,
+                write.Wall,
+                write.Logical,
+                CopyId(write.AuthorNodeId, nameof(write.AuthorNodeId), nonzero: true),
+                CopyId(write.ChangeId, nameof(write.ChangeId), nonzero: true),
+                write.KeyEpoch,
+                write.IsTombstone);
+        }
+        return copy;
     }
 
     private static byte[] CopyId(byte[]? value, string name, bool nonzero = false)
