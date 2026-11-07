@@ -1317,6 +1317,8 @@ public sealed class FldDatabase : IDisposable
                 foreach (var item in page)
                 {
                     cursor = item.JournalSeq;
+                    if (_applyJournal.IsRelayAcknowledged(authorFilter, item.JournalSeq))
+                        continue;
                     var matching = item.Commit.RelayFields
                         .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
                         .Select(f => new RemoteFieldWrite(
@@ -1347,6 +1349,23 @@ public sealed class FldDatabase : IDisposable
                 Batches = result,
                 ScannedThroughJournalSeq = cursor
             };
+        }
+    }
+
+    /// <summary>
+    /// Persist a per-author safe relay ACK watermark. The caller must compute this
+    /// as the minimum contiguous downstream ACK across all interested peers. This
+    /// records read-side retention safety; physical payload compaction waits until
+    /// the corresponding APPLY WAL commit sequence has been sealed and truncated.
+    /// </summary>
+    public void AcknowledgeRelayBatches(
+        ReadOnlySpan<byte> authorNodeId, ulong safeThroughJournalSeq)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _applyJournal.AcknowledgeRelayBatches(authorNodeId, safeThroughJournalSeq);
         }
     }
 
