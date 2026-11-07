@@ -311,8 +311,11 @@ internal sealed class ApplyJournal : IDisposable
         }
     }
 
-    private static WalApplyCommit ToRelayOnly(WalApplyCommit commit)
-        => new()
+    private static WalApplyCommit ToRelayOnly(
+        WalApplyCommit commit, List<WalFieldMutation>? relayFields = null)
+    {
+        var selected = relayFields ?? commit.RelayFields;
+        return new()
         {
             SenderPeer = commit.SenderPeer,
             SenderEpoch = commit.SenderEpoch,
@@ -327,10 +330,139 @@ internal sealed class ApplyJournal : IDisposable
             RecordsRoot = commit.RecordsRoot,
             ProtocolStateDelta = commit.ProtocolStateDelta,
             AppliedCount = commit.AppliedCount,
-            Fields = commit.RelayFields,
-            RelayFields = commit.RelayFields,
+            Fields = selected,
+            RelayFields = selected,
             RelayOnly = true
         };
+    }
+
+    internal int CompactAcknowledgedRelayPayloads(ulong sealedThroughCommitSeq)
+    {
+        lock (_lock)
+        {
+            EnsureUsable();
+            if (sealedThroughCommitSeq == 0 || _recordCount == 0) return 0;
+
+            string tempPath = _path + ".compact.tmp";
+            var newAnchors = new List<IndexAnchor>(_anchors.Count);
+            var newBatches = new Dictionary<BatchKey, long>(_batches.Count);
+            long newWriteOffset = HeaderSize;
+            ulong count = 0;
+            int removedFields = 0;
+            bool changed = false;
+
+            try
+            {
+                using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write,
+                           FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+                {
+                    WriteHeader(output);
+                    long sourceOffset = HeaderSize;
+                    while (sourceOffset < _writeOffset)
+                    {
+                        var (record, nextSourceOffset) = ReadRecordAtOffset(sourceOffset);
+                        var commit = record.Commit;
+                        var retainedRelayFields = new List<WalFieldMutation>(commit.RelayFields.Count);
+                        foreach (var field in commit.RelayFields)
+                        {
+                            bool acknowledged = false;
+                            if (record.CommitSeq <= sealedThroughCommitSeq)
+                            {
+                                var author = AuthorKey.From(field.AuthorNodeId);
+                                acknowledged = _relayAckedThrough.TryGetValue(author, out ulong safeThrough) &&
+                                               record.JournalSeq <= safeThrough;
+                            }
+                            if (acknowledged) removedFields++;
+                            else retainedRelayFields.Add(field);
+                        }
+
+                        if (!commit.RelayOnly || retainedRelayFields.Count != commit.RelayFields.Count)
+                            changed = true;
+
+                        byte[] payload = ApplyCommitCodec.Encode(ToRelayOnly(commit, retainedRelayFields));
+                        Span<byte> header = stackalloc byte[RecordHeaderSize];
+                        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(0, 8), record.JournalSeq);
+                        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8, 8), record.CommitSeq);
+                        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(16, 4), checked((uint)payload.Length));
+                        uint crc = Hashes.Crc32C(header, payload);
+                        Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
+                        BinaryPrimitives.WriteUInt32LittleEndian(crcBytes, crc);
+
+                        long recordOffset = newWriteOffset;
+                        output.Write(header);
+                        output.Write(payload);
+                        output.Write(crcBytes);
+                        if ((count % SparseIndexStride) == 0)
+                            newAnchors.Add(new IndexAnchor(record.JournalSeq, recordOffset));
+                        var key = BatchKey.From(commit);
+                        if (!newBatches.TryAdd(key, recordOffset))
+                            throw new InvalidDataException("Duplicate remote batch identity during ApplyJournal compaction.");
+                        newWriteOffset = checked(newWriteOffset + RecordHeaderSize + (long)payload.Length + RecordCrcSize);
+                        count++;
+                        sourceOffset = nextSourceOffset;
+                    }
+                    output.Flush(true);
+                }
+
+                if (!changed)
+                    return 0;
+
+                bool replaced = false;
+                long oldWriteOffset = _writeOffset;
+                _stream.Dispose();
+                try
+                {
+                    File.Move(tempPath, _path, overwrite: true);
+                    replaced = true;
+                    _stream = OpenJournalStream(_path);
+                    _stream.Position = newWriteOffset;
+                }
+                catch
+                {
+                    try
+                    {
+                        _stream = OpenJournalStream(_path);
+                        _stream.Position = replaced ? newWriteOffset : oldWriteOffset;
+                        if (replaced)
+                        {
+                            _anchors.Clear();
+                            _anchors.AddRange(newAnchors);
+                            _batches.Clear();
+                            foreach (var item in newBatches) _batches.Add(item.Key, item.Value);
+                            _writeOffset = newWriteOffset;
+                        }
+                    }
+                    catch { _faulted = true; }
+                    throw;
+                }
+
+                _anchors.Clear();
+                _anchors.AddRange(newAnchors);
+                _batches.Clear();
+                foreach (var item in newBatches) _batches.Add(item.Key, item.Value);
+                _writeOffset = newWriteOffset;
+                _recordCount = count;
+                return removedFields;
+            }
+            catch
+            {
+                if (_stream.SafeFileHandle.IsClosed)
+                {
+                    try
+                    {
+                        _stream = OpenJournalStream(_path);
+                        _stream.Position = _writeOffset;
+                    }
+                    catch { _faulted = true; }
+                }
+                throw;
+            }
+            finally
+            {
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+            }
+        }
+    }
 
     public IReadOnlyList<ApplyJournalRecord> ReadBatches(ulong afterJournalSeq, int limit)
     {
@@ -407,15 +539,20 @@ internal sealed class ApplyJournal : IDisposable
 
     private void WriteHeader()
     {
+        WriteHeader(_stream);
+        _writeOffset = HeaderSize;
+    }
+
+    private void WriteHeader(Stream stream)
+    {
         Span<byte> header = stackalloc byte[HeaderSize];
         header.Clear();
         Magic.CopyTo(header);
         BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(4, 2), Version);
         BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(6, 2), _namespaceId);
         BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(12, 4), Hashes.Crc32C(header.Slice(0, 12)));
-        _stream.Position = 0;
-        _stream.Write(header);
-        _writeOffset = HeaderSize;
+        stream.Position = 0;
+        stream.Write(header);
     }
 
     private void LoadAndRepairTail()
