@@ -117,6 +117,7 @@ internal sealed class ApplyJournal : IDisposable
         var commit = ApplyCommitCodec.Decode(payload);
         if (commit.NamespaceId != _namespaceId)
             throw new InvalidDataException("APPLY_COMMIT namespace does not match journal namespace.");
+        var journalPayload = ApplyCommitCodec.Encode(ToRelayOnly(commit));
         var key = BatchKey.From(commit);
 
         lock (_lock)
@@ -124,9 +125,10 @@ internal sealed class ApplyJournal : IDisposable
             EnsureUsable();
             if (_batches.TryGetValue(key, out var existing))
             {
-                byte[] prior = ReadPayload(existing);
-                if (!prior.AsSpan().SequenceEqual(payload))
-                    throw new InvalidDataException("Conflicting payload for an existing remote batch identity.");
+                var prior = ApplyCommitCodec.Decode(ReadPayload(existing));
+                byte[] priorJournalPayload = ApplyCommitCodec.Encode(ToRelayOnly(prior));
+                if (!priorJournalPayload.AsSpan().SequenceEqual(journalPayload))
+                    throw new InvalidDataException("Conflicting receipt or relay payload for an existing remote batch identity.");
                 return false;
             }
 
@@ -139,20 +141,20 @@ internal sealed class ApplyJournal : IDisposable
             Span<byte> header = stackalloc byte[RecordHeaderSize];
             BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(0, 8), seq);
             BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8, 8), commitSeq);
-            BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(16, 4), checked((uint)payload.Length));
-            uint crc = Hashes.Crc32C(header, payload);
+            BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(16, 4), checked((uint)journalPayload.Length));
+            uint crc = Hashes.Crc32C(header, journalPayload);
             Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
             BinaryPrimitives.WriteUInt32LittleEndian(crcBytes, crc);
 
             long offset = _writeOffset;
-            long nextOffset = checked(offset + RecordHeaderSize + (long)payload.Length + RecordCrcSize);
+            long nextOffset = checked(offset + RecordHeaderSize + (long)journalPayload.Length + RecordCrcSize);
             try
             {
                 _stream.Position = offset;
                 _stream.Write(header);
-                _stream.Write(payload);
+                _stream.Write(journalPayload);
                 _stream.Write(crcBytes);
-                var index = new IndexEntry(seq, commitSeq, offset, payload.Length, key);
+                var index = new IndexEntry(seq, commitSeq, offset, journalPayload.Length, key);
                 _entries.Add(index);
                 _batches.Add(key, index);
                 _writeOffset = nextOffset;
@@ -166,6 +168,27 @@ internal sealed class ApplyJournal : IDisposable
             }
         }
     }
+
+    private static WalApplyCommit ToRelayOnly(WalApplyCommit commit)
+        => new()
+        {
+            SenderPeer = commit.SenderPeer,
+            SenderEpoch = commit.SenderEpoch,
+            NamespaceId = commit.NamespaceId,
+            IssuerNodeId = commit.IssuerNodeId,
+            IssuerEpoch = commit.IssuerEpoch,
+            BatchId = commit.BatchId,
+            CursorStart = commit.CursorStart,
+            CursorEnd = commit.CursorEnd,
+            PreviousBatchDigest = commit.PreviousBatchDigest,
+            BatchDigest = commit.BatchDigest,
+            RecordsRoot = commit.RecordsRoot,
+            ProtocolStateDelta = commit.ProtocolStateDelta,
+            AppliedCount = commit.AppliedCount,
+            Fields = commit.RelayFields,
+            RelayFields = commit.RelayFields,
+            RelayOnly = true
+        };
 
     public IReadOnlyList<ApplyJournalRecord> ReadBatches(ulong afterJournalSeq, int limit)
     {
