@@ -48,6 +48,31 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void Outbox_visit_batch_exposes_borrowed_entries_and_can_stop()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 7, "borrowed"u8);
+        db.Commit();
+
+        int callbacks = 0;
+        bool Visit(in Fld1.Engine.Outbox.OutboxEntryView entry)
+        {
+            callbacks++;
+            Assert.Equal(1UL, entry.OutboxSeq);
+            Assert.Equal(7, entry.FieldId);
+            Assert.Equal(rec, entry.RecordId.ToArray());
+            Assert.Equal("borrowed"u8.ToArray(), entry.Value.ToArray());
+            Assert.Equal(16, entry.ChangeId.Length);
+            return false;
+        }
+
+        int visited = db.VisitOutboxBatch(0, 10, Visit);
+        Assert.Equal(1, visited);
+        Assert.Equal(1, callbacks);
+    }
+
+    [Fact]
     public void Outbox_compact_after_ack()
     {
         using var db = FldDatabase.Open(_dir);
