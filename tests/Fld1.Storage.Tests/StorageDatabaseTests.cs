@@ -179,4 +179,29 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Equal(new byte[] { 3 }, value);
     }
 
+    [Fact]
+    public void Write_batch_provides_read_your_writes_and_serializable_conflict_detection()
+    {
+        using var db = StorageDatabase.Open(_dir, 108);
+        using var first = db.BeginWriteBatch();
+        using var competing = db.BeginWriteBatch();
+
+        Assert.False(first.TryGet("key"u8, out _));
+        first.Put("key"u8, "staged"u8);
+        Assert.True(first.TryGet("key"u8, out var staged));
+        Assert.Equal("staged"u8.ToArray(), staged);
+
+        using (var winner = db.BeginWriteBatch())
+        {
+            winner.Put("other"u8, "committed"u8);
+            winner.Commit();
+        }
+
+        Assert.Throws<StorageConflictException>(() => first.Commit());
+        Assert.Throws<StorageConflictException>(() => competing.Put("another"u8, "value"u8).Commit());
+        Assert.False(db.TryGet("key"u8, out _));
+        Assert.True(db.TryGet("other"u8, out var other));
+        Assert.Equal("committed"u8.ToArray(), other);
+    }
+
 }
