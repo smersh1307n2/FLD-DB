@@ -33,14 +33,14 @@ internal sealed class ApplyJournal : IDisposable
         ulong JournalSeq, ulong CommitSeq, long Offset, int PayloadLength, BatchKey Key);
 
     private readonly record struct BatchKey(
-        ulong PeerLo, ulong PeerHi, uint SenderEpoch, ushort NamespaceId,
+        ulong IssuerLo, ulong IssuerHi, uint IssuerEpoch, ushort NamespaceId,
         ulong BatchLo, ulong BatchHi)
     {
         public static BatchKey From(WalApplyCommit commit)
             => new(
-                BinaryPrimitives.ReadUInt64LittleEndian(commit.SenderPeer),
-                BinaryPrimitives.ReadUInt64LittleEndian(commit.SenderPeer.AsSpan(8)),
-                commit.SenderEpoch,
+                BinaryPrimitives.ReadUInt64LittleEndian(commit.IssuerNodeId),
+                BinaryPrimitives.ReadUInt64LittleEndian(commit.IssuerNodeId.AsSpan(8)),
+                commit.IssuerEpoch,
                 commit.NamespaceId,
                 BinaryPrimitives.ReadUInt64LittleEndian(commit.BatchId),
                 BinaryPrimitives.ReadUInt64LittleEndian(commit.BatchId.AsSpan(8)));
@@ -77,18 +77,18 @@ internal sealed class ApplyJournal : IDisposable
     }
 
     public bool TryFindBatch(
-        ReadOnlySpan<byte> senderPeer, uint senderEpoch, ushort namespaceId,
+        ReadOnlySpan<byte> issuerNodeId, uint issuerEpoch, ushort namespaceId,
         ReadOnlySpan<byte> batchId, out ApplyJournalRecord? record)
     {
-        if (senderPeer.Length != 16 || batchId.Length != 16)
+        if (issuerNodeId.Length != 16 || batchId.Length != 16)
             throw new ArgumentException("Batch identity fields must be 16 bytes.");
         lock (_lock)
         {
             EnsureUsable();
             var key = new BatchKey(
-                BinaryPrimitives.ReadUInt64LittleEndian(senderPeer),
-                BinaryPrimitives.ReadUInt64LittleEndian(senderPeer.Slice(8)),
-                senderEpoch,
+                BinaryPrimitives.ReadUInt64LittleEndian(issuerNodeId),
+                BinaryPrimitives.ReadUInt64LittleEndian(issuerNodeId.Slice(8)),
+                issuerEpoch,
                 namespaceId,
                 BinaryPrimitives.ReadUInt64LittleEndian(batchId),
                 BinaryPrimitives.ReadUInt64LittleEndian(batchId.Slice(8)));
