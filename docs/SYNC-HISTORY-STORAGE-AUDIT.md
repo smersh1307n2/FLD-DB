@@ -336,3 +336,20 @@ Open gates: no protocol-safe global dedup GC horizon is proven; relay GC require
 The BIN-SYNC implementation now prunes `PeerState.Ids` entries when and only when a validated contiguous per-author ACK covers the cached cursor range end. The per-peer `LastStreamDigest` chain checkpoint is retained. This was implemented in `dc9a1304de00e75bacb0d2bdd864e0f48e687361` and covered by restart/idempotent-ACK assertions in `402b801e4b2d2781e048f3785766c0abf0425016`. GitHub Actions run 42342495367 passed all jobs.
 
 The original code baseline remains the audit reference; this is a narrowly scoped post-audit code delta. Global ChangeId dedup, APPLY payload dedup and receipt/relay split are not implemented by this change.
+
+## 14. Global ChangeId ledger implementation follow-up (2026-11-07)
+
+The BIN-SYNC runtime now closes the previously open route-independent dedup correctness gate:
+- ledger key: `(namespaceId, ChangeId)`, with local replica identity implicit in the Node;
+- value: BLAKE3-128 canonical semantic fingerprint over namespace, RecordId, OpKind, resolved permanent author and FULL_AUTHOR_ID operation bytes, plus sorted unique causal dependencies;
+- same ID/same fingerprint: no re-apply and no second relay, including after origin Outbox compaction;
+- same ID/different known fingerprint: reject before WAL append and state/cursor publication;
+- local commit and remote WAL/replay paths update the ledger atomically;
+- NodePersistence v6 migrates v3-v5 SeenChanges into explicit unknown markers and reconstructs only complete retained legacy Outbox payloads;
+- causal dependencies are retained through relay encoding and WAL recovery.
+
+Tests cover second-route duplicate arrival, echo back to the original author after local Outbox compaction, equivocation rejection without partial state, v5 migration, v6 persistence, causal trailer relay and WAL replay. GitHub Actions run [42344100307](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42344100307) passed both .NET 10 and fuzz/lab jobs. Tested code commit: `468d26988dee370aef4f7266b76bcbc6a5e5c77a`.
+
+The ledger is intentionally not garbage-collected: ACK, Inbox expiry, tombstone GC or TTL do not prove that an old operation cannot arrive through a newly discovered route. Legacy entries with unavailable payload fingerprints remain unknown and suppress relay conservatively until a matching arrival upgrades them. A later optimization may remove redundant peer-scoped remote SeenChanges entries, but only after preserving the distinct local WAL replay marker role.
+
+Next BIN-SYNC metadata task: consolidate Inbox and InboxAuthors into one issuer-specific receipt map only after auditing duplicate ACK, restart, WAL and session-reset behavior. APPLY payload de-duplication and relay-only payload retention remain subsequent work.
