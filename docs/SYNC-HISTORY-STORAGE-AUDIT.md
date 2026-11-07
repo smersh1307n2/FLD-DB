@@ -214,9 +214,9 @@ The receipt and relay payload are logically distinct but still physically co-loc
 
 ### 6.3 ApplyJournal index growth remains unbounded; paging scan is fixed
 
-ApplyJournal still maintains a List of every historical index entry and a Dictionary keyed by batch identity. It has no public ACK/compaction/truncation boundary, so both in-memory indexes grow with every accepted batch.
+ApplyJournal no longer keeps a full List of every historical IndexEntry. It keeps one sparse JournalSeq anchor per 256 records and uses lower-bound binary search to find the nearest anchor, then scans at most one bounded 256-record stride before returning the requested page. Page selection is O(log(N/256) + 256 + page size), rather than O(history + page size). A regression test verifies that a request after JournalSeq 2 returns only later records after restart.
 
-The prior ReadBatches(afterJournalSeq, limit) prefix scan has been replaced with a lower-bound binary search over the monotonic JournalSeq list, followed by reading only the requested page. Page selection is now O(log N + page size), rather than O(history + page size). A regression test verifies that a request after JournalSeq 2 returns only later records.
+The BatchKey→IndexEntry Dictionary and on-disk receipt history still grow with every accepted batch. There is no public ACK/compaction/truncation boundary or disk-backed batch index yet.
 
 Receipt lookup and relay-payload retention still share one physical append-only file. They need separate logical lifetimes and eventually independently reclaimable segments/indexes.
 
