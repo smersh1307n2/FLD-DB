@@ -18,7 +18,7 @@ public sealed class WalWriter : IDisposable
     private bool _accepting = true;
     private bool _disposed;
 
-    public ulong NamespaceId { get; }
+    public ulong PartitionId { get; }
     public ulong PublishedWalEnd => Volatile.Read(ref _publishedWalEnd);
     public ulong WriteOffset
     {
@@ -29,36 +29,36 @@ public sealed class WalWriter : IDisposable
         get { lock (_mutex) return _nextCommitSeq; }
     }
 
-    private WalWriter(FileStream fs, ulong namespaceId, ulong writeOffset, ulong firstCommitSeq)
+    private WalWriter(FileStream fs, ulong partitionId, ulong writeOffset, ulong firstCommitSeq)
     {
         _fs = fs;
-        NamespaceId = namespaceId;
+        PartitionId = partitionId;
         _writeOffset = writeOffset;
         _publishedWalEnd = writeOffset;
         _nextCommitSeq = firstCommitSeq;
     }
 
     /// <summary>Create a new WAL file with header. firstCommitSeq is the first seq that will be assigned.</summary>
-    public static WalWriter Create(string path, ulong namespaceId, ulong firstCommitSeq = 1)
+    public static WalWriter Create(string path, ulong partitionId, ulong firstCommitSeq = 1)
     {
         var fs = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read,
             bufferSize: 64 * 1024, FileOptions.None);
         Span<byte> hdr = stackalloc byte[WalHeader.Size];
-        WalHeader.Write(hdr, namespaceId, firstCommitSeq);
+        WalHeader.Write(hdr, partitionId, firstCommitSeq);
         fs.Write(hdr);
         fs.Flush(flushToDisk: true);
-        return new WalWriter(fs, namespaceId, WalHeader.Size, firstCommitSeq);
+        return new WalWriter(fs, partitionId, WalHeader.Size, firstCommitSeq);
     }
 
     /// <summary>Open existing WAL for append after recovery (writeOffset = end of valid prefix).</summary>
-    public static WalWriter OpenForAppend(string path, ulong namespaceId, ulong writeOffset, ulong nextCommitSeq)
+    public static WalWriter OpenForAppend(string path, ulong partitionId, ulong writeOffset, ulong nextCommitSeq)
     {
         var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
             bufferSize: 64 * 1024, FileOptions.None);
         if (writeOffset < WalHeader.Size)
             throw new ArgumentException("writeOffset < header");
         fs.Seek((long)writeOffset, SeekOrigin.Begin);
-        return new WalWriter(fs, namespaceId, writeOffset, nextCommitSeq);
+        return new WalWriter(fs, partitionId, writeOffset, nextCommitSeq);
     }
 
     /// <summary>
