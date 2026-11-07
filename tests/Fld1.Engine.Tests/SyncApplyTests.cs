@@ -26,6 +26,19 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void RemoteFieldWrite_requires_nonzero_stable_change_id()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        Assert.Throws<ArgumentException>(() =>
+            new RemoteFieldWrite(recordId, 1, Array.Empty<byte>(), 1, 0,
+                Author(1), Change(0)));
+
+        Assert.Throws<ArgumentNullException>(() =>
+            new RemoteFieldWrite(recordId, 1, Array.Empty<byte>(), 1, 0,
+                Author(1), null!));
+    }
+
+    [Fact]
     public void ApplyRemote_wins_with_newer_hlc()
     {
         using var db = FldDatabase.Open(_dir);
