@@ -645,3 +645,25 @@ The exact physical representation (shared Storage transaction, independent stagi
 - repeated open/checkpoint/reopen cycles preserve the same pending winners and frozen ChangeIds/OutboxSeq values.
 
 **Implementation gate:** do not add `CommitPending` or alter the public commit semantics until the snapshot root, staging-log retention and freeze-to-Outbox replay protocol are implemented together. The current immediate `Commit()` path remains the compatibility baseline.
+
+
+### 7.23 Generic Storage core: first executable implementation slice (2026-11-07)
+
+The separate `Fld1.Storage.dll` project now contains a domain-neutral WAL and an initial byte-key/value engine. It has no project reference to `Fld1.Core`, `Fld1.Engine`, `Fld1.Wal`, BIN-SYNC or FLD Database.
+
+Implemented surface:
+- opaque non-zero WAL record kinds and arbitrary payloads; generic partition identity rather than FLD namespace identity;
+- atomic byte-key/value batches with deterministic key ordering and last-write coalescing inside one batch;
+- durable append+flush before publishing in-memory state;
+- optimistic batch conflict detection and read-your-writes;
+- immutable in-memory read snapshots and ordered prefix scans;
+- immutable on-disk snapshot generations rooted by an independently atomic manifest;
+- checkpoint order: flush/rotate WAL → write and flush snapshot → publish and flush manifest → truncate only fully covered sealed WAL segments;
+- missing or corrupt referenced snapshot/manifest fails closed;
+- recovery skips only WAL records already covered by the validated snapshot and requires the remaining CommitSeq chain to be contiguous.
+
+The Storage test project currently covers 12 cases: opaque WAL replay and rotation, durable batch recovery, repeated-key coalescing, delete recovery, partition isolation, stable snapshot/prefix paging, checkpoint/reopen, repeated checkpoint generations, and missing/corrupt snapshot failure.
+
+CI on FLD-DB commit `81e95fbd0e763ee5e6660ab09fa16cc8fe71ccce` passed: Storage 12/12 and the existing FLD test projects remained green. BIN-SYNC's pinned integration snapshot was compiled in its own workflow; its durable Data Provider conformance adapter passed 8/8 and the Storage-backed array synchronization sample returned PASS.
+
+**Not yet complete:** the new Storage engine is not yet the persistence backend of the existing FLD Database engine; current FLD Engine/WAL/Run/Manifest projects remain in place. The next FLD-side work is to harden Storage checkpoint/fault-injection coverage, define the production transaction/snapshot API boundary, and then migrate Database-owned persistence without introducing a third runtime DLL or breaking FLD1 format compatibility. The cross-repository Metadata Store adapter remains an open integration gate as recorded in BIN-SYNC `METADATA-STORAGE-ARCHITECTURE.md`.
