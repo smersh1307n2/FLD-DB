@@ -86,6 +86,17 @@ internal static class StorageSnapshotFile
         WriteDurable(tempManifest, manifest);
         File.Move(tempManifest, finalManifest, overwrite: true);
         TryFsyncDirectory(snapshots);
+
+        // The manifest is now the durable root for the new generation. StorageSnapshot
+        // instances are in-memory copies, so no reader pins the previous disk generation.
+        string prefix = $"p_{partitionId}.";
+        foreach (string stale in Directory.EnumerateFiles(snapshots, prefix + "*.snap"))
+        {
+            if (string.Equals(stale, finalSnapshot, StringComparison.Ordinal)) continue;
+            try { File.Delete(stale); }
+            catch { /* orphan cleanup is best-effort; the manifest remains authoritative */ }
+        }
+        TryFsyncDirectory(snapshots);
     }
 
     private static byte[] EncodeSnapshot(
