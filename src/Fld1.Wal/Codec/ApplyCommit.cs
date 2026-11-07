@@ -72,6 +72,7 @@ public static class ApplyCommitCodec
         WriteFields(ms, commit.Fields);
         if (commit.RelayOnly)
         {
+            EnsureUniqueChangeIds(commit.Fields);
             if (!SameFieldLists(commit.Fields, commit.RelayFields))
                 throw new ArgumentException("Relay-only APPLY_COMMIT must store exactly its relay fields.", nameof(commit));
         }
@@ -125,6 +126,7 @@ public static class ApplyCommitCodec
                 throw new InvalidDataException("Unknown APPLY_COMMIT flags.");
             relayOnly = (flags & 1) != 0;
             fields = ReadFields(payload, ref pos);
+            EnsureUniqueChangeIds(fields);
             if (relayOnly)
             {
                 relayFields = fields;
@@ -237,6 +239,14 @@ public static class ApplyCommitCodec
             field.OpKind is not (1 or 2) ||
             (field.OpKind == 2 && field.Value.Length != 0))
             throw new InvalidDataException("Invalid APPLY_COMMIT relay field.");
+    }
+
+    private static void EnsureUniqueChangeIds(List<WalFieldMutation> fields)
+    {
+        var seen = new HashSet<ChangeKey>();
+        foreach (var field in fields)
+            if (!seen.Add(ChangeKey.From(field.ChangeId)))
+                throw new InvalidDataException("Duplicate ChangeId in APPLY_COMMIT fields.");
     }
 
     private static bool SameFieldLists(
