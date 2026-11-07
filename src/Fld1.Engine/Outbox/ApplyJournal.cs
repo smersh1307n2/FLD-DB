@@ -25,8 +25,11 @@ internal sealed class ApplyJournal : IDisposable
     private static ReadOnlySpan<byte> Magic => "FLDA"u8;
 
     private readonly object _lock = new();
+    private readonly string _path;
+    private readonly string _relayAckPath;
     private readonly ushort _namespaceId;
-    private readonly FileStream _stream;
+    private FileStream _stream;
+    private readonly Dictionary<AuthorKey, ulong> _relayAckedThrough = new();
     private readonly List<IndexAnchor> _anchors = new();
     private readonly Dictionary<BatchKey, long> _batches = new();
     private ulong _recordCount;
@@ -68,11 +71,12 @@ internal sealed class ApplyJournal : IDisposable
 
     private ApplyJournal(string path, ushort namespaceId)
     {
+        _path = path;
+        _relayAckPath = path + ".relayack";
         _namespaceId = namespaceId;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         bool exists = File.Exists(path);
-        _stream = new FileStream(path, exists ? FileMode.Open : FileMode.CreateNew,
-            FileAccess.ReadWrite, FileShare.Read, 64 * 1024, FileOptions.RandomAccess);
+        _stream = OpenJournalStream(path);
         try
         {
             if (!exists)
@@ -84,6 +88,7 @@ internal sealed class ApplyJournal : IDisposable
             {
                 LoadAndRepairTail();
             }
+            LoadRelayAckFile();
         }
         catch
         {
@@ -358,6 +363,8 @@ internal sealed class ApplyJournal : IDisposable
                 {
                     WriteHeader(output);
                     long sourceOffset = HeaderSize;
+                    Span<byte> header = stackalloc byte[RecordHeaderSize];
+                    Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
                     while (sourceOffset < _writeOffset)
                     {
                         var (record, nextSourceOffset) = ReadRecordAtOffset(sourceOffset);
@@ -380,12 +387,11 @@ internal sealed class ApplyJournal : IDisposable
                             changed = true;
 
                         byte[] payload = ApplyCommitCodec.Encode(ToRelayOnly(commit, retainedRelayFields));
-                        Span<byte> header = stackalloc byte[RecordHeaderSize];
+                        header.Clear();
                         BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(0, 8), record.JournalSeq);
                         BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8, 8), record.CommitSeq);
                         BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(16, 4), checked((uint)payload.Length));
                         uint crc = Hashes.Crc32C(header, payload);
-                        Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
                         BinaryPrimitives.WriteUInt32LittleEndian(crcBytes, crc);
 
                         long recordOffset = newWriteOffset;
