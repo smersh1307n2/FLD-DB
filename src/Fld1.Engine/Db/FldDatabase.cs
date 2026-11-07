@@ -1136,7 +1136,7 @@ public sealed class FldDatabase : IDisposable
             }
 
             var fields = new List<WalFieldMutation>(batch.Writes.Count);
-            int appliedCount = 0;
+            var winners = new Dictionary<MemFieldKey, RemoteFieldWrite>(batch.Writes.Count);
             foreach (var write in batch.Writes)
             {
                 if (write.IsTombstone && write.Value.Length != 0)
@@ -1155,15 +1155,35 @@ public sealed class FldDatabase : IDisposable
                     Value = write.IsTombstone ? Array.Empty<byte>() : write.Value
                 });
 
-                if (!TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved)
-                    || !resolved.Found
-                    || FieldResolver.IsNewer(
-                        write.Wall, write.Logical, write.AuthorNodeId,
-                        resolved.Wall, resolved.Logical,
-                        resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
-                    appliedCount++;
+                var key = new MemFieldKey(write.RecordId, write.FieldId);
+                ulong currentWall;
+                uint currentLogical;
+                ReadOnlySpan<byte> currentAuthor;
+                if (winners.TryGetValue(key, out var staged))
+                {
+                    currentWall = staged.Wall;
+                    currentLogical = staged.Logical;
+                    currentAuthor = staged.AuthorNodeId;
+                }
+                else if (TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved) && resolved.Found)
+                {
+                    currentWall = resolved.Wall;
+                    currentLogical = resolved.Logical;
+                    currentAuthor = resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty;
+                }
+                else
+                {
+                    winners[key] = write;
+                    continue;
+                }
+
+                if (FieldResolver.IsNewer(
+                    write.Wall, write.Logical, write.AuthorNodeId,
+                    currentWall, currentLogical, currentAuthor))
+                    winners[key] = write;
             }
 
+            int appliedCount = winners.Count;
             var walCommit = new WalApplyCommit
             {
                 SenderPeer = batch.SenderPeer,
@@ -1193,18 +1213,10 @@ public sealed class FldDatabase : IDisposable
                     throw new InvalidDataException("Remote batch appeared in apply journal during serialized commit.");
                 _applyJournal.Flush();
 
-                foreach (var write in batch.Writes)
+                foreach (var pair in winners)
                 {
-                    var key = new MemFieldKey(write.RecordId, write.FieldId);
-                    if (TryResolveUnlocked(write.RecordId, write.FieldId, out var resolved)
-                        && resolved.Found
-                        && !FieldResolver.IsNewer(
-                            write.Wall, write.Logical, write.AuthorNodeId,
-                            resolved.Wall, resolved.Logical,
-                            resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty))
-                        continue;
-
-                    _overlay.Put(key, new MemFieldValue
+                    var write = pair.Value;
+                    _overlay.Put(pair.Key, new MemFieldValue
                     {
                         Value = write.IsTombstone ? Array.Empty<byte>() : write.Value,
                         Wall = write.Wall,
