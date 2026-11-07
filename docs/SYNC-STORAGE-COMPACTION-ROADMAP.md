@@ -123,8 +123,8 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 - Receipt metadata and relay payload still share one append-only journal record/file and therefore do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
 
 **2.3 Bounded indexes and seekable paging — partially implemented**
-- Implemented lower-bound binary search by JournalSeq in ReadBatches, so a page starts at the first entry after the cursor instead of rescanning the consumed prefix.
-- The in-memory List/Dictionary still retain every historical entry and remain unbounded/rebuildable-index work.
+- Implemented a sparse in-memory anchor every 256 JournalSeq records. ReadBatches binary-searches the anchors and scans at most one bounded stride before reading the requested page; it no longer retains a full IndexEntry List or rescans the entire consumed prefix.
+- The BatchKey→IndexEntry Dictionary and on-disk receipt history still grow with every batch; a disk-backed/rebuildable batch index and safe receipt GC remain open.
 - Before relay payload GC, persist source provenance mapping (author, JournalSeq, ChangeId → BIN-SYNC OutboxSeq) across restart. BIN-SYNC must compute per-author minimum safe ACK across all interested peers and pass a JournalSeq watermark; receipt expiry remains independent.
 
 **Exit:** payload single-encoding and relay-only promotion are implemented and tested; seek cost is now O(log N + page size), but independent receipt/relay retention, bounded indexes and crash-tested safe GC remain open.
