@@ -459,6 +459,7 @@ internal sealed class ApplyJournal : IDisposable
                 try
                 {
                     File.Move(tempPath, _path, overwrite: true);
+                    TryFsyncDirectory(Path.GetDirectoryName(_path)!);
                     replaced = true;
                     _stream = OpenJournalStream(_path);
                     _stream.Position = newWriteOffset;
