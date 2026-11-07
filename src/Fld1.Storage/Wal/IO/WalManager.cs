@@ -1,16 +1,16 @@
 using Fld1.Storage.Wal.Format;
 using Fld1.Storage.Wal.Recovery;
 
-namespace Fld1.Storage.Wal.IO;
+partition Fld1.Storage.Wal.IO;
 
 /// <summary>
-/// Multi-segment WAL for one namespace. Rotation: fsync active → new segment file.
-/// Segment names: ns_{namespaceId}.{seg}.log
+/// Multi-segment WAL for one partition. Rotation: fsync active → new segment file.
+/// Segment names: p_{partitionId}.{seg}.log
 /// </summary>
 public sealed class WalManager : IDisposable
 {
     private readonly string _walDir;
-    private readonly ulong _namespaceId;
+    private readonly ulong _partitionId;
     private readonly long _rotateAfterBytes;
     private readonly object _lock = new();
     private WalWriter _active;
@@ -18,7 +18,7 @@ public sealed class WalManager : IDisposable
     private bool _disposed;
     private bool _faulted;
 
-    public ulong NamespaceId => _namespaceId;
+    public ulong PartitionId => _partitionId;
     public int ActiveSegment => _activeSeg;
     public ulong NextCommitSeq
     {
@@ -29,17 +29,17 @@ public sealed class WalManager : IDisposable
         get { lock (_lock) return (long)_active.WriteOffset; }
     }
 
-    private WalManager(string walDir, ulong namespaceId, long rotateAfterBytes, WalWriter active, int activeSeg)
+    private WalManager(string walDir, ulong partitionId, long rotateAfterBytes, WalWriter active, int activeSeg)
     {
         _walDir = walDir;
-        _namespaceId = namespaceId;
+        _partitionId = partitionId;
         _rotateAfterBytes = rotateAfterBytes;
         _active = active;
         _activeSeg = activeSeg;
     }
 
-    public static string SegmentPath(string walDir, ulong namespaceId, int seg)
-        => Path.Combine(walDir, $"ns_{namespaceId}.{seg}.log");
+    public static string SegmentPath(string walDir, ulong partitionId, int seg)
+        => Path.Combine(walDir, $"p_{partitionId}.{seg}.log");
 
     /// <summary>
     /// Open or create WAL set. Recovers all segments in order; truncates torn tails.
@@ -47,24 +47,24 @@ public sealed class WalManager : IDisposable
     /// </summary>
     public static (WalManager manager, List<WalRecoveredRecord> records) Open(
         string walDir,
-        ulong namespaceId,
+        ulong partitionId,
         long rotateAfterBytes = 64L * 1024 * 1024)
     {
         Directory.CreateDirectory(walDir);
-        var segs = ListSegments(walDir, namespaceId);
+        var segs = ListSegments(walDir, partitionId);
         var allRecords = new List<WalRecoveredRecord>();
 
         if (segs.Count == 0)
         {
-            string path = SegmentPath(walDir, namespaceId, 0);
-            var w = WalWriter.Create(path, namespaceId, firstCommitSeq: 1);
-            return (new WalManager(walDir, namespaceId, rotateAfterBytes, w, 0), allRecords);
+            string path = SegmentPath(walDir, partitionId, 0);
+            var w = WalWriter.Create(path, partitionId, firstCommitSeq: 1);
+            return (new WalManager(walDir, partitionId, rotateAfterBytes, w, 0), allRecords);
         }
 
         ulong? expectedNextSeq = null;
         Span<byte> segmentHeader = stackalloc byte[WalHeader.Size];
         long lastValidEnd = WalHeader.Size;
-        string lastPath = SegmentPath(walDir, namespaceId, segs[^1]);
+        string lastPath = SegmentPath(walDir, partitionId, segs[^1]);
         int lastSeg = segs[^1];
 
         for (int index = 0; index < segs.Count; index++)
@@ -74,7 +74,7 @@ public sealed class WalManager : IDisposable
                 throw new InvalidDataException(
                     $"WAL segment gap: {segs[index - 1]} -> {segment}");
 
-            string path = SegmentPath(walDir, namespaceId, segment);
+            string path = SegmentPath(walDir, partitionId, segment);
             ulong firstCommitSeq;
             using (var headerStream = new FileStream(
                 path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -88,8 +88,8 @@ public sealed class WalManager : IDisposable
                     || !WalHeader.VerifyCrc(segmentHeader)
                     || WalHeader.ReadVersion(segmentHeader) != WalConstants.WalVersion)
                     throw new InvalidDataException($"WAL {path}: invalid header.");
-                if (WalHeader.ReadNamespaceId(segmentHeader) != namespaceId)
-                    throw new InvalidDataException($"WAL {path}: namespace mismatch.");
+                if (WalHeader.ReadPartitionId(segmentHeader) != partitionId)
+                    throw new InvalidDataException($"WAL {path}: partition mismatch.");
                 if (WalHeader.ReadFlags(segmentHeader) != 0)
                     throw new InvalidDataException($"WAL {path}: reserved flags are non-zero.");
 
@@ -131,17 +131,17 @@ public sealed class WalManager : IDisposable
         }
 
         ulong nextSeq = expectedNextSeq!.Value;
-        var writer = WalWriter.OpenForAppend(lastPath, namespaceId, (ulong)lastValidEnd, nextSeq);
-        return (new WalManager(walDir, namespaceId, rotateAfterBytes, writer, lastSeg), allRecords);
+        var writer = WalWriter.OpenForAppend(lastPath, partitionId, (ulong)lastValidEnd, nextSeq);
+        return (new WalManager(walDir, partitionId, rotateAfterBytes, writer, lastSeg), allRecords);
     }
 
-    private static List<int> ListSegments(string walDir, ulong namespaceId)
+    private static List<int> ListSegments(string walDir, ulong partitionId)
     {
-        string prefix = $"ns_{namespaceId}.";
+        string prefix = $"p_{partitionId}.";
         const string suffix = ".log";
         var list = new List<int>();
         if (!Directory.Exists(walDir)) return list;
-        foreach (var f in Directory.EnumerateFiles(walDir, $"ns_{namespaceId}.*.log"))
+        foreach (var f in Directory.EnumerateFiles(walDir, $"p_{partitionId}.*.log"))
         {
             var name = Path.GetFileName(f);
             if (!name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(suffix, StringComparison.Ordinal))
@@ -192,7 +192,7 @@ public sealed class WalManager : IDisposable
         _active.Flush();
 
         int newSegment = checked(_activeSeg + 1);
-        string finalPath = SegmentPath(_walDir, _namespaceId, newSegment);
+        string finalPath = SegmentPath(_walDir, _partitionId, newSegment);
         string tempPath = finalPath + ".tmp";
         if (File.Exists(finalPath))
             throw new IOException($"WAL segment already exists: {finalPath}");
@@ -203,7 +203,7 @@ public sealed class WalManager : IDisposable
         try
         {
             // New segment contents and header become durable before the segment is published.
-            using (WalWriter.Create(tempPath, _namespaceId, firstCommitSeq: nextSeq))
+            using (WalWriter.Create(tempPath, _partitionId, firstCommitSeq: nextSeq))
             {
             }
 
@@ -212,7 +212,7 @@ public sealed class WalManager : IDisposable
             TryFsyncDirectory(_walDir);
 
             var nextWriter = WalWriter.OpenForAppend(
-                finalPath, _namespaceId, WalHeader.Size, nextSeq);
+                finalPath, _partitionId, WalHeader.Size, nextSeq);
 
             WalWriter previous = _active;
             _active = nextWriter;
@@ -241,7 +241,7 @@ public sealed class WalManager : IDisposable
         lock (_lock)
         {
             EnsureUsable();
-            var segments = ListSegments(_walDir, _namespaceId);
+            var segments = ListSegments(_walDir, _partitionId);
             int removed = 0;
             Span<byte> segmentHeader = stackalloc byte[WalHeader.Size];
 
@@ -252,7 +252,7 @@ public sealed class WalManager : IDisposable
                 if (segment >= _activeSeg)
                     break;
 
-                string path = SegmentPath(_walDir, _namespaceId, segment);
+                string path = SegmentPath(_walDir, _partitionId, segment);
                 WalRecoveryResult recovered = WalRecovery.Recover(path);
                 if (recovered.Status is not (WalRecoveryStatus.Ok or WalRecoveryStatus.TruncatedTorn))
                     break;
