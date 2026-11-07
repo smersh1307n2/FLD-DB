@@ -196,6 +196,14 @@ public class SyncApplyTests : IDisposable
         var restoredPage = reopened.ReadRelayBatches(Author(9), afterJournalSeq: 257, limit: 10);
         Assert.Equal(new ulong[] { 258, 259, 260 },
             restoredPage.Select(item => item.JournalSeq));
+
+        var firstPage = reopened.ReadRelayBatchPage(Author(9), afterJournalSeq: 0, limit: 1);
+        Assert.Single(firstPage.Batches);
+        Assert.Equal(1UL, firstPage.ScannedThroughJournalSeq);
+
+        var noMatches = reopened.ReadRelayBatchPage(Author(10), afterJournalSeq: 0, limit: 10);
+        Assert.Empty(noMatches.Batches);
+        Assert.Equal(260UL, noMatches.ScannedThroughJournalSeq);
     }
 
     [Fact]
