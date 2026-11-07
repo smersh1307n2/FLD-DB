@@ -262,6 +262,14 @@ internal sealed class ApplyJournal : IDisposable
         get { lock (_lock) { EnsureUsable(); return _nextSeq - 1; } }
     }
 
+    internal bool MatchesReceiptMetadata(WalApplyCommit existing, WalApplyCommit replay)
+    {
+        var emptyRelay = new List<WalFieldMutation>();
+        byte[] existingMetadata = ApplyCommitCodec.Encode(ToRelayOnly(existing, emptyRelay));
+        byte[] replayMetadata = ApplyCommitCodec.Encode(ToRelayOnly(replay, emptyRelay));
+        return existingMetadata.AsSpan().SequenceEqual(replayMetadata);
+    }
+
     public bool TryFindBatch(
         ReadOnlySpan<byte> issuerNodeId, uint issuerEpoch, ushort namespaceId,
         ReadOnlySpan<byte> batchId, out ApplyJournalRecord? record)
