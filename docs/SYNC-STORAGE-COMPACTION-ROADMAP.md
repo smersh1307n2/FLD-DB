@@ -180,10 +180,10 @@ Only after Phases 2–4 and only if the Phase 5 retention contract is clear. Whi
 | Priority | Work |
 |---|---|
 | P0 | Baseline measurements and invariants |
-| P1 | Global ChangeId dedup and ACK-covered replay-cache pruning — implemented; receipt-path audit remains open |
-| P2 | Inbox/InboxAuthors receipt consolidation, APPLY payload dedup, receipt/relay split, bounded paging |
+| P1 | Global ChangeId dedup, ACK-covered replay-cache pruning, unified InboxReceipt v8 and compact PeerState v9 — implemented; receipt expiry/GC remains open |
+| P2 | APPLY payload single-encoding, receipt/relay split, bounded paging and safe receipt GC |
 | P3 | Durable pre-publication PendingLocal coalescing |
-| P4 | Versioned compact peer-state and FLD Outbox encodings |
+| P4 | Versioned compact FLD Outbox encoding and measured peer-state footprint |
 | P5 | Safe GC and snapshot/new-peer contract |
 | P6 | Optional WAL-backed Outbox |
 
@@ -280,3 +280,11 @@ Duplicate BatchId replay compares the stored header fingerprint and returns ACK 
 New receipts currently set `expiresAt=0` (no expiry scheduled). No receipt GC or WAL-generation/materialization field is implemented; these require a safe log-segment/peer-confirmation horizon. This v8 receipt adds metadata to the old key-to-author map, so do not claim a net serialized-byte saving versus v6 solely from key consolidation; cursor/timestamp varints reduce the added cost. The key-set duplication and in-memory second collection are removed.
 
 The spec §10.2 and §10.2.2 now describe this receipt contract. No wire-format change. GitHub Actions run [42345734949](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42345734949) passed the v8 header-commitment code; a follow-up CI run is required for the final cursorEnd-varint encoding refinement.
+
+### 7.7 Compact peer progress and received-stream keys (2026-11-07)
+
+BIN-SYNC now stores ACK, pushed and offset watermarks in one `PeerAuthorProgress` value per author instead of three dictionaries repeating the same author key. Presence flags preserve the distinction between an absent watermark and a real zero. `ReceivedStreams` drops its repeated namespace component because its owning `PeerState` is already keyed by (peer, namespace); the key is now (senderPeer, issuerEpoch, author).
+
+NodePersistence was bumped from v8 to v9. v3-v8 files remain readable: the legacy receive-stream namespace is checked against its owning PeerState and the three old watermark maps are migrated into the combined per-author entry. v9 persists one author key, flags and only the present watermark values. The reader validates flags, nonnegative values, ACK≤pushed and offset arithmetic. This is an internal persistence/in-memory change; no wire format change.
+
+The structural reduction is deterministic but its byte impact depends on sparsity and dictionary overhead. Do not state a fixed percentage until measured against representative peer/author cardinalities. CI run [42346869314](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42346869314) passed both .NET 10 tests/public samples/coverage and fuzz/lab hardening at BIN-SYNC commit `8cf01094ac196ece91e6a7cead60634811bf4704`.
