@@ -197,12 +197,19 @@ internal sealed class ApplyJournal : IDisposable
             EnsureUsable();
             if (limit <= 0) return Array.Empty<ApplyJournalRecord>();
             var result = new List<ApplyJournalRecord>(Math.Min(limit, 256));
-            foreach (var entry in _entries)
+            int low = 0;
+            int high = _entries.Count;
+            while (low < high)
             {
-                if (entry.JournalSeq <= afterJournalSeq) continue;
-                result.Add(ReadRecord(entry));
-                if (result.Count == limit) break;
+                int middle = low + ((high - low) >> 1);
+                if (_entries[middle].JournalSeq <= afterJournalSeq)
+                    low = middle + 1;
+                else
+                    high = middle;
             }
+
+            for (int i = low; i < _entries.Count && result.Count < limit; i++)
+                result.Add(ReadRecord(_entries[i]));
             return result;
         }
     }
