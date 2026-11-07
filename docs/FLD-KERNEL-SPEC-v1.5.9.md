@@ -311,13 +311,14 @@ FLD-DB implements the durable field-store side of BIN-SYNC CORE v2.4.17 FINAL. I
 - Exact self-echo and already-seen ChangeId are no-ops for storage/relay. A duplicate batch still receives the original durable receipt/ACK identity.
 - Local mutations receive one ChangeId at creation and retain it through WAL, Outbox, compaction, recovery, and relay.
 
-### 4.4. Outbox and author streams
-- Outbox sequence is monotonic per (durable authorNodeId, namespaceId). A FLD database instance has one configured LocalAuthor; its local OutboxSeq is the sequence for that local author and namespace.
+### 4.4. Local Outbox, relay journal, and author streams
+- FLD local Outbox contains only operations authored by LocalAuthor. Its OutboxSeq is monotonic within the namespace and maps directly to the BIN-SYNC stream (LocalAuthor, namespaceId).
+- FLD does not assign sequence numbers to remote relay operations. RelayJournal stores immutable original mutation data and provenance; BIN-SYNC owns relay policy and assigns/restores per-author relay sequence.
 - FLD OutboxSeq is an immutable local durable cursor. BIN-SYNC peer-relative StreamOffset/wire cursor mapping belongs to BIN-SYNC PeerState and MUST NOT renumber or mutate FLD Outbox entries.
-- WAL CommitSeq, OutboxSeq, HLC wall, and peer wire cursor are distinct domains and MUST NOT be substituted for one another.
+- WAL CommitSeq, local OutboxSeq, HLC wall, relay sequence, and peer wire cursor are distinct domains and MUST NOT be substituted for one another.
 - FLD does not aggregate author streams into a namespace-wide scalar cursor. StateRootDigest excludes Outbox cursor and all ACK/peer progress.
-- SafeOutboxSeq is a local retention boundary computed from BIN-SYNC's interested-peer ACK state. Missing peer state is not an ACK and MUST hold the relevant prefix. Acknowledgement/compaction MUST be fenced against stale consumers.
-- Compaction may remove only entries at or below the proven safe local cursor; it MUST preserve sequence continuity and all ChangeId/provenance fields of retained entries.
+- Safe local-Outbox and relay-retention boundaries are computed by BIN-SYNC from interested-peer ACK state and supplied to FLD. Missing peer state is not an ACK and MUST hold the relevant prefix. Acknowledgement/compaction MUST be fenced against stale consumers.
+- Compaction may remove only entries at or below the proven safe boundary; it MUST preserve local Outbox sequence continuity and all ChangeId/provenance fields of retained Outbox and relay entries.
 
 ### 4.5. Inbox, batch atomicity, and durable receipt
 - Inbox idempotency key is (issuerNodeId, namespaceId, issuerEpoch, batchId). The durable receipt also preserves the author stream identity needed to replay the correct ACK after reconnect/restart.
@@ -416,14 +417,15 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 ### 11.3. Durable change identity
 - ChangeId is mandatory, nonzero, exactly 16 bytes, and immutable from local creation through relay.
 - Remote input with absent/invalid ChangeId is rejected. FLD MUST NOT synthesize a new ChangeId.
-- FLD durably deduplicates ChangeId and commits relay eligibility atomically with APPLY. BIN-SYNC alone owns Inbox receipts, receive cursors, batch digest-chain state, and ACK state. Integration order: FLD durable APPLY succeeds first; BIN-SYNC then persists Inbox/cursor state and may ACK. If a crash occurs between these steps, redelivery is safe because FLD ChangeId dedup makes APPLY idempotent.
+- BIN-SYNC owns the semantics of Inbox, receive cursors, digest-chain state, SeenChanges, and relay policy. It prepares an opaque ProtocolStateDelta for the storage transaction; FLD stores that extension without interpreting it. FLD atomically commits field winners, ChangeId/provenance state, relay journal entries, and ProtocolStateDelta before returning a durable receipt. A duplicate batch returns its original durable receipt; BIN-SYNC remains responsible for interpreting it and producing the protocol ACK.
 - LWW loser retention is separate from field winner publication: provenance-valid new operations remain relay-eligible even when they do not replace the current field winner, except exact self-echo/already-seen operations.
 
 ### 11.4. Local and remote commit kinds
-- LOCAL commit creates local author Outbox entries.
-- APPLY commit stores remote field state and relay provenance but MUST NOT reclassify remote mutations as locally-authored writes.
+- LOCAL commit creates local author Outbox entries only.
+- APPLY commit stores remote field winners, ChangeId/provenance state, relay-eligible operations, and the opaque BIN-SYNC ProtocolStateDelta in one atomic durable transaction. It MUST NOT reclassify remote mutations as locally-authored writes.
 - Snapshot installation uses APPLY semantics and never generates local Outbox entries.
-- FLD ChangeId-seen/provenance state and relay-eligible operations commit atomically with APPLY. BIN-SYNC persists its Inbox receipt, receive cursor, and digest-chain checkpoint only after FLD reports durable success; ACK follows that persistence.
+- BIN-SYNC constructs and interprets ProtocolStateDelta (including Inbox/receive cursor/digest-chain/SeenChanges changes); FLD persists the bytes atomically with field state and relay journal, without interpreting protocol semantics.
+- Successful ApplyRemoteBatch return means the complete transaction is durable and may be used by BIN-SYNC to complete receive processing and ACK. On failure, none of the transaction's state may be partially published.
 
 ### 11.5. Digest compatibility
 - BIN-SYNC uses `BIN-SYNC/RECORD/v2` and `BIN-SYNC/STATE/v2` domains. StateRoot is derived only from replicated namespace state.
