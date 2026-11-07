@@ -153,7 +153,7 @@ public sealed class FldDatabase : IDisposable
             // Open must not leak file handles when Manifest/Run/Outbox recovery fails.
             try { applyJournal?.Dispose(); } catch { /* preserve original open error */ }
             try { outbox?.Dispose(); } catch { /* preserve original open error */ }
-            try { wal.Dispose(); catch { /* preserve original open error */ }
+            try { wal.Dispose(); } catch { /* preserve original open error */ }
             throw;
         }
     }
