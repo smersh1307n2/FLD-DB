@@ -1,7 +1,7 @@
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
 **Date:** 2026-11-07  
-**Status:** agreed target architecture; BIN-SYNC P1 global dedup and replay-cache pruning are implemented without a wire-format change; receipt consolidation and APPLY payload compaction remain next.  
+**Status:** agreed target architecture; BIN-SYNC metadata P1 and FLD remote APPLY P2 implementation slices are complete on their working branches without a DELTA_BATCH wire-format change. Remaining: durable PendingLocal coalescing, FLD Outbox physical encoding/benchmarks, and protocol-safe receipt/dedup/tombstone reclamation.  
 **Primary audit:** [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).  
 **Companion documents:** [FLD Storage Core](FLD-STORAGE-CORE-ARCHITECTURE.md), [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).
 
@@ -88,7 +88,7 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 
 **Exit:** reproducible baseline; every counted byte has an owner and retention rule; estimates are not presented as measurements.
 
-### Phase 1 — BIN-SYNC correctness and metadata lifecycle
+### Phase 1 — BIN-SYNC correctness and metadata lifecycle — implementation complete, GC open
 
 **1.1 Global cross-peer ChangeId dedup**
 - Add a replica/scope/namespace-scoped ChangeId ledger with canonical operation fingerprint.
@@ -106,9 +106,19 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 - Remove overlapping facts only after duplicate replay and ACK tests prove equivalence.
 - Receipt lifetime remains independent from dedup and relay payload lifetimes.
 
-**Exit:** route-independent dedup; conflicting ID rejected; duplicate BatchId after restart returns same valid ACK; acknowledged replay entries pruned safely; receipt is not used as global dedup.
+Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
+- Route-independent BLAKE3-128 ChangeId fingerprint ledger; alternate-route duplicates suppressed and same-ID equivocation rejected before WAL/state publication.
+- Local WAL replay markers remain a separate lifetime; remote peer-scoped SeenChanges rows removed.
+- ACK-covered replay mappings pruned only after validated contiguous author ACK; digest-chain checkpoint preserved.
+- Inbox + InboxAuthors consolidated into one receipt map; v8 header commitment preserves duplicate ACK/cursor semantics.
+- PeerAuthorProgress combines ACK/pushed/offset watermarks; ReceivedStreams key omits only the redundant namespace component.
+- NodePersistence v10 groups receipt and global-ledger scope keys; v11 removes repeated local NodeId from WAL replay marker keys. v3-v10 snapshots remain readable.
+- Resource caps cover global dedup, Inbox receipts, local WAL markers, Outbox and records; caps are opt-in through NodeOptions.Limits.
+- Tombstone age-only deletion is disabled fail-closed until a durable safe watermark/full-resync gate exists.
 
-### Phase 2 — FLD remote APPLY payload amplification
+**Remaining Phase 1 gate:** receipt and ChangeId-ledger GC horizons are not yet proven. No TTL or destructive eviction is enabled. This is a retention-protocol gate, not a reason to weaken the implemented dedup/receipt semantics.
+
+### Phase 2 — FLD remote APPLY payload amplification — core implementation complete, retention/index GC open
 
 **2.1 Single APPLY payload — implemented**
 - APPLY_COMMIT body v3 stores every incoming operation once and represents relay selection as canonical varint indexes into Fields.
@@ -128,7 +138,16 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 - `ReadRelayBatchPage` now returns `ScannedThroughJournalSeq`, including ranges with no matching author operations. The adapter must persist this scan cursor atomically with all returned relay operations; it is not a safe ACK watermark.
 - Before relay payload GC, persist source provenance mapping (author, JournalSeq, ChangeId → BIN-SYNC OutboxSeq) across restart. BIN-SYNC must compute per-author minimum safe ACK across all interested peers and pass a JournalSeq watermark; receipt expiry remains independent.
 
-**Exit:** payload single-encoding and relay-only promotion are implemented and tested; seek cost is now O(log N + page size), but independent receipt/relay retention, bounded indexes and crash-tested safe GC remain open.
+**Implemented on `smersh1307n2/FLD-DB` `fix/crash-consistency-outbox`:**
+- APPLY_COMMIT v3 encodes the incoming operation array once; relay selection uses canonical indexes; v2 remains readable.
+- ApplyJournal stores metadata receipt plus only relay-selected operations in a relay-only form, flushed after WAL and before ApplyRemoteBatch returns.
+- Promotion is idempotent; WAL recovery rebuilds the relay journal; LWW-losing relay-eligible operations are preserved.
+- ReadBatches uses sparse JournalSeq anchors (stride 256) and bounded scan; full IndexEntry List removed.
+- BatchKey index values are 64-bit offsets, not duplicated BatchKey+IndexEntry structs.
+- ReadRelayBatchPage reports ScannedThroughJournalSeq across nonmatching author ranges. Adapter must persist this scan cursor atomically with relay operations; it is not an ACK watermark.
+- A per-author relay ACK sidecar records safe-through JournalSeq, but does not physically reclaim journal bytes.
+
+**Remaining Phase 2 gate:** ApplyJournal receipt and relay payload still share one append-only file and have no physical compaction/truncation. The BatchKey offset dictionary remains one in-memory entry per receipt; disk-backed/rebuildable bounded indexing and safe independent receipt/relay GC remain open.
 
 
 ### Phase 3 — Durable local PendingLocal coalescing
@@ -183,11 +202,11 @@ Only after Phases 2–4 and only if the Phase 5 retention contract is clear. Whi
 | Priority | Work |
 |---|---|
 | P0 | Baseline measurements and invariants |
-| P1 | Global ChangeId dedup, ACK-covered replay-cache pruning, unified InboxReceipt v8 and compact PeerState v9 — implemented; receipt expiry/GC remains open |
-| P2 | APPLY payload single-encoding, receipt/relay split, bounded paging and safe receipt GC |
-| P3 | Durable pre-publication PendingLocal coalescing |
-| P4 | Versioned compact FLD Outbox encoding and measured peer-state footprint |
-| P5 | Safe GC and snapshot/new-peer contract |
+| P1 | BIN-SYNC global ChangeId dedup, ACK replay pruning, unified InboxReceipt, compact PeerState v9, grouped persistence v10, compact local markers v11 and admission caps — implemented; receipt/dedup GC remains open |
+| P2 | FLD APPLY v3 single-encoding, relay-only journal, sparse paging, offset-only batch index and explicit scan cursor — implemented; physical compaction/independent GC remain open |
+| P3 | Durable pre-publication PendingLocal coalescing — next implementation phase |
+| P4 | Versioned compact FLD Outbox encoding and measured storage/RAM footprint |
+| P5 | Safe receipt/dedup/tombstone GC and snapshot/new-peer contract |
 | P6 | Optional WAL-backed Outbox |
 
 Design the GC contract early, but do not ship destructive cleanup until its proof exists.
