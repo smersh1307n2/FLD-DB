@@ -38,6 +38,7 @@ internal sealed class ApplyJournal : IDisposable
     private ulong _nextSeq = 1;
     private bool _disposed;
     private bool _faulted;
+    private bool _relayCompactionPending;
 
     private readonly record struct IndexAnchor(ulong JournalSeq, long Offset);
     private readonly record struct AuthorKey(ulong Low, ulong High)
@@ -167,6 +168,7 @@ internal sealed class ApplyJournal : IDisposable
                 else _relayAckedThrough.Remove(key);
                 throw;
             }
+            _relayCompactionPending = true;
         }
     }
 
@@ -201,6 +203,8 @@ internal sealed class ApplyJournal : IDisposable
                 throw new InvalidDataException("Invalid or duplicate ApplyJournal relay-ACK entry.");
             offset += RelayAckRecordSize;
         }
+        if (_relayAckedThrough.Count != 0)
+            _relayCompactionPending = true;
     }
 
     private void PersistRelayAckFile()
@@ -386,7 +390,7 @@ internal sealed class ApplyJournal : IDisposable
         lock (_lock)
         {
             EnsureUsable();
-            if (sealedThroughCommitSeq == 0 || _recordCount == 0) return 0;
+            if (!_relayCompactionPending || sealedThroughCommitSeq == 0 || _recordCount == 0) return 0;
 
             string tempPath = _path + ".compact.tmp";
             var newAnchors = new List<IndexAnchor>(_anchors.Count);
@@ -395,6 +399,7 @@ internal sealed class ApplyJournal : IDisposable
             ulong count = 0;
             int removedFields = 0;
             bool changed = false;
+            bool hasUnsealedAcknowledgedFields = false;
 
             try
             {
@@ -420,7 +425,14 @@ internal sealed class ApplyJournal : IDisposable
                                                record.JournalSeq <= safeThrough;
                             }
                             if (acknowledged) removedFields++;
-                            else retainedRelayFields.Add(field);
+                            else
+                            {
+                                retainedRelayFields.Add(field);
+                                if (record.CommitSeq > sealedThroughCommitSeq &&
+                                    _relayAckedThrough.TryGetValue(AuthorKey.From(field.AuthorNodeId), out ulong pendingSafeThrough) &&
+                                    record.JournalSeq <= pendingSafeThrough)
+                                    hasUnsealedAcknowledgedFields = true;
+                            }
                         }
 
                         if (!commit.RelayOnly || retainedRelayFields.Count != commit.RelayFields.Count)
@@ -451,7 +463,10 @@ internal sealed class ApplyJournal : IDisposable
                 }
 
                 if (!changed)
+                {
+                    _relayCompactionPending = hasUnsealedAcknowledgedFields;
                     return 0;
+                }
 
                 bool replaced = false;
                 long oldWriteOffset = _writeOffset;
@@ -489,6 +504,7 @@ internal sealed class ApplyJournal : IDisposable
                 foreach (var item in newBatches) _batches.Add(item.Key, item.Value);
                 _writeOffset = newWriteOffset;
                 _recordCount = count;
+                _relayCompactionPending = hasUnsealedAcknowledgedFields;
                 return removedFields;
             }
             catch
@@ -656,6 +672,8 @@ internal sealed class ApplyJournal : IDisposable
             var key = BatchKey.From(commit);
             if (!_batches.TryAdd(key, position))
                 throw new InvalidDataException("Duplicate remote batch identity in apply journal.");
+            if (!commit.RelayOnly)
+                _relayCompactionPending = true;
             if (((seq - 1) % SparseIndexStride) == 0)
                 _anchors.Add(new IndexAnchor(seq, position));
             _recordCount++;
