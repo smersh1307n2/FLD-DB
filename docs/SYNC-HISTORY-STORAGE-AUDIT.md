@@ -39,10 +39,18 @@ These are distinct logical facts. They may share a physical log or transaction, 
 
 ## 2. Audited baselines
 
-- FLD-DB branch: fix/crash-consistency-outbox, HEAD b488dafcfda81d6383717ceaf05a3717a3959923.
-- FLD-DB implementation baseline: 196628a49d6034559a7041237af7feec36fd9b20; the 17 commits between it and the current HEAD modify documentation only.
-- BIN-SYNC branch: feature/fld-external-storage, HEAD dd2dd969d70b6fd46371679903855a69ae9399c3.
+- FLD-DB audited code ref: branch fix/crash-consistency-outbox at b488dafcfda81d6383717ceaf05a3717a3959923. The implementation baseline is 196628a49d6034559a7041237af7feec36fd9b20; the 17 commits between those refs are documentation-only.
+- FLD-DB final documentation HEAD after this audit: 7724f996aaadf4e92021e4043c12646cd3e9eaff. The three commits added this audit and links from the Storage Core architecture and kernel specification; no source code changed.
+- BIN-SYNC audited code ref: branch feature/fld-external-storage at dd2dd969d70b6fd46371679903855a69ae9399c3.
+- BIN-SYNC final documentation HEAD after this audit: d868f47953f1d3ef94d590169694e0cb66342e78. Three documentation files were updated; no source code or wire specification changed.
 - Audited BIN-SYNC files include Node.DeltaBatch.cs, Node.ApplyBatch.cs, Node.LocalWrites.cs, NodePersistence.cs, Node.BatchCodec.cs, Wal.cs, METADATA-STORAGE-ARCHITECTURE.md and CHANGE-STAGING-AND-RETENTION.md.
+
+Updated companion documents:
+- [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md)
+- [BIN-SYNC Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md)
+- [BIN-SYNC FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md)
+- [FLD-DB Kernel Specification](https://github.com/smersh1307n2/FLD-DB/blob/fix/crash-consistency-outbox/docs/FLD-KERNEL-SPEC-v1.5.9.md)
+- [FLD Storage Core Architecture](https://github.com/smersh1307n2/FLD-DB/blob/fix/crash-consistency-outbox/docs/FLD-STORAGE-CORE-ARCHITECTURE.md)
 
 This was a source/document audit. No code was changed and no tests or benchmarks were run. Any size estimate below is logical format accounting, not a benchmark.
 
