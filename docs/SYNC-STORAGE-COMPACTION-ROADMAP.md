@@ -64,10 +64,22 @@ A local LWW operation may be replaced only while no sender could have exposed it
 
 Existing in-memory dirty-set coalescing before one Commit remains valid. Durable coalescing across multiple commits is separate work; never rewrite a frozen Outbox tail.
 
+### 2.6 Two-DLL database architecture (binding constraint)
+
+The FLD database runtime is deliberately split into **exactly two runtime DLLs**. This is an architectural constraint for the storage work, not an optional packaging optimization:
+
+1. **`Fld1.Storage.dll`** — standalone, domain-neutral byte-oriented embedded storage engine: WAL, atomic byte batches, recovery, pages/runs, manifest, snapshots, checkpoints, ordered scans and low-level reclamation. It must not know FLD records/fields, HLC/LWW, tombstones, ChangeId, Outbox, ApplyJournal or BIN-SYNC protocol types.
+2. **`Fld1.Database.dll`** — FLD database layer built on Storage: `FldDatabase`, records/fields, HLC/LWW, tombstones, field codecs, indexes/projections and FLD-specific Outbox/APPLY integration. BIN-SYNC integration is performed at this semantic layer or through its adapter boundary; protocol semantics must not leak into Storage.
+
+Dependency direction is strictly one-way: **`Fld1.Database.dll → Fld1.Storage.dll`**. Storage has no dependency on Database. Do not introduce a third Common/Shared runtime DLL. Consolidate existing modules into these two distributable assemblies; classify each type by ownership rather than moving whole assemblies blindly. In particular, an existing FLD-aware Run implementation must not be moved wholesale into Storage: generic byte-KV/run primitives belong in Storage, while field-aware encoding/projection belongs in Database.
+
+Both DLLs are separately buildable artifacts. They may be delivered together in one convenient package, but a Storage-only consumer must not acquire Database as a transitive runtime dependency. This split is independent of the logical metadata lifecycle described above and must remain true during all compaction phases.
+
 ## 3. Implementation roadmap
 
 ### Phase 0 — Contracts and baseline measurements
 
+- Preserve the two-DLL boundary while inventorying current modules and assigning every type to Storage or Database; do not create a third Common/Shared runtime assembly.
 - Count disk and RAM separately: WAL, local Outbox, APPLY WAL, ApplyJournal, relay payload, receipts, dedup indexes, PeerState, replay cache, current-state runs and sidecars.
 - Establish a reproducible workload: 1,000 records × 20 fields, 10 peers, 100,000 changes.
 - Include repeated local writes before publication and across commits, remote batches, multi-hop relay, LWW winners/losers, tombstones, lost ACK/retry, peer lag/removal.
@@ -128,6 +140,11 @@ Existing in-memory dirty-set coalescing before one Commit remains valid. Durable
 **Exit:** multiple commits to one field before publication produce one pending operation; crash before/during freeze yields complete pending or complete frozen state, never loss/duplication; remote winner does not erase eligible pending local operation; published operations are never rewritten.
 
 ### Phase 4 — Versioned compact physical encodings
+
+**DLL boundary gate**
+- Keep exactly two FLD runtime DLLs: Fld1.Storage and Fld1.Database.
+- Keep dependency one-way from Database to Storage; Storage public APIs remain byte-oriented and BCL-only.
+- Consolidate existing modules by type ownership; do not move field-aware RunBuilder/RunReader wholesale into Storage and do not introduce a third Common DLL.
 
 **BIN-SYNC**
 - Encode StreamAcked, StreamPushed and StreamOffsets as one per-author tuple with presence flags instead of three maps repeating author IDs.
@@ -192,7 +209,7 @@ Design the GC contract early, but do not ship destructive cleanup until its proo
 - BIN-SYNC Metadata Storage Architecture owns protocol metadata, atomic transitions and Metadata Store responsibilities.
 - Change Staging and Retention owns pending/frozen/relay lifecycle and coalescing.
 - FLD-DB Integration Contract owns cross-layer transaction/receipt/relay boundaries.
-- FLD Storage Core Architecture owns the neutral physical engine and two-DLL dependency boundary.
+- FLD Storage Core Architecture owns the neutral physical engine and the binding two-DLL dependency boundary: Fld1.Storage plus Fld1.Database, with one-way Database → Storage dependency.
 - FLD Kernel Specification remains normative for current format/protocol compatibility; this roadmap does not amend its wire contract.
 
 ## 7. Change discipline
