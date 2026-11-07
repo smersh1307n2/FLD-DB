@@ -241,7 +241,11 @@ public class SyncApplyTests : IDisposable
             Assert.Empty(reopened.ReadRelayBatches(authorA, 0, 10));
             Assert.Single(reopened.ReadRelayBatches(authorB, 0, 10));
 
+            long journalBeforeCompact = new FileInfo(Path.Combine(_dir, "outbox", "ns_0.apply")).Length;
             reopened.Checkpoint();
+            long journalAfterCompact = new FileInfo(Path.Combine(_dir, "outbox", "ns_0.apply")).Length;
+            Assert.True(journalAfterCompact < journalBeforeCompact,
+                $"Acknowledged relay payload should be reclaimed after WAL seal (before={journalBeforeCompact}, after={journalAfterCompact}).");
             var duplicate = reopened.ApplyRemoteBatch(batch);
             Assert.True(duplicate.IsDuplicate);
         }
