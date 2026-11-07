@@ -6,7 +6,7 @@ Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.m
 
 | Layer | Version |
 |-------|---------|
-| FLD format / kernel | v1.5.9-DRAFT (+compat-2.6.5) |
+| FLD format / kernel | v1.5.9-DRAFT (+compat-BinSync.Core-3.0.0) |
 | BIN-SYNC **protocol** | CORE v2.4.17 FINAL |
 | `BinSync.Core` **package** | 3.0.0 |
 
