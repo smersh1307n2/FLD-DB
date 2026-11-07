@@ -159,9 +159,9 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 **Remaining Phase 2 gate:** relay payload reclamation is implemented per author, but receipt retention remains unbounded and shares the journal's physical record envelope. The BatchKey→offset dictionary still has one in-memory entry per receipt; disk-backed/rebuildable bounded indexing and independent receipt GC remain open. Full-file rewrite cost must be benchmarked at large journal sizes.
 
 
-### Phase 3 — Durable local PendingLocal coalescing
+### Phase 3 — Durable local PendingLocal coalescing (design gate; implementation deferred)
 
-- Add durable staging keyed by canonical scope/namespace/record/field.
+- Add durable staging keyed by canonical scope/namespace/record/field after the neutral Data Provider/Metadata Store boundaries and Storage transaction API are defined.
 - Coalesce only local LWW operations never exposed to a sender.
 - Use canonical LWW comparison, not arrival/lock order.
 - Keep pending payload independent of current visible winner because remote APPLY may win before freeze.
@@ -170,7 +170,7 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 
 **Exit:** multiple commits to one field before publication produce one pending operation; crash before/during freeze yields complete pending or complete frozen state, never loss/duplication; remote winner does not erase eligible pending local operation; published operations are never rewritten.
 
-### Phase 4 — Versioned compact physical encodings
+### Phase 4 — Versioned compact physical encodings and two-DLL Storage extraction
 
 **DLL boundary gate**
 - Keep exactly two FLD runtime DLLs: Fld1.Storage and Fld1.Database.
@@ -210,13 +210,14 @@ Only after Phases 2–4 and only if the Phase 5 retention contract is clear. Whi
 
 | Priority | Work |
 |---|---|
-| P0 | Baseline measurements and invariants |
-| P1 | BIN-SYNC global ChangeId dedup, ACK replay pruning, unified InboxReceipt, compact PeerState v9, grouped persistence v10, compact local markers v11 and admission caps — implemented; receipt/dedup GC remains open |
-| P2 | FLD APPLY v3 single-encoding, relay-only journal, sparse paging, offset-only batch index and explicit scan cursor — implemented; physical compaction/independent GC remain open |
-| P3 | Durable pre-publication PendingLocal coalescing — design contract recorded; implementation next |
-| P4 | Versioned compact FLD Outbox encoding and measured storage/RAM footprint |
-| P5 | Safe receipt/dedup/tombstone GC and snapshot/new-peer contract |
-| P6 | Optional WAL-backed Outbox |
+| P0 | Revalidate all normative/design/audit documents and establish reproducible disk/RAM/CPU baseline; documentation reconciliation is complete, quantitative workload baseline remains open |
+| P1 | BIN-SYNC global ChangeId dedup, ACK replay pruning, unified InboxReceipt, compact peer progress, grouped persistence v10–v12, compact local WAL markers and admission caps — implemented; receipt/dedup GC remains open |
+| P2 | FLD APPLY v3 single-encoding, relay-only journal, sparse paging, offset-only batch index, explicit scan cursor, per-author ACK sidecar and post-WAL-seal relay payload compaction — implemented; receipt GC/index bounds and cross-system provenance adapter remain open |
+| P3 | Provider-independent Metadata Store contract/conformance — 20 semantic tests plus durability-profile assertion pass in the volatile reference model; no durable store/restart guarantee yet |
+| P4 | Finalize PendingLocal lifecycle and its dedicated crash/relay conformance; define neutral Data Provider contract and shared-transaction/separate-store apply modes |
+| P5 | Refactor BIN-SYNC persistence behind Metadata Store; extract exactly two FLD runtime DLLs and implement generic Storage-only semantics/Metadata Store adapter |
+| P6 | Complete synchronized-FLD Database provenance mapping, publication gate and ACK translation; then implement durable PendingLocal and versioned compact FLD Outbox encoding with measurements |
+| P7 | Safe receipt/dedup/tombstone GC and snapshot/new-peer contract; optional WAL-backed Outbox only after retention proof |
 
 Design the GC contract early, but do not ship destructive cleanup until its proof exists.
 
@@ -507,8 +508,8 @@ A source and architecture revalidation found that the provenance adapter require
 
 1. Approve the Metadata Store semantic contract and resolve remaining transaction/recovery decisions.
 2. Finalize local change staging/coalescing and its crash/relay tests.
-3. **Initial slice implemented:** BIN-SYNC now has a provider-independent test adapter contract, inherited conformance suite and volatile reference adapter; fifteen semantic tests plus a separate volatile-profile assertion pass; BIN-SYNC Actions run `42358078699` passed all 625 tests, public samples, 72.0% line coverage and fuzz/lab hardening. The reference adapter explicitly provides no restart durability. Snapshot lifetime and pending-apply recovery remain uncovered; frozen Outbox/lease fencing, safe outbound ACK, and ack-gated compaction now have reference-model coverage. The helper assembly is referenced by the BIN-SYNC test project, not run as a standalone solution test target.
-4. Define Data Provider change capture and shared-transaction / separate-store idempotent apply modes.
+3. **Initial semantic slice implemented and extended:** BIN-SYNC now has a provider-independent test adapter contract, inherited conformance suite and volatile reference adapter; twenty semantic tests plus a separate volatile-profile assertion pass. Actions run `42359081094` passed all 630 tests, public samples, 72.2% line coverage and fuzz/lab hardening at commit `992305bc53f7cc06e85f75a6d46fbe860f454c93`. The suite now covers frozen Outbox/lease fencing, safe outbound ACK, snapshot read-view stability under logical append/ACK/compaction and pending-apply provider-token/finalization semantics. The reference adapter explicitly provides no restart durability: physical snapshot-generation pinning and crash/reopen persistence remain unproven. The helper assembly is referenced by the BIN-SYNC test project, not run as a standalone solution test target.
+4. **Next contract task:** define Data Provider change capture and shared-transaction / separate-store idempotent apply modes. PendingLocal coalescing remains a separate provider/FLD staging contract; it is not covered by the current Metadata Store tests.
 5. Refactor BIN-SYNC persistence behind the neutral Metadata Store boundary without changing wire behavior; existing Node/WAL tests remain regression coverage, not proof of arbitrary-store conformance.
 6. Extract FLD's two-assembly physical Storage Core and implement explicit Storage-only semantics.
 7. Implement the BIN-SYNC Metadata Store adapter over neutral Storage APIs.
@@ -523,7 +524,7 @@ A source and architecture revalidation found that the provenance adapter require
 
 The current FLD source tree still builds `Fld1.Core`, `Fld1.Engine`, `Fld1.Manifest`, `Fld1.Run` and `Fld1.Wal` as separate projects; it does not yet match the approved two-public-DLL packaging boundary. The current BIN-SYNC Node remains backed by internal in-memory collections plus NodePersistence/WAL. Therefore, do not create a direct Node↔FldDatabase callback bridge or a premature NuGet integration project. First establish the neutral semantic boundary and actual Storage API. This avoids locking the adapter to the current pre-extraction FLD project graph or duplicating durable user field state inside Node.
 
-**Exit condition for this phase:** the initial harness is only a starting slice. The full provider-independent suite must also cover frozen outbound changes, leases/fencing, safe contiguous ACK, snapshot lifetime and separate-store pending-apply recovery; durable adapters must add crash/reopen tests. Existing Node/WAL behavior remains a regression baseline. Only then proceed to the persistence refactor and Storage-only implementation.
+**Exit condition for this phase:** the current volatile harness covers the initial Metadata Store semantics, including outbound freeze/lease/ACK, snapshot read-view lifetime and pending-apply token/finalization behavior. It does not prove durable restart, physical snapshot-generation pinning or real provider idempotency. Before persistence refactoring, define and test the neutral Data Provider contract, including durable source change capture, stable snapshot/feed watermark, remote-apply idempotency and local-versus-remote change separation. PendingLocal coalescing requires its own deterministic crash/relay tests. Durable adapters must then pass reopen/fault-injection tests. Existing Node/WAL behavior remains a regression baseline.
 
 
 ### 7.21 Cross-repository documentation map and authority (2026-11-07)
