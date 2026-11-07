@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using Fld1.Core.Hash;
 using Fld1.Wal.Codec;
+using Fld1.Wal.Format;
 
 namespace Fld1.Engine.Outbox;
 
@@ -231,6 +232,7 @@ internal sealed class ApplyJournal : IDisposable
         ulong previousSeq = 0;
         ulong previousCommitSeq = 0;
         Span<byte> recordHeader = stackalloc byte[RecordHeaderSize];
+        Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
         while (position < fileLength)
         {
             long remaining = fileLength - position;
@@ -248,7 +250,6 @@ internal sealed class ApplyJournal : IDisposable
 
             byte[] payload = new byte[checked((int)payloadLength)];
             _stream.ReadExactly(payload);
-            Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
             _stream.ReadExactly(crcBytes);
             uint storedCrc = BinaryPrimitives.ReadUInt32LittleEndian(crcBytes);
             if (storedCrc != Hashes.Crc32C(recordHeader, payload))
