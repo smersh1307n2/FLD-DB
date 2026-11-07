@@ -1275,21 +1275,42 @@ public sealed class FldDatabase : IDisposable
     /// </summary>
     public IReadOnlyList<RelayJournalBatch> ReadRelayBatches(
         ReadOnlySpan<byte> authorNodeId, ulong afterJournalSeq = 0, int limit = 256)
+        => ReadRelayBatchPage(authorNodeId, afterJournalSeq, limit).Batches;
+
+    /// <summary>
+    /// Reads relay batches and returns the last journal sequence scanned, including
+    /// batches that contained no relay operation for the requested author. The caller
+    /// may persist this scan cursor only atomically with durable publication of every
+    /// returned batch; it is not a downstream-safe ACK watermark.
+    /// </summary>
+    public RelayBatchPage ReadRelayBatchPage(
+        ReadOnlySpan<byte> authorNodeId, ulong afterJournalSeq = 0, int limit = 256)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (authorNodeId.Length != 16)
             throw new ArgumentException("AuthorNodeId must be 16 bytes.", nameof(authorNodeId));
-        if (limit <= 0) return Array.Empty<RelayJournalBatch>();
-        if (authorNodeId.SequenceEqual(_localAuthor))
-            return Array.Empty<RelayJournalBatch>();
+        if (limit <= 0)
+            return new RelayBatchPage
+            {
+                Batches = Array.Empty<RelayJournalBatch>(),
+                ScannedThroughJournalSeq = afterJournalSeq
+            };
         byte[] authorFilter = authorNodeId.ToArray();
 
         lock (_commitLock)
         {
             EnsureHealthy();
+            ulong highWatermark = _applyJournal.HighWatermark;
+            if (authorNodeId.SequenceEqual(_localAuthor))
+                return new RelayBatchPage
+                {
+                    Batches = Array.Empty<RelayJournalBatch>(),
+                    ScannedThroughJournalSeq = highWatermark
+                };
+
             var result = new List<RelayJournalBatch>(Math.Min(limit, 256));
             ulong cursor = afterJournalSeq;
-            while (result.Count < limit && cursor < _applyJournal.HighWatermark)
+            while (result.Count < limit && cursor < highWatermark)
             {
                 var page = _applyJournal.ReadBatches(cursor, 128);
                 if (page.Count == 0) break;
@@ -1320,7 +1341,12 @@ public sealed class FldDatabase : IDisposable
                 }
                 if (page.Count < 128) break;
             }
-            return result;
+
+            return new RelayBatchPage
+            {
+                Batches = result,
+                ScannedThroughJournalSeq = cursor
+            };
         }
     }
 
