@@ -14,7 +14,7 @@ public readonly struct RemoteFieldWrite
     public readonly byte[] AuthorNodeId;
     public readonly ushort KeyEpoch;
     public readonly bool IsTombstone;
-    public readonly byte[]? ChangeId;
+    public readonly byte[] ChangeId;
 
     public RemoteFieldWrite(
         byte[] recordId, ushort fieldId, byte[] value,
