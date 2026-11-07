@@ -358,21 +358,33 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
-    public void ApplyRemoteBatch_does_not_reclassify_pending_local_write()
+    public void ApplyRemoteBatch_does_not_reclassify_pending_local_write_after_restart()
     {
-        using var db = FldDatabase.Open(_dir);
         var recordId = FldDatabase.NewRecordId();
-        db.Put(recordId, 5, "local"u8);
-        db.ApplyRemoteBatch(Batch(recordId, "remote-winner"u8.ToArray(), ulong.MaxValue, 3));
+        byte[] localAuthor;
 
-        db.Commit();
+        using (var db = FldDatabase.Open(_dir))
+        {
+            localAuthor = db.LocalAuthor.ToArray();
+            db.Put(recordId, 5, "local"u8);
+            db.ApplyRemoteBatch(Batch(recordId, "remote-winner"u8.ToArray(), ulong.MaxValue, 3));
 
-        var outbox = db.ReadOutboxBatch(0, 10);
-        Assert.Single(outbox);
-        Assert.Equal(db.LocalAuthor.ToArray(), outbox[0].AuthorNodeId);
-        Assert.Equal("local"u8.ToArray(), outbox[0].Value);
-        Assert.True(db.TryGetBytes(recordId, 5, out var visible));
-        Assert.Equal("remote-winner"u8.ToArray(), visible);
+            db.Commit();
+
+            var outbox = Assert.Single(db.ReadOutboxBatch(0, 10));
+            Assert.Equal(localAuthor, outbox.AuthorNodeId);
+            Assert.Equal("local"u8.ToArray(), outbox.Value);
+            Assert.True(db.TryGetBytes(recordId, 5, out var visible));
+            Assert.Equal("remote-winner"u8.ToArray(), visible);
+        }
+
+        using var reopened = FldDatabase.Open(_dir);
+        var recoveredOutbox = Assert.Single(reopened.ReadOutboxBatch(0, 10));
+        Assert.Equal(localAuthor, recoveredOutbox.AuthorNodeId);
+        Assert.Equal("local"u8.ToArray(), recoveredOutbox.Value);
+        Assert.True(reopened.TryGetBytes(recordId, 5, out var recoveredVisible));
+        Assert.Equal("remote-winner"u8.ToArray(), recoveredVisible);
+        Assert.Single(reopened.ReadRelayBatches(Author(9), 0, 10));
     }
 
     [Fact]
