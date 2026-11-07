@@ -109,20 +109,22 @@ public sealed class FldDatabase : IDisposable
             .Max();
 
         string walDir = Path.Combine(dbDir, "wal");
+        string outboxDir = Path.Combine(dbDir, "outbox");
+        string outboxPath = Path.Combine(outboxDir, $"ns_{namespaceId}.obx");
+        bool hasOutboxHistory = File.Exists(outboxPath) && new FileInfo(outboxPath).Length > 16
+                                || File.Exists(outboxPath + ".ack")
+                                || File.Exists(outboxPath + ".state");
+        bool hasWalData = Directory.EnumerateFiles(walDir, $"ns_{namespaceId}.*.log")
+            .Any(path => new FileInfo(path).Length > WalHeader.Size);
+        bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
+                              || hasWalData
+                              || hasOutboxHistory;
+        byte[] author = LocalAuthorStore.LoadOrCreate(dbDir, localAuthor, hasDurableData);
+
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
         OutboxLog? outbox = null;
         try
         {
-            string outboxDir = Path.Combine(dbDir, "outbox");
-            string outboxPath = Path.Combine(outboxDir, $"ns_{namespaceId}.obx");
-            bool hasOutboxHistory = File.Exists(outboxPath) && new FileInfo(outboxPath).Length > 16
-                                    || File.Exists(outboxPath + ".ack")
-                                    || File.Exists(outboxPath + ".state");
-            bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
-                                  || walRecords.Count != 0
-                                  || hasOutboxHistory;
-            byte[] author = LocalAuthorStore.LoadOrCreate(dbDir, localAuthor, hasDurableData);
-
             outbox = OutboxLog.Open(
                 outboxDir, namespaceId, checkpointedThroughCommitSeq);
 
