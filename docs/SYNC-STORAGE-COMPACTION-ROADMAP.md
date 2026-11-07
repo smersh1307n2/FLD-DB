@@ -437,3 +437,59 @@ The research reinforces E-25 and clarifies the adaptation:
 Keep five lifetimes independent: current field/record tombstones, relay payload, global ChangeId dedup ledger, Inbox batch receipts, and forgotten frontier/GC epoch. Relay ACK does not authorize dedup-ledger or receipt deletion. TTL may mark a tombstone as a GC candidate but cannot authorize physical purge.
 
 The existing fail-closed behavior remains mandatory. The research note is a design proposal, not implementation approval. Tombstone GC remains disabled until membership fencing, snapshot/feed enforcement, durable forgotten-frontier recovery and adversarial tests cover every delta/reconcile/snapshot acceptance path.
+
+
+### 7.19 Durable BIN-SYNC ↔ FLD provenance adapter — next execution checkpoint (2026-11-07)
+
+This section restores the active work order from the integration handoff. The next implementation task is **not** PendingLocal: first complete the durable adapter mapping that connects FLD ApplyJournal coordinates to BIN-SYNC retained author-stream Outbox positions. PendingLocal remains Phase 3 and follows this integration slice in the current execution sequence.
+
+**Verified branch checkpoint:**
+- FLD-DB fix/crash-consistency-outbox: code baseline eacff36; current branch head ca98ec79 contains documentation-only commits after that code baseline.
+- BIN-SYNC feature/fld-external-storage: code baseline d2e0313; current branch head 8aa6341d contains a documentation-only commit after that code baseline.
+- No adapter implementation or code changes are present after those code baselines. Existing public APIs and FLD journal/ACK implementation are the starting point, not a completed adapter.
+
+**Existing primitives verified in source:**
+- FLD ReadRelayBatchPage(author, afterJournalSeq, limit) returns author-filtered relay batches plus ScannedThroughJournalSeq, advancing across nonmatching ApplyJournal records.
+- FLD AcknowledgeRelayBatches(author, safeThroughJournalSeq) persists the per-author JournalSeq watermark in the CRC-protected relay ACK sidecar. Physical relay payload compaction remains deferred until the corresponding APPLY WAL prefix is sealed/truncated.
+- BIN-SYNC Node.GetSafeOutboxAckedThrough(namespaceId, author) returns the minimum local OutboxSeq acknowledged by all interested peers; zero is fail-closed when there is no peer baseline or a peer lacks durable PeerState.
+- BIN-SYNC Node.TryResolveOutboxSequences(namespaceId, identities, sequences) resolves retained (author, ChangeId) identities to local OutboxSeq and clears the output/returns false if any identity is no longer retained.
+- OutboxChangeIdentity is (NodeId AuthorNodeId, BatchId ChangeId). ChangeId remains the stable operation identity; OutboxSeq is only the local author-stream retention coordinate.
+
+**Implementation boundary:** the adapter is an optional integration layer that depends on both FLD Database and BIN-SYNC. It must not be placed inside Fld1.Storage.dll, and it must not make Fld1.Storage.dll or Fld1.Database.dll depend on BinSync.Core. The two-DLL database architecture remains unchanged; the adapter is not a third database engine/runtime layer.
+
+**Required durable adapter state, scoped by namespace and original author:**
+- ScannedThroughJournalSeq;
+- ordered provenance rows (JournalSeq, ChangeId, OutboxSeq);
+- a versioned, checksummed page-commit boundary so the scan cursor and every mapping produced by that page are one durable transaction.
+
+Author identity may be stored once per author group. Mapping rows must remain until FLD has durably accepted the translated relay ACK. The state must be restartable without relying on current field winners or re-decoding deleted APPLY payloads.
+
+**Required processing order:**
+1. Close the namespace outbound publication gate before any newly produced relay Outbox entry can be leased, batched, sent or ACKed. The adapter must own all transport scheduling for this Node/namespace; bypassing the adapter is unsupported.
+2. Read one FLD author page at the persisted scan cursor.
+3. Resolve every (author, ChangeId) in the returned relay subset through TryResolveOutboxSequences. Any missing/conflicting identity fails closed; do not advance the cursor or reconstruct a sequence from field state.
+4. Validate strictly monotonic OutboxSeq progression across increasing source JournalSeq groups for the same author. Preserve all entries sharing one JournalSeq as a group.
+5. Persist the complete page mapping and ScannedThroughJournalSeq atomically and durably.
+6. Only after step 5 may outbound publication resume for the mapped entries.
+7. For ACK translation, read BIN-SYNC's safe OutboxSeq watermark. Find the first mapped JournalSeq group containing an OutboxSeq greater than that watermark; the FLD safe-through is the preceding JournalSeq. If no such group exists, the safe-through may advance to the persisted scanned cursor. A zero safe OutboxSeq never authorizes a positive relay ACK.
+8. Persist the translated source watermark in FLD first by calling AcknowledgeRelayBatches. Only after FLD confirms durability may the adapter prune covered provenance rows and durably persist that pruning. A crash between these two steps leaves harmless stale mapping rows; reversing the order can lose the only mapping and is forbidden.
+9. On restart, load and validate adapter state before opening outbound publication. Re-read any page whose mapping+cursor transaction did not commit. If any retained identity cannot be resolved, keep the gate closed and require explicit reconciliation.
+
+**Important upgrade condition:** if relay entries may already have been published before this adapter gate existed, startup cannot assume the provenance history is complete. A missing Outbox identity is a hard recovery condition, not permission to skip it. The first adapter rollout must either start before any relay publication or perform a separately specified reconciliation that proves all historical mappings.
+
+**Required tests before enabling transport:**
+- multiple relay fields for one author in one JournalSeq group;
+- multiple authors in the same ApplyJournal batch, each with independent cursor/mapping;
+- empty/nonmatching pages advancing the cursor;
+- page limit reached mid-history and exact resume without gap/duplicate;
+- crash before page-state append, during torn append, after durable page commit and before first send;
+- restart with already committed mappings and no duplicate remapping;
+- Outbox identity missing/compacted or author/ChangeId conflict: gate remains closed;
+- monotonic sequence violation across JournalSeq groups: gate remains closed;
+- unequal peer ACKs and a peer missing PeerState: safe-through does not advance;
+- ACK translation with no mapping above the safe watermark and with a partially covered JournalSeq group;
+- crash after FLD relay ACK persistence but before adapter mapping prune;
+- crash during adapter mapping compaction/rewrite;
+- ensure no public transport path can call Node batch creation/send outside the adapter-owned gate.
+
+**Exit:** durable mapping and scan cursor recover correctly; all outbound publication is gated until mapping is durable; safe ACK translation is contiguous and monotonic; FLD ACK precedes mapping pruning; all adversarial/crash tests pass. Only then resume Phase 3 PendingLocal work.
