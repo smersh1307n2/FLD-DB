@@ -38,7 +38,7 @@ public class SyncApplyTests : IDisposable
                 Author(1), null!));
     }
 
-    private static RemoteBatchCommit Batch(byte[] recordId, byte[] value, ulong wall, byte change)
+    private static RemoteBatchCommit Batch(byte[] recordId, byte[] value, ulong wall, byte change, bool relay = true)
     {
         return new RemoteBatchCommit(
             senderPeer: Author(8),
@@ -57,11 +57,9 @@ public class SyncApplyTests : IDisposable
                 new RemoteFieldWrite(recordId, 5, value, wall, 0,
                     Author(9), Change(change))
             ],
-            relayWrites:
-            [
-                new RemoteFieldWrite(recordId, 5, value, wall, 0,
-                    Author(9), Change(change))
-            ],
+            relayWrites: relay
+                ? [new RemoteFieldWrite(recordId, 5, value, wall, 0, Author(9), Change(change))]
+                : Array.Empty<RemoteFieldWrite>(),
             protocolStateDelta: [0xA1, 0xB2, 0xC3]);
     }
 
@@ -111,6 +109,21 @@ public class SyncApplyTests : IDisposable
             Assert.True(duplicate.IsDuplicate);
             Assert.Equal(commitSeq, duplicate.CommitSeq);
         }
+    }
+
+    [Fact]
+    public void ApplyRemoteBatch_persists_batch_without_enqueuing_non_relayable_change()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var recordId = FldDatabase.NewRecordId();
+        var receipt = db.ApplyRemoteBatch(
+            Batch(recordId, "accepted"u8.ToArray(), 100, 4, relay: false));
+
+        Assert.Equal(1, receipt.AppliedCount);
+        Assert.True(db.TryGetBytes(recordId, 5, out var value));
+        Assert.Equal("accepted"u8.ToArray(), value);
+        Assert.Empty(db.ReadRelayBatches(Author(9), 0, 10));
+        Assert.Equal(1UL, db.GetRelayJournalHighWatermark());
     }
 
     [Fact]
