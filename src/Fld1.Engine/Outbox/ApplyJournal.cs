@@ -366,7 +366,6 @@ internal sealed class ApplyJournal : IDisposable
                 throw new InvalidDataException("Duplicate remote batch identity in apply journal.");
             if (((seq - 1) % SparseIndexStride) == 0)
                 _anchors.Add(new IndexAnchor(seq, position));
-            _batches.Add(key, index);
             _recordCount++;
             _lastCommitSeq = commitSeq;
             previousSeq = seq;
