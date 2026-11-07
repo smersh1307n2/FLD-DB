@@ -38,7 +38,7 @@ public class SyncApplyTests : IDisposable
                 Author(1), null!));
     }
 
-    private static RemoteBatchCommit Batch(byte[] recordId, byte[] value, ulong wall, byte change, bool relay = true)
+    private static RemoteBatchCommit Batch(byte[] recordId, byte[] value, ulong wall, byte change, bool relay = true, ushort fieldId = 5)
     {
         return new RemoteBatchCommit(
             senderPeer: Author(8),
@@ -54,7 +54,7 @@ public class SyncApplyTests : IDisposable
             recordsRoot: Change(22),
             writes:
             [
-                new RemoteFieldWrite(recordId, 5, value, wall, 0,
+                new RemoteFieldWrite(recordId, fieldId, value, wall, 0,
                     Author(9), Change(change))
             ],
             relayWrites: relay
@@ -196,10 +196,9 @@ public class SyncApplyTests : IDisposable
         db.Commit();
         db.Checkpoint();
 
-        int n = db.ApplyRemote([
-            new RemoteFieldWrite(rec, 1, "remote"u8.ToArray(), wall: ulong.MaxValue / 2, logical: 0, Author(9), Change(1))
-        ]);
-        Assert.Equal(1, n);
+        var receipt = db.ApplyRemoteBatch(Batch(
+            rec, "remote"u8.ToArray(), ulong.MaxValue / 2, 1, fieldId: 1));
+        Assert.Equal(1, receipt.AppliedCount);
         Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("remote"u8.ToArray()));
     }
 
@@ -210,10 +209,9 @@ public class SyncApplyTests : IDisposable
         var rec = FldDatabase.NewRecordId();
         db.Put(rec, 1, "local-new"u8);
         // remote with wall=1 loses to local HLC from clock
-        int n = db.ApplyRemote([
-            new RemoteFieldWrite(rec, 1, "old"u8.ToArray(), wall: 1, logical: 0, Author(1), Change(2))
-        ]);
-        Assert.Equal(0, n);
+        var receipt = db.ApplyRemoteBatch(Batch(
+            rec, "old"u8.ToArray(), 1, 2, fieldId: 1));
+        Assert.Equal(0, receipt.AppliedCount);
         Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("local-new"u8.ToArray()));
     }
 
