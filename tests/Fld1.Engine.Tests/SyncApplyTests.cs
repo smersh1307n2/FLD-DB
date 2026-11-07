@@ -191,7 +191,7 @@ public class SyncApplyTests : IDisposable
             Assert.Equal(2, page.Count);
             Assert.Equal(new ulong[] { 3, 4 }, page.Select(item => item.JournalSeq));
             Assert.Equal(new byte[] { 83, 84 },
-                page.Select(item => item.Batch.Writes[0].ChangeId[15]));
+                page.Select(item => item.Batch.Writes[0].ChangeId[15]).ToArray());
         }
     }
 
