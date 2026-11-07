@@ -120,8 +120,9 @@ public sealed class FldDatabase : IDisposable
         bool hasWalData = Directory.EnumerateFiles(walDir, $"ns_{namespaceId}.*.log")
             .Any(path => new FileInfo(path).Length > WalHeader.Size);
         string applyJournalPath = Path.Combine(outboxDir, $"ns_{namespaceId}.apply");
-        bool hasApplyHistory = File.Exists(applyJournalPath)
-                               && new FileInfo(applyJournalPath).Length > 16;
+        bool hasApplyHistory = (File.Exists(applyJournalPath)
+                                && new FileInfo(applyJournalPath).Length > 16)
+                               || File.Exists(applyJournalPath + ".relayack");
         bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
                               || hasWalData
                               || hasOutboxHistory
