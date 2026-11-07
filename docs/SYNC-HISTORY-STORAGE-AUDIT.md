@@ -212,9 +212,11 @@ The operation-payload multiplicity is now:
 
 The receipt and relay payload are logically distinct but still physically co-located in the same append-only ApplyJournal record/file. They do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
 
-### 6.3 ApplyJournal still has unbounded index and paging costs
+### 6.3 ApplyJournal index growth remains unbounded; paging scan is fixed
 
-ApplyJournal still maintains a List of every historical index entry and a Dictionary keyed by batch identity. It has no public ACK/compaction/truncation boundary. ReadBatches(afterJournalSeq, limit) iterates the list from its beginning and skips entries until it reaches the requested cursor. Repeated paging therefore becomes increasingly expensive, while the in-memory list/dictionary grow with every accepted batch.
+ApplyJournal still maintains a List of every historical index entry and a Dictionary keyed by batch identity. It has no public ACK/compaction/truncation boundary, so both in-memory indexes grow with every accepted batch.
+
+The prior ReadBatches(afterJournalSeq, limit) prefix scan has been replaced with a lower-bound binary search over the monotonic JournalSeq list, followed by reading only the requested page. Page selection is now O(log N + page size), rather than O(history + page size). A regression test verifies that a request after JournalSeq 2 returns only later records.
 
 Receipt lookup and relay-payload retention still share one physical append-only file. They need separate logical lifetimes and eventually independently reclaimable segments/indexes.
 
