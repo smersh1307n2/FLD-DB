@@ -229,9 +229,9 @@ Before treating Storage Core as reusable, add tests that prove:
 4. Define the minimal byte-oriented Storage API around generic WAL/catalog/page mechanics, not around field-aware RunBuilder/RunReader.
 5. Add a standalone Storage-only sample/test that never references FldDatabase.
 6. Implement metadata key/value encoding and the BIN-SYNC adapter outside the field database layer.
-7. Only after the boundary is stable, consider publishing a separate Storage assembly/package.
+7. The runtime boundary is exactly two separately buildable DLLs from the first implementation: Fld1.Storage.dll and Fld1.Database.dll. They may be shipped together in one convenience package; independent publication of Storage is optional. Do not introduce a third Common/Shared runtime DLL.
 
-**Core rule:** `Fld1.Storage.dll` is the durable byte engine; `Fld1.Database.dll` is one consumer of it. Storage must never need to know that a field database or a synchronization protocol exists.
+**Core rule:** the FLD database runtime consists of exactly two DLLs: `Fld1.Storage.dll` (neutral byte engine) and `Fld1.Database.dll` (FLD field/database semantics and FLD/BIN-SYNC integration boundary). The only dependency direction is `Fld1.Database.dll → Fld1.Storage.dll`. No third Common/Shared runtime DLL. Storage must never need to know that a field database or a synchronization protocol exists.
 
 
 ## 11. Related synchronization-history audit
