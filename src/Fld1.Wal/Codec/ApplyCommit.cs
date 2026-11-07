@@ -21,6 +21,7 @@ public sealed class WalApplyCommit
     public required byte[] BatchDigest { get; init; }
     public required byte[] RecordsRoot { get; init; }
     public required byte[] ProtocolStateDelta { get; init; }
+    public required uint AppliedCount { get; init; }
     public required List<WalFieldMutation> Fields { get; init; }
 }
 
@@ -62,12 +63,13 @@ public static class ApplyCommitCodec
         ms.Write(commit.RecordsRoot);
         WriteU32(ms, (uint)commit.ProtocolStateDelta.Length);
         ms.Write(commit.ProtocolStateDelta);
+        WriteU32(ms, commit.AppliedCount);
         WriteU32(ms, (uint)commit.Fields.Count);
 
         foreach (var field in commit.Fields)
         {
             ValidateId(field.RecordId, nameof(field.RecordId));
-            ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId));
+            ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
             ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
             if (field.OpKind is not (1 or 2))
                 throw new ArgumentOutOfRangeException(nameof(field.OpKind));
@@ -114,6 +116,7 @@ public static class ApplyCommitCodec
         if (deltaLength > MaxProtocolStateDelta)
             throw new InvalidDataException("ProtocolStateDelta exceeds limit.");
         var delta = ReadBytes(payload, ref pos, checked((int)deltaLength));
+        uint appliedCount = ReadU32(payload, ref pos);
         uint fieldCount = ReadU32(payload, ref pos);
         if (fieldCount > WalConstants.MaxMutations)
             throw new InvalidDataException("APPLY_COMMIT field count exceeds limit.");
@@ -164,6 +167,7 @@ public static class ApplyCommitCodec
             BatchDigest = batchDigest,
             RecordsRoot = recordsRoot,
             ProtocolStateDelta = delta,
+            AppliedCount = appliedCount,
             Fields = fields
         };
 
