@@ -5,8 +5,8 @@
 **Формат:** FLD1 (magic `46 4C 44 31`, binaryVersion 1)
 **Целевой рантайм:** C# 12+ / .NET 10 (FLD1 Core + BinSync.Net integration)
 **Совместимость (протокол):** BIN-SYNC CORE **v2.4.17 FINAL** (включая errata v2.3.7, v2.3.8, v2.4.0, v2.4.4–v2.4.8 и v2.4.17) — без изменения формата FLD1 Run/WAL
-**Совместимость (пакет):** `BinSync.Core` **≥ 2.6.5** (типизированные `NodeId`/`RecordId`/`Digest16`, outbox compact); SemVer пакета ≠ версия протокола
-**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–8; все errata вшиты в тело; **v1.5.8+compat-2.6.5**
+**Совместимость (пакет):** `BinSync.Core` **3.0.0**; SemVer пакета ≠ версия протокола. Нормативная совместимость wire-протокола определяется BIN-SYNC CORE v2.4.17 FINAL, а не номером NuGet-пакета.
+**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–9; совместимость с runtime API `BinSync.Core` 3.0.0; wire baseline — BIN-SYNC CORE v2.4.17 FINAL.
 **Правило чтения:** PART I–VI — обязательства; PART VII — ADR без обязательств; PART VIII — приёмка; PART IX — реализационные заметки.
 **Конвенция:** диапазоны inclusive; байтовые индексы перечисляются явно.
 
