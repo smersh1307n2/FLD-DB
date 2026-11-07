@@ -371,3 +371,16 @@ The integration contract now requires BIN-SYNC to persist the scan cursor atomic
 After remote peer-scoped `SeenChanges` rows were removed, the remaining set contained only local WAL replay markers, but each tuple still stored the immutable owning NodeId. BIN-SYNC now uses `(namespace, ChangeId)` in memory and in v11 snapshots, removing 16 raw bytes per marker plus tuple/hash-entry overhead. The global ChangeId ledger remains a separate structure because it has a different semantic fingerprint and retention horizon.
 
 NodePersistence v11 reads v3-v10 snapshots by retaining only old `SeenChanges` rows whose peer matches the snapshot NodeId; v3-v5 migration still folds every historical route marker into the global unknown-fingerprint ledger before filtering local markers. WAL replay preflight, rollback and persistence roundtrip tests were updated. No wire-format change. GitHub Actions run [42349243189](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42349243189) passed .NET 10 tests/public samples/coverage and fuzz/lab hardening at BIN-SYNC commit `ab0f2a8bf2dd`.
+
+### 7.15 Durable per-author relay ACK and post-WAL-seal compaction (2026-11-07)
+
+Implemented the FLD side of safe relay retention:
+- `FldDatabase.AcknowledgeRelayBatches(author, safeThroughJournalSeq)` validates a monotonic per-author watermark against the journal high-water mark and persists it in an atomic CRC-protected `.relayack` sidecar.
+- `ReadRelayBatchPage` suppresses acknowledged author payload immediately, even before physical compaction; other authors in the same source batch remain readable.
+- Physical removal is deferred until the APPLY commit is sealed and its WAL segment is truncated. Checkpoint then rewrites ApplyJournal atomically, removing only acknowledged author payload while retaining the batch receipt and unacknowledged authors' payloads.
+- WAL replay checks sealed batch receipts before attempting to append/compare the full WAL payload, so a compacted relay subset cannot conflict with a still-present sealed WAL frame. If the receipt is missing but the WAL frame remains, replay can rebuild it and the post-replay seal pass compacts again.
+- The regression test acknowledges one of two authors, restarts before checkpoint, verifies sidecar filtering, checkpoints, verifies journal size reduction, verifies the other author's relay payload remains, and confirms duplicate BatchId still returns the receipt.
+
+GitHub Actions run [42349735541](https://github.com/smersh1307n2/FLD-DB/actions/runs/42349735541) passed Release build and all tests at FLD-DB commit `23583d52a8daae5be551c687fd31981b435bf281`.
+
+Remaining integration work: BIN-SYNC must durably map source JournalSeq to ChangeId/local OutboxSeq and compute the minimum contiguous safe ACK across all interested peers. FLD does not infer peer safety. Receipt GC remains independent and is not implemented by relay ACK.
