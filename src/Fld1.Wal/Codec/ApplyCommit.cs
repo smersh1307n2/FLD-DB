@@ -171,8 +171,22 @@ public static class ApplyCommitCodec
             Fields = fields
         };
 
-        // Reuse the encoder's invariant checks for all decoded fixed-width fields.
-        _ = Encode(result);
+        ValidateId(result.SenderPeer, nameof(result.SenderPeer), nonzero: true);
+        ValidateId(result.IssuerNodeId, nameof(result.IssuerNodeId), nonzero: true);
+        ValidateId(result.BatchId, nameof(result.BatchId), nonzero: true);
+        ValidateId(result.PreviousBatchDigest, nameof(result.PreviousBatchDigest));
+        ValidateId(result.BatchDigest, nameof(result.BatchDigest));
+        ValidateId(result.RecordsRoot, nameof(result.RecordsRoot));
+        if (cursorStart == 0 || cursorEnd < cursorStart)
+            throw new InvalidDataException("Invalid APPLY_COMMIT cursor range.");
+        foreach (var field in fields)
+        {
+            ValidateId(field.RecordId, nameof(field.RecordId));
+            ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
+            ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
+            if (field.OpKind is not (1 or 2) || (field.OpKind == 2 && field.Value.Length != 0))
+                throw new InvalidDataException("Invalid APPLY_COMMIT operation.");
+        }
         return result;
     }
 
