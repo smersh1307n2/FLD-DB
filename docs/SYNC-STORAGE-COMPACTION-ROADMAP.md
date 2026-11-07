@@ -252,3 +252,13 @@ Local operations, remote WAL commit/replay and NodePersistence v6 are integrated
 Focused tests cover cross-route duplicate suppression after origin Outbox compaction, returned local echoes, conflict rejection without partial mutation, v5 migration, v6 persistence, causal metadata relay and WAL recovery. GitHub Actions run [42344100307](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42344100307) passed .NET 10 build/tests, public samples, coverage and fuzz/lab hardening. Code commit at the time of that CI run: `468d26988dee370aef4f7266b76bcbc6a5e5c77a`; later documentation-only changes do not alter that tested code.
 
 This closes the global-dedup implementation gate, not the full BIN-SYNC metadata audit. Next: remove redundant Inbox/InboxAuthors key duplication after auditing every duplicate-ACK/recovery path, then address APPLY payload amplification and relay/receipt separation.
+
+### 7.4 Inbox receipt key consolidation (2026-11-07)
+
+BIN-SYNC now stores each accepted-batch receipt key only once: one dictionary maps `(issuerNodeId, namespaceId, issuerEpoch, batchId)` to the exact durable author stream required for duplicate ACKs. The former Inbox HashSet is now only a read-only key view over that dictionary and contributes no second retained key set. Duplicate ACK handling reads the author from this map and no longer infers it from LastStreamAuthor.
+
+NodePersistence is v7. v3-v6 loaders read the former Inbox key set and InboxAuthors map, validate exact parity (including duplicate/orphan/missing/zero-author rejection), then migrate into one map. WAL replay and atomic state publication also carry only that dictionary. The serialized saving is one duplicate receipt key per accepted batch: approximately 34 bytes for the common one-byte namespace/epoch varints, plus the removed in-memory HashSet entry/buckets. This is a format-derived estimate, not a benchmark.
+
+GitHub Actions run [42344555045](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42344555045) passed .NET 10 build/tests, public samples, coverage and fuzz/lab hardening. Code commit tested: `9d58f8d6791c7cb03e36e8d63f4696449aa7a354`.
+
+This does not implement the complete receipt tuple (cursor range, batch/records/previous digests, expiry and WAL generation), conflicting payload validation under an already accepted BatchId, or receipt GC. ReceivedStreams remains a separate author-stream cursor. Next: complete receipt-path audit and APPLY WAL/ApplyJournal payload de-duplication.
