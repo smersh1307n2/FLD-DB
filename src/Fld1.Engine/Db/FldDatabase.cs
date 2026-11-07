@@ -1043,18 +1043,6 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
-    /// <summary>
-    /// Enumerate Outbox records as borrowed spans for allocation-light BIN-SYNC
-    /// encoding. The callback runs synchronously under the Outbox read lock; it must
-    /// not retain the view or call back into this database.
-    /// </summary>
-    public int VisitOutboxBatch(ulong afterSeq, int limit, OutboxEntryVisitor visitor)
-    {
-        lock (_commitLock)
-            EnsureHealthy();
-        return _outbox.VisitBatch(afterSeq, limit, visitor);
-    }
-
     /// <summary>Acquire a durable Outbox consumer lease; acquiring a new one fences older consumers.</summary>
     public OutboxLease AcquireOutboxLease(ReadOnlySpan<byte> ownerId)
     {
