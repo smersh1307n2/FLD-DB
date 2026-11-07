@@ -1,5 +1,6 @@
 using Fld1.Engine.Db;
 using Fld1.Engine.Sync;
+using Fld1.Engine.Outbox;
 using Xunit;
 
 namespace Fld1.Engine.Tests;
