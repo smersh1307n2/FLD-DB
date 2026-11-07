@@ -198,7 +198,8 @@ public sealed class StorageDatabaseTests : IDisposable
         }
 
         Assert.Throws<StorageConflictException>(() => first.Commit());
-        Assert.Throws<StorageConflictException>(() => competing.Put("another"u8, "value"u8).Commit());
+        competing.Put("another"u8, "value"u8);
+        Assert.Throws<StorageConflictException>(() => competing.Commit());
         Assert.False(db.TryGet("key"u8, out _));
         Assert.True(db.TryGet("other"u8, out var other));
         Assert.Equal("committed"u8.ToArray(), other);
