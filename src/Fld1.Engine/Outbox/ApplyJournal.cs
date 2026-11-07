@@ -54,14 +54,22 @@ internal sealed class ApplyJournal : IDisposable
         bool exists = File.Exists(path);
         _stream = new FileStream(path, exists ? FileMode.Open : FileMode.CreateNew,
             FileAccess.ReadWrite, FileShare.Read, 64 * 1024, FileOptions.RandomAccess);
-        if (!exists)
+        try
         {
-            WriteHeader();
-            _stream.Flush(flushToDisk: true);
+            if (!exists)
+            {
+                WriteHeader();
+                _stream.Flush(flushToDisk: true);
+            }
+            else
+            {
+                LoadAndRepairTail();
+            }
         }
-        else
+        catch
         {
-            LoadAndRepairTail();
+            _stream.Dispose();
+            throw;
         }
     }
 
@@ -122,6 +130,8 @@ internal sealed class ApplyJournal : IDisposable
                 return false;
             }
 
+            if (commitSeq == 0 || (_entries.Count != 0 && commitSeq < _entries[^1].CommitSeq))
+                throw new InvalidDataException("Apply journal CommitSeq must be positive and monotonic.");
             ulong seq = _nextSeq;
             if (seq == ulong.MaxValue)
                 throw new InvalidOperationException("Apply journal sequence space is exhausted.");
@@ -194,9 +204,20 @@ internal sealed class ApplyJournal : IDisposable
 
     private byte[] ReadPayload(IndexEntry index)
     {
+        Span<byte> header = stackalloc byte[RecordHeaderSize];
+        Span<byte> crcBytes = stackalloc byte[RecordCrcSize];
         byte[] payload = new byte[index.PayloadLength];
-        _stream.Position = index.Offset + RecordHeaderSize;
+        _stream.Position = index.Offset;
+        _stream.ReadExactly(header);
+        if (BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(0, 8)) != index.JournalSeq
+            || BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(8, 8)) != index.CommitSeq
+            || BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(16, 4)) != index.PayloadLength)
+            throw new InvalidDataException("Apply journal index no longer matches its record.");
         _stream.ReadExactly(payload);
+        _stream.ReadExactly(crcBytes);
+        uint stored = BinaryPrimitives.ReadUInt32LittleEndian(crcBytes);
+        if (stored != Hashes.Crc32C(header, payload))
+            throw new InvalidDataException($"Apply journal CRC mismatch at offset {index.Offset}.");
         return payload;
     }
 
@@ -257,7 +278,8 @@ internal sealed class ApplyJournal : IDisposable
 
             ulong seq = BinaryPrimitives.ReadUInt64LittleEndian(recordHeader.Slice(0, 8));
             ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(recordHeader.Slice(8, 8));
-            if (seq == 0 || seq != previousSeq + 1 || (previousCommitSeq != 0 && commitSeq < previousCommitSeq))
+            if (seq == 0 || seq == ulong.MaxValue || seq != previousSeq + 1
+                || commitSeq == 0 || (previousCommitSeq != 0 && commitSeq < previousCommitSeq))
                 throw new InvalidDataException($"Apply journal sequence discontinuity at {position}.");
 
             var commit = ApplyCommitCodec.Decode(payload);
