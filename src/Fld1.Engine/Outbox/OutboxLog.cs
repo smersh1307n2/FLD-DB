@@ -12,6 +12,7 @@ public sealed class OutboxLog : IDisposable
 {
     public static ReadOnlySpan<byte> Magic => "FLDO"u8;
     private static ReadOnlySpan<byte> StateMagic => "FLDS"u8;
+    private static ReadOnlySpan<byte> LeaseMagic => "FLDL"u8;
 
     private const ushort Version = 1;
     private const int HeaderSize = 16;
@@ -19,12 +20,14 @@ public sealed class OutboxLog : IDisposable
     private const int RecordCrcSize = 4;
     private const int AckSize = 12;
     private const int StateSize = 20;
+    private const int LeaseSize = 36;
     private const int SparseIndexStride = 64;
     private const uint MaxValueLength = 4 * 1024 * 1024;
 
     private readonly string _path;
     private readonly string _ackPath;
     private readonly string _statePath;
+    private readonly string _leasePath;
     private readonly object _lock = new();
 
     private FileStream _fs;
@@ -36,6 +39,8 @@ public sealed class OutboxLog : IDisposable
     private ulong _ackedThrough;
     private ulong _maxCommitSeq;
     private ulong _materializedThroughCommitSeq;
+    private ulong _leaseEpoch;
+    private byte[] _leaseOwnerId;
     private bool _disposed;
     private bool _faulted;
 
@@ -65,6 +70,7 @@ public sealed class OutboxLog : IDisposable
     private readonly record struct IndexPoint(ulong Seq, long Offset);
 
     public ulong NextSeq { get { lock (_lock) return _nextSeq; } }
+    public ulong HighWatermark { get { lock (_lock) return _nextSeq - 1; } }
     public ulong AckedThrough { get { lock (_lock) return _ackedThrough; } }
     public ulong Watermark => AckedThrough;
     public ulong MaterializedThroughCommitSeq
@@ -107,6 +113,8 @@ public sealed class OutboxLog : IDisposable
         string path = Path.Combine(dir, $"ns_{namespaceId}.obx");
         string ackPath = Path.Combine(dir, $"ns_{namespaceId}.obx.ack");
         string statePath = Path.Combine(dir, $"ns_{namespaceId}.obx.state");
+        string leasePath = Path.Combine(dir, $"ns_{namespaceId}.obx.lease");
+        var (leaseEpoch, leaseOwnerId) = LoadLease(leasePath);
 
         ulong ackedThrough = LoadAck(ackPath);
         ulong storedMaterializedThrough = LoadMaterializedWatermark(statePath);
@@ -114,20 +122,20 @@ public sealed class OutboxLog : IDisposable
 
         if (!File.Exists(path))
         {
-            if (File.Exists(ackPath) || File.Exists(statePath) || checkpointedThroughCommitSeq != 0)
+            if (File.Exists(ackPath) || File.Exists(statePath) || File.Exists(leasePath) || checkpointedThroughCommitSeq != 0)
                 throw new InvalidDataException(
                     "Outbox log is missing but ACK/checkpoint metadata proves that it previously existed.");
 
             var created = CreateNew(path);
             return new OutboxLog(
-                path, ackPath, statePath, created,
+                path, ackPath, statePath, leasePath, created,
                 nextSeq: 1,
                 ackedThrough: 0,
                 maxCommitSeq: 0,
                 materializedThroughCommitSeq: 0,
                 entryKeys: new HashSet<EntryKey>(),
                 sparseIndex: new List<IndexPoint>(),
-                recordCount: 0);
+                recordCount: 0,\n                leaseEpoch, leaseOwnerId);
         }
 
         var fs = new FileStream(
@@ -185,9 +193,9 @@ public sealed class OutboxLog : IDisposable
 
             fs.Seek(0, SeekOrigin.End);
             return new OutboxLog(
-                path, ackPath, statePath, fs, nextSeq, ackedThrough,
+                path, ackPath, statePath, leasePath, fs, nextSeq, ackedThrough,
                 Math.Max(scan.MaxCommitSeq, materializedThrough),
-                materializedThrough, scan.EntryKeys, scan.SparseIndex, scan.RecordCount);
+                materializedThrough, scan.EntryKeys, scan.SparseIndex, scan.RecordCount,\n                leaseEpoch, leaseOwnerId);
         }
         catch
         {
@@ -210,6 +218,92 @@ public sealed class OutboxLog : IDisposable
         fs.Write(header);
         fs.Flush(flushToDisk: true);
         return fs;
+    }
+
+    private static (ulong Epoch, byte[] OwnerId) LoadLease(string path)
+    {
+        if (!File.Exists(path))
+            return (0, new byte[16]);
+
+        byte[] bytes = File.ReadAllBytes(path);
+        if (bytes.Length != LeaseSize || !bytes.AsSpan(0, 4).SequenceEqual(LeaseMagic)
+            || BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4, 2)) != Version
+            || bytes[6] != 0 || bytes[7] != 0)
+            throw new InvalidDataException("Outbox lease file has invalid magic, version, reserved bytes, or length.");
+
+        uint stored = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(32, 4));
+        if (!Hashes.IsCrc32COrLegacy(bytes.AsSpan(0, 32), stored))
+            throw new InvalidDataException("Outbox lease CRC mismatch.");
+
+        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8, 8));
+        if (epoch == 0)
+            throw new InvalidDataException("Outbox lease epoch is zero.");
+        return (epoch, bytes.AsSpan(16, 16).ToArray());
+    }
+
+    private static void WriteLease(string path, ulong epoch, ReadOnlySpan<byte> ownerId)
+    {
+        Span<byte> bytes = stackalloc byte[LeaseSize];
+        bytes.Clear();
+        LeaseMagic.CopyTo(bytes);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.Slice(4, 2), Version);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.Slice(8, 8), epoch);
+        ownerId.CopyTo(bytes.Slice(16, 16));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.Slice(32, 4), Hashes.Crc32C(bytes.Slice(0, 32)));
+        WriteAtomic(path, bytes);
+    }
+
+    private void ValidateLease(OutboxLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        if (lease.Epoch != _leaseEpoch || IsZero(_leaseOwnerId)
+            || !lease.OwnerId.SequenceEqual(_leaseOwnerId))
+            throw new InvalidOperationException("Outbox lease is stale or is not the current owner.");
+    }
+
+    private static bool IsZero(ReadOnlySpan<byte> value)
+    {
+        int aggregate = 0;
+        foreach (byte item in value)
+            aggregate |= item;
+        return aggregate == 0;
+    }
+
+    /// <summary>Acquire a new durable lease and fence all previously issued tokens.</summary>
+    public OutboxLease AcquireLease(ReadOnlySpan<byte> ownerId)
+    {
+        if (ownerId.Length != 16 || IsZero(ownerId))
+            throw new ArgumentException("Lease owner must be a non-zero 16-byte id.", nameof(ownerId));
+
+        lock (_lock)
+        {
+            EnsureUsable();
+            if (_leaseEpoch == ulong.MaxValue)
+                throw new InvalidOperationException("Outbox lease epoch space is exhausted.");
+            ulong nextEpoch = _leaseEpoch + 1;
+            byte[] nextOwner = ownerId.ToArray();
+            WriteLease(_leasePath, nextEpoch, nextOwner);
+            _leaseEpoch = nextEpoch;
+            _leaseOwnerId = nextOwner;
+            return new OutboxLease(nextEpoch, nextOwner);
+        }
+    }
+
+    /// <summary>Release the current lease and immediately invalidate its token.</summary>
+    public void ReleaseLease(OutboxLease lease)
+    {
+        lock (_lock)
+        {
+            EnsureUsable();
+            ValidateLease(lease);
+            if (_leaseEpoch == ulong.MaxValue)
+                throw new InvalidOperationException("Outbox lease epoch space is exhausted.");
+            ulong nextEpoch = _leaseEpoch + 1;
+            byte[] noOwner = new byte[16];
+            WriteLease(_leasePath, nextEpoch, noOwner);
+            _leaseEpoch = nextEpoch;
+            _leaseOwnerId = noOwner;
+        }
     }
 
     private static ulong LoadAck(string path)
