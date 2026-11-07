@@ -144,6 +144,7 @@ public sealed class StorageDatabase : IDisposable
         BinaryPrimitives.WriteInt32LittleEndian(header, mutations.Count);
         stream.Write(header);
 
+        Span<byte> lengths = stackalloc byte[8];
         foreach (var mutation in mutations.OrderBy(x => new StorageKey(x.Key), StorageKeyComparer.Instance))
         {
             if (mutation.Key.Length is 0 or > MaxKeyLength)
@@ -152,7 +153,6 @@ public sealed class StorageDatabase : IDisposable
                 throw new ArgumentOutOfRangeException(nameof(mutations), "Storage value is too large.");
 
             stream.WriteByte(mutation.IsDelete ? (byte)2 : (byte)1);
-            Span<byte> lengths = stackalloc byte[8];
             BinaryPrimitives.WriteInt32LittleEndian(lengths, mutation.Key.Length);
             BinaryPrimitives.WriteInt32LittleEndian(lengths.Slice(4), mutation.IsDelete ? 0 : mutation.Value.Length);
             stream.Write(lengths);
@@ -239,7 +239,7 @@ public sealed class StorageDatabase : IDisposable
 }
 
 /// <summary>One atomic set of opaque key/value mutations.</summary>
-public sealed class StorageWriteBatch
+public sealed class StorageWriteBatch : IDisposable
 {
     private readonly StorageDatabase _database;
     private readonly Dictionary<StorageDatabase.StorageKey, StorageDatabase.StorageMutation> _mutations = new();
@@ -269,6 +269,8 @@ public sealed class StorageWriteBatch
         _completed = true;
         return _database.Commit(_mutations.Values.ToArray());
     }
+
+    public void Dispose() => _completed = true;
 
     private void EnsureOpen()
     {
