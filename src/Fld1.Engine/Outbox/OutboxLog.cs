@@ -570,13 +570,12 @@ public sealed class OutboxLog : IDisposable
     public int VisitBatch(ulong afterSeq, int limit, OutboxLease lease, OutboxEntryVisitor visitor)
     {
         ArgumentNullException.ThrowIfNull(visitor);
-        if (limit <= 0)
-            return 0;
-
         lock (_lock)
         {
             EnsureUsable();
             ValidateLease(lease);
+            if (limit <= 0)
+                return 0;
             return VisitBatchUnlocked(afterSeq, limit, visitor);
         }
     }
