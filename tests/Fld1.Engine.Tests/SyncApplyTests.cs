@@ -163,40 +163,39 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
-    public void ReadRelayBatches_seeks_after_journal_cursor()
+    public void ReadRelayBatches_seeks_from_sparse_anchor_after_restart()
     {
         using (var db = FldDatabase.Open(_dir))
         {
             byte[] previousDigest = new byte[16];
-            for (byte i = 1; i <= 4; i++)
+            for (int i = 1; i <= 260; i++)
             {
                 var write = new RemoteFieldWrite(
-                    FldDatabase.NewRecordId(), 5, [i],
-                    (ulong)(100 + i), 0, Author(9), Change((byte)(80 + i)));
+                    FldDatabase.NewRecordId(), 5, [(byte)i],
+                    (ulong)(100 + i), 0, Author(9), FldDatabase.NewRecordId());
                 var batch = new RemoteBatchCommit(
                     senderPeer: Author(8), senderEpoch: 1, namespaceId: 0,
                     issuerNodeId: Author(8), issuerEpoch: 2,
-                    batchId: Change((byte)(40 + i)),
-                    cursorStart: i, cursorEnd: i,
+                    batchId: FldDatabase.NewRecordId(),
+                    cursorStart: (ulong)i, cursorEnd: (ulong)i,
                     previousBatchDigest: previousDigest,
-                    batchDigest: Change((byte)(50 + i)),
-                    recordsRoot: Change((byte)(60 + i)),
+                    batchDigest: FldDatabase.NewRecordId(),
+                    recordsRoot: FldDatabase.NewRecordId(),
                     writes: [write], relayWrites: [write],
-                    protocolStateDelta: [i]);
+                    protocolStateDelta: [(byte)i]);
                 db.ApplyRemoteBatch(batch);
                 previousDigest = batch.BatchDigest;
             }
 
-            var page = db.ReadRelayBatches(Author(9), afterJournalSeq: 2, limit: 10);
-            Assert.Equal(2, page.Count);
-            Assert.Equal(new ulong[] { 3, 4 }, page.Select(item => item.JournalSeq));
-            Assert.Equal(new byte[] { 83, 84 },
-                page.Select(item => item.Batch.Writes[0].ChangeId[15]).ToArray());
+            var page = db.ReadRelayBatches(Author(9), afterJournalSeq: 257, limit: 10);
+            Assert.Equal(new ulong[] { 258, 259, 260 }, page.Select(item => item.JournalSeq));
+            Assert.Equal((byte)4, Assert.Single(page[^1].Batch.Writes).Value[0]);
         }
 
         using var reopened = FldDatabase.Open(_dir);
-        var restoredPage = reopened.ReadRelayBatches(Author(9), afterJournalSeq: 2, limit: 10);
-        Assert.Equal(new ulong[] { 3, 4 }, restoredPage.Select(item => item.JournalSeq));
+        var restoredPage = reopened.ReadRelayBatches(Author(9), afterJournalSeq: 257, limit: 10);
+        Assert.Equal(new ulong[] { 258, 259, 260 },
+            restoredPage.Select(item => item.JournalSeq));
     }
 
     [Fact]
