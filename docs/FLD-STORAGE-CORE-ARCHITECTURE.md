@@ -157,10 +157,10 @@ The existing module names are not proof that their current contents are already 
 | Existing module | Storage Core candidates | Keep in FLD Database / optional layer |
 |---|---|---|
 | `Fld1.Core` | byte readers/writers, endian helpers, checksums and generic hashing | UUIDv7 policy, HLC, author ordering, RecordId/FieldId and field comparators |
-| `Fld1.Run` | generic immutable page/run framing, page checksums, file readers/writers and generation lifetime | field-record codec, LWW tuples, RecordId/FieldId projection and field-specific indexes |
-| `Fld1.Wal` | WAL envelope, append/flush, sequence validation, recovery scanner and torn-record handling | GroupCommit/ApplyCommit payload codecs and domain-specific replay handlers |
-| `Fld1.Manifest` | atomic manifest file replacement, generation catalog and generic checkpoint publication | FLD namespace/schema/run descriptors that encode field-database meaning |
-| `Fld1.Engine` | generic writer serialization, snapshot lifetime, run selection, checkpoint/recovery orchestration | FldDatabase facade, field overlay, merge and Outbox/Apply behavior |
+| `Fld1.Run` | none may be moved wholesale based on its current API | the current RunBuilder/RunReader encode a field-specific FLD1 run (RecordId, FieldId, LWW tuple, PGM/cluster layout); keep this codec in Database unless it is deliberately split from a new generic byte-KV page/run format |
+| `Fld1.Wal` | generic WAL envelope, append/flush, framing, checksum, sequence validation, recovery scanner and torn-record handling after extraction | GroupCommit/ApplyCommit payload codecs and domain-specific replay handlers; split codec from generic WAL mechanics |
+| `Fld1.Manifest` | atomic file replacement and generic durable catalog/checkpoint publication mechanics after extraction | current RunEntry/namespace descriptors and CommitResult semantics until separated from FLD-specific metadata |
+| `Fld1.Engine` | only independently reusable file/generation coordination and transaction scheduling after a type-level audit | current MemFieldKey/MemOverlay/FieldResolver, FldDatabase, HLC/LWW, LocalAuthorStore, Outbox, ApplyJournal and RemoteBatchCommit are Database/sync semantics |
 | `Fld1.Client` | only if required: transport-neutral IPC primitives for an optional shared engine | shared-engine client protocol and process-specific conveniences; do not make them mandatory for embedded single-process Storage |
 
 This is a classification target, not an assertion that every existing class already satisfies it. Before moving a type, inspect its full dependency graph and split mixed files at the lowest stable seam. A generic WAL envelope must not call a field decoder; a generic run reader must not know RecordId; a generic manifest must not manufacture a NamespaceId.
@@ -187,7 +187,11 @@ Do not create a second storage engine solely for Storage-only mode. The same WAL
 - Storage-native CommitSeq is not a BIN-SYNC author cursor, OutboxSeq, HLC or peer cursor.
 - Storage-only writes do not synthesize a LocalAuthor, HLC, ChangeId, Outbox entry or field lifecycle state.
 
-The existing FLD1 physical format can be reused only where its primitives are genuinely domain-neutral. If the current run format hardcodes field-specific assumptions, split the generic page/record mechanics from the field codec rather than forcing metadata records through fake RecordId/FieldId values. Do not create dummy namespaces or synthetic field records to represent metadata.
+**Important current-code finding:** the existing `Fld1.Run` implementation is not a generic immutable byte-KV run. `RunBuilder` and `RunReader` are field-aware: they encode/decode `RecordId`, `FieldId`, HLC/author/key epoch, tombstones, PGM projection and field clusters. Moving the existing `Fld1.Run.dll` wholesale into `Fld1.Storage.dll` would make Storage depend on FLD semantics and violate the two-assembly contract.
+
+A genuinely reusable Storage engine therefore needs a generic ordered byte-key/value page/run representation. FLD Database must encode its field key and field state as opaque bytes on top of that engine, or retain a clearly separated legacy FLD1 codec with an explicit compatibility/migration path. Do not hide the field-aware run behind a nominally generic interface and call that a reusable Storage engine. Before implementation, decide the physical-format compatibility strategy: (A) new generic Storage format plus legacy FLD1 reader/import; or (B) a lower-level generic page/blob engine with a Database-owned FLD1 index/codec. Benchmark write amplification, point/range reads, checkpoint cost and on-disk size for both. No physical format change is authorized by this assembly decision alone.
+
+Do not create dummy namespaces or synthetic field records to represent metadata.
 
 The single-process storage path must remain usable without starting the FLD Shared Engine process. Multi-process coordination may be an optional layer over Storage Core; it must not become a mandatory dependency for a simple embedded consumer.
 
@@ -221,8 +225,8 @@ Before treating Storage Core as reusable, add tests that prove:
 
 1. Inventory existing source files and classify every type as Storage, Database or genuinely shared.
 2. Establish namespaces/source folders and dependency tests without changing physical behavior.
-3. Define the minimal byte-oriented Storage API around the current WAL/run/manifest implementation.
-4. Move the FLD engine internals behind that API; keep one DLL and preserve the current public FldDatabase API.
+3. Separate generic durability primitives from FLD-specific run/manifest codecs; explicitly decide the generic Storage page/run format and legacy FLD1 compatibility path.
+4. Define the minimal byte-oriented Storage API around generic WAL/catalog/page mechanics, not around field-aware RunBuilder/RunReader.
 5. Add a standalone Storage-only sample/test that never references FldDatabase.
 6. Implement metadata key/value encoding and the BIN-SYNC adapter outside the field database layer.
 7. Only after the boundary is stable, consider publishing a separate Storage assembly/package.
