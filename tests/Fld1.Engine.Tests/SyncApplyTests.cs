@@ -73,6 +73,39 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void Outbox_visit_does_not_hold_database_commit_lock()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "seed"u8);
+        db.Commit();
+
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        bool Block(in Fld1.Engine.Outbox.OutboxEntryView entry)
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
+            return false;
+        }
+
+        var visitTask = Task.Run(() => db.VisitOutboxBatch(0, 1, Block));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        try
+        {
+            var writeTask = Task.Run(() => db.Put(rec, 2, "parallel"u8));
+            Assert.True(writeTask.Wait(TimeSpan.FromSeconds(5)),
+                "Outbox encoding must not hold the database commit lock.");
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        Assert.True(visitTask.Wait(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public void Outbox_compact_after_ack()
     {
         using var db = FldDatabase.Open(_dir);
