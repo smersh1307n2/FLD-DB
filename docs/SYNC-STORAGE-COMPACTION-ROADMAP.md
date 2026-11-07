@@ -4,7 +4,7 @@
 **Status:** agreed target architecture; BIN-SYNC metadata P1 and FLD remote APPLY P2 implementation slices are complete on their working branches without a DELTA_BATCH wire-format change. Remaining: durable PendingLocal coalescing, FLD Outbox physical encoding/benchmarks, and protocol-safe receipt/dedup/tombstone reclamation.  
 **Primary audit:** [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).  
 **Tombstone research:** [Tombstone Retention and Safe Garbage Collection](TOMBSTONE-RETENTION-RESEARCH.md) — Microsoft ForgottenKnowledge, CRDT causal stability/commitment, Cassandra, CouchDB and Couchbase.  
-**Companion documents:** [FLD Storage Core](FLD-STORAGE-CORE-ARCHITECTURE.md), [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).
+**Companion documents:** [FLD Storage Core](FLD-STORAGE-CORE-ARCHITECTURE.md), [BIN-SYNC Metadata Storage Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md), [Metadata Store Semantic Contract and Conformance Plan](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORE-CONFORMANCE.md), [Change Staging and Retention](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md), [FLD-DB Integration Contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/FLD-DB-INTEGRATION-CONTRACT.md).
 
 ## 1. Goal
 
@@ -444,8 +444,8 @@ The existing fail-closed behavior remains mandatory. The research note is a desi
 This section preserves the adapter requirements from the integration handoff. The provenance mapping remains mandatory, but it is **not the next cross-repository implementation task**. The higher-level Metadata Store architecture sequence takes precedence: define and test neutral semantic operations; define Data Provider atomicity modes; move BIN-SYNC persistence behind that boundary; extract FLD Storage-only semantics; implement the Metadata Store adapter; then complete this FLD synchronized-database provenance integration. PendingLocal remains deferred until the applicable storage/adapter gates are closed.
 
 **Verified branch checkpoint:**
-- FLD-DB fix/crash-consistency-outbox: code baseline eacff36; current branch head ca98ec79 contains documentation-only commits after that code baseline.
-- BIN-SYNC feature/fld-external-storage: code baseline d2e0313; current branch head 8aa6341d contains a documentation-only commit after that code baseline.
+- FLD-DB fix/crash-consistency-outbox: code baseline eacff36; current branch head d4627626 contains documentation-only commits after that code baseline.
+- BIN-SYNC feature/fld-external-storage: code baseline d2e0313; current branch head 8c836f84 contains documentation-only commits after that code baseline.
 - No adapter implementation or code changes are present after those code baselines. Existing public APIs and FLD journal/ACK implementation are the starting point, not a completed adapter.
 
 **Existing primitives verified in source:**
