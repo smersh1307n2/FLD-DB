@@ -207,7 +207,7 @@ Only after Phases 2–4 and only if the Phase 5 retention contract is clear. Whi
 | P0 | Baseline measurements and invariants |
 | P1 | BIN-SYNC global ChangeId dedup, ACK replay pruning, unified InboxReceipt, compact PeerState v9, grouped persistence v10, compact local markers v11 and admission caps — implemented; receipt/dedup GC remains open |
 | P2 | FLD APPLY v3 single-encoding, relay-only journal, sparse paging, offset-only batch index and explicit scan cursor — implemented; physical compaction/independent GC remain open |
-| P3 | Durable pre-publication PendingLocal coalescing — next implementation phase |
+| P3 | Durable pre-publication PendingLocal coalescing — design contract recorded; implementation next |
 | P4 | Versioned compact FLD Outbox encoding and measured storage/RAM footprint |
 | P5 | Safe receipt/dedup/tombstone GC and snapshot/new-peer contract |
 | P6 | Optional WAL-backed Outbox |
@@ -387,3 +387,16 @@ Implemented the FLD side of safe relay retention:
 Recovery validates persisted relay ACK watermarks against the recovered JournalSeq high-water mark, and the API rejects a watermark beyond the current journal high-water mark. GitHub Actions run [42349914253](https://github.com/smersh1307n2/FLD-DB/actions/runs/42349914253) passed Release build and all tests at FLD-DB commit `0c2542593849faba8fd3b38ed165b5c8f2597c38`.
 
 Remaining integration work: BIN-SYNC must durably map source JournalSeq to ChangeId/local OutboxSeq and compute the minimum contiguous safe ACK across all interested peers. FLD does not infer peer safety. Receipt GC remains independent and is not implemented by relay ACK.
+
+### 7.15 PendingLocal coalescing — durable API and crash protocol (design, not yet implemented)
+
+The next phase is an additive API so the current immediate-publication contract is not silently broken:
+
+- `CommitPending()` durably commits local writes into a per-(namespace, RecordId, FieldId) PendingLocal map without assigning a published stream sequence or exposing them to transport. Repeated calls coalesce only local LWW operations by the canonical comparator; the staged payload is retained independently of the visible overlay.
+- `FreezePending()` publishes the current staged set. A `PENDING_FREEZE` WAL record carries the stage-through watermark and final immutable GroupCommit payload. It is flushed before Outbox append/flush; recovery replays the freeze idempotently and removes only staged entries covered by that watermark.
+- Existing `Commit()` remains immediate for compatibility. If PendingLocal exists, it merges staged values and current dirty values (dirty values win only by canonical LWW order) into one freeze transaction. `ReadOutboxBatch`, `VisitOutboxBatch`, `AcquireOutboxLease` and `GetOutboxHighWatermark` freeze first, so a sender cannot observe a watermark while committed staged work remains hidden. `AcknowledgeOutbox` and `CompactOutbox` do not implicitly freeze.
+- ChangeId and OutboxSeq become immutable only at freeze. Pending values have no stream position and are never included in peer progress. Remote relay and CRDT/event operations are not coalesced.
+
+Durability/checkpoint design: introduce WAL kinds for pending commit, pending freeze and pending snapshot commit. At checkpoint, write an immutable generation-specific PendingLocal snapshot (sorted keys, exact payload/HLC/author/key epoch and stage watermark), fsync it, rotate to a fresh WAL segment, append+flush a snapshot-commit marker containing generation/hash/through-sequence, then truncate only earlier sealed segments. The marker segment remains retained. Recovery requires the referenced snapshot when a marker exists, loads it as the pending base, and replays only later pending mutations/freezes; missing or mismatched snapshot fails closed. Old snapshot generations are deleted only after the new marker is durable and the corresponding WAL prefix is safely truncated. This avoids pinning an unbounded WAL prefix while keeping crash windows recoverable.
+
+Required crash tests: after pending WAL flush; after snapshot write before marker; after marker before truncation; after truncation; after freeze WAL flush before Outbox append; after Outbox flush before in-memory stage removal; mixed pending+dirty commit; remote LWW winner after pending local write; checkpoint with pending entries but empty visible overlay; restart with several coalesced commits. Baseline comparison: four separate immediate `Commit()` calls remain four immutable operations; four `CommitPending()` calls to the same field followed by one freeze produce exactly one operation with the final local winner.
