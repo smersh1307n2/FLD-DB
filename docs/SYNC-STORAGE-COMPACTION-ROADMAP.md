@@ -141,7 +141,8 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 - Implemented a sparse in-memory anchor every 256 JournalSeq records. ReadBatches binary-searches the anchors and scans at most one bounded stride before reading the requested page; it no longer retains a full IndexEntry List or rescans the entire consumed prefix.
 - The BatchKey→offset Dictionary and on-disk receipt history still grow with every batch; a disk-backed/rebuildable batch index and safe receipt GC remain open.
 - `ReadRelayBatchPage` now returns `ScannedThroughJournalSeq`, including ranges with no matching author operations. The adapter must persist this scan cursor atomically with all returned relay operations; it is not a safe ACK watermark.
-- Before relay payload GC, persist source provenance mapping (author, JournalSeq, ChangeId → BIN-SYNC OutboxSeq) across restart. BIN-SYNC must compute per-author minimum safe ACK across all interested peers and pass a JournalSeq watermark; receipt expiry remains independent.
+- Before relay payload GC, persist source provenance mapping (author, JournalSeq, ChangeId → BIN-SYNC OutboxSeq) across restart. BIN-SYNC now exposes the per-author minimum safe ACK query and ChangeId→OutboxSeq resolver; the adapter must still persist the mapping and scan cursor atomically.
+- The adapter must gate all outbound publication for a namespace until provenance pages are durable, including after restart. It must translate safe OutboxSeq to the first contiguous safe source JournalSeq, persist FLD relay ACK before pruning mappings, and fail closed if a retained identity cannot be resolved. Do not hold FLD/Node internal locks across I/O; use an adapter-level gate. Receipt expiry remains independent.
 
 **Implemented on `smersh1307n2/FLD-DB` `fix/crash-consistency-outbox`:**
 - APPLY_COMMIT v3 encodes the incoming operation array once; relay selection uses canonical indexes; v2 remains readable.
@@ -149,7 +150,7 @@ Implemented on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`:
 - Promotion is idempotent; WAL recovery rebuilds the relay journal; LWW-losing relay-eligible operations are preserved.
 - ReadBatches uses sparse JournalSeq anchors (stride 256) and bounded scan; full IndexEntry List removed.
 - BatchKey index values are 64-bit offsets, not duplicated BatchKey+IndexEntry structs.
-- ReadRelayBatchPage reports ScannedThroughJournalSeq across nonmatching author ranges. Adapter must persist this scan cursor atomically with relay operations; it is not an ACK watermark.
+- ReadRelayBatchPage reports ScannedThroughJournalSeq across nonmatching author ranges. Adapter must persist this scan cursor atomically with relay operations; it is not an ACK watermark. The adapter publication gate and ACK translation order are specified in BIN-SYNC's FLD integration contract §3.1.2.
 - A per-author relay ACK sidecar records safe-through JournalSeq. Checkpoint/reopen compaction physically reclaims acknowledged author payloads while retaining receipts and other authors' payload.
 
 **Remaining Phase 2 gate:** relay payload reclamation is implemented per author, but receipt retention remains unbounded and shares the journal's physical record envelope. The BatchKey→offset dictionary still has one in-memory entry per receipt; disk-backed/rebuildable bounded indexing and independent receipt GC remain open. Full-file rewrite cost must be benchmarked at large journal sizes.
