@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using Fld1.Core.Hash;
 using Fld1.Engine.Db;
 using Fld1.Engine.Sync;
 using Fld1.Engine.Outbox;
@@ -204,6 +206,43 @@ public class SyncApplyTests : IDisposable
         var noMatches = reopened.ReadRelayBatchPage(Author(10), afterJournalSeq: 0, limit: 10);
         Assert.Empty(noMatches.Batches);
         Assert.Equal(260UL, noMatches.ScannedThroughJournalSeq);
+    }
+
+    private static byte[] RelayAckSidecar(byte[] author, ulong journalSeq)
+    {
+        var bytes = new byte[12 + 24 + 4];
+        "FLRA"u8.CopyTo(bytes);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6, 2), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8, 4), 1);
+        author.CopyTo(bytes.AsSpan(12, 16));
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(28, 8), journalSeq);
+        uint crc = Hashes.Crc32C(bytes.AsSpan(0, 12), bytes.AsSpan(12, 24));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(36, 4), crc);
+        return bytes;
+    }
+
+    [Fact]
+    public void ApplyJournal_rejects_relay_ack_sidecar_when_journal_is_missing()
+    {
+        var outboxDir = Path.Combine(_dir, "outbox");
+        Directory.CreateDirectory(outboxDir);
+        File.WriteAllBytes(Path.Combine(outboxDir, "ns_0.apply.relayack"),
+            RelayAckSidecar(Author(9), 1));
+
+        Assert.Throws<InvalidDataException>(() =>
+            FldDatabase.Open(_dir, localAuthor: Author(1)));
+    }
+
+    [Fact]
+    public void ApplyJournal_rejects_relay_ack_watermark_beyond_journal_high_watermark()
+    {
+        using (FldDatabase.Open(_dir, localAuthor: Author(1))) { }
+        File.WriteAllBytes(Path.Combine(_dir, "outbox", "ns_0.apply.relayack"),
+            RelayAckSidecar(Author(9), 1));
+
+        Assert.Throws<InvalidDataException>(() =>
+            FldDatabase.Open(_dir, localAuthor: Author(1)));
     }
 
     [Fact]
