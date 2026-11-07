@@ -680,3 +680,12 @@ The adapter is still test-only. Public production APIs and direct Node runtime i
 #### 7.23.2 Snapshot-generation reclamation
 
 After the new snapshot file is flushed and the atomic manifest has been published and directory-flushed, `StorageSnapshotFile.Store` now reclaims obsolete snapshot generations for that partition. This is safe for the current API because `StorageSnapshot` owns an in-memory copy rather than a disk-generation pin. A crash before manifest publication leaves the old root authoritative; a crash after publication leaves the new root authoritative and may leave only reclaimable orphan files. The repeated-checkpoint test asserts that one current snapshot generation remains.
+
+
+#### 7.23.3 BIN-SYNC public runtime adapter milestone
+
+The BIN-SYNC integration branch has promoted the provider and metadata-store contracts into `BinSync.Core` as public `IDataProvider` and `IMetadataStore` interfaces. Runtime implementations are in `BinSync.Storage.dll`, which references Core and the neutral `Fld1.Storage.dll`. The public `StorageSyncCoordinator` enforces local feed → Node write with original HLC/author → caller's durable Node checkpoint → provider ACK; remote field/tombstone materialization uses deterministic apply tokens and does not enter the local feed.
+
+The public array sample now exercises the runtime adapters and coordinator across two nodes, two independent Storage partitions, close/reopen and a later remote update. BIN-SYNC integration CI passed 32/32 tests at the current adapter milestone.
+
+**Boundary still open:** the legacy Node/Transport path has not yet been migrated to use `IMetadataStore` for its own freeze, receive/relay, ACK/lease and Pending Apply transitions. The explicit coordinator does not replace that protocol-owned metadata path. Complete the migration only with wire-compatibility, restart and fault-injection coverage; do not claim automatic NodeBuilder/Transport integration yet.
