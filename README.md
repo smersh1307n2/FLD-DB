@@ -4,6 +4,8 @@ Embedded field-store with multi-process access via **FLD Shared Engine**.
 
 Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.md) and integrates with [BIN-SYNC](https://github.com/smersh1307n2/BIN-SYNC).
 
+Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md).
+
 | Layer | Version |
 |-------|---------|
 | FLD format / kernel | v1.5.9-DRAFT (+compat-BinSync.Core-3.0.0) |
