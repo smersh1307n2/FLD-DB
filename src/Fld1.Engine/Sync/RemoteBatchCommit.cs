@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+
 namespace Fld1.Engine.Sync;
 
 /// <summary>
@@ -55,12 +57,52 @@ public sealed class RemoteBatchCommit
         ArgumentNullException.ThrowIfNull(writes);
         Writes = CopyWrites(writes, nameof(writes));
         RelayWrites = CopyWrites(relayWrites, nameof(relayWrites));
+        ValidateRelaySubset(Writes, RelayWrites);
 
         ArgumentNullException.ThrowIfNull(protocolStateDelta);
         if (protocolStateDelta.Length > 4 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(protocolStateDelta));
         ProtocolStateDelta = protocolStateDelta.ToArray();
     }
+
+    private readonly record struct ChangeKey(ulong Low, ulong High)
+    {
+        public static ChangeKey From(ReadOnlySpan<byte> id)
+            => new(BinaryPrimitives.ReadUInt64LittleEndian(id),
+                BinaryPrimitives.ReadUInt64LittleEndian(id.Slice(8)));
+    }
+
+    private static void ValidateRelaySubset(
+        IReadOnlyList<RemoteFieldWrite> writes,
+        IReadOnlyList<RemoteFieldWrite> relayWrites)
+    {
+        var byChangeId = new Dictionary<ChangeKey, RemoteFieldWrite>(writes.Count);
+        foreach (var write in writes)
+        {
+            if (!byChangeId.TryAdd(ChangeKey.From(write.ChangeId), write))
+                throw new ArgumentException("ChangeId values must be unique within a remote batch.", nameof(writes));
+        }
+
+        var seenRelayIds = new HashSet<ChangeKey>();
+        foreach (var relay in relayWrites)
+        {
+            var key = ChangeKey.From(relay.ChangeId);
+            if (!seenRelayIds.Add(key))
+                throw new ArgumentException("Relay ChangeId values must be unique.", nameof(relayWrites));
+            if (!byChangeId.TryGetValue(key, out var source) || !SameOperation(source, relay))
+                throw new ArgumentException("RelayWrites must be an exact subset of Writes.", nameof(relayWrites));
+        }
+    }
+
+    private static bool SameOperation(in RemoteFieldWrite left, in RemoteFieldWrite right)
+        => left.FieldId == right.FieldId
+            && left.Wall == right.Wall
+            && left.Logical == right.Logical
+            && left.KeyEpoch == right.KeyEpoch
+            && left.IsTombstone == right.IsTombstone
+            && left.RecordId.AsSpan().SequenceEqual(right.RecordId)
+            && left.AuthorNodeId.AsSpan().SequenceEqual(right.AuthorNodeId)
+            && left.Value.AsSpan().SequenceEqual(right.Value);
 
     private static RemoteFieldWrite[] CopyWrites(
         IReadOnlyList<RemoteFieldWrite>? writes, string name)
