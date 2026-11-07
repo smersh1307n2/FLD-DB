@@ -38,6 +38,111 @@ public class SyncApplyTests : IDisposable
                 Author(1), null!));
     }
 
+    private static RemoteBatchCommit Batch(byte[] recordId, byte[] value, ulong wall, byte change)
+    {
+        return new RemoteBatchCommit(
+            senderPeer: Author(8),
+            senderEpoch: 1,
+            namespaceId: 0,
+            issuerNodeId: Author(8),
+            issuerEpoch: 2,
+            batchId: Change(20),
+            cursorStart: 1,
+            cursorEnd: 1,
+            previousBatchDigest: new byte[16],
+            batchDigest: Change(21),
+            recordsRoot: Change(22),
+            writes:
+            [
+                new RemoteFieldWrite(recordId, 5, value, wall, 0,
+                    Author(9), Change(change))
+            ],
+            protocolStateDelta: [0xA1, 0xB2, 0xC3]);
+    }
+
+    [Fact]
+    public void ApplyRemoteBatch_is_durable_idempotent_and_never_enters_local_outbox()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        var batch = Batch(recordId, "remote"u8.ToArray(), 100, 1);
+        ulong commitSeq;
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            var receipt = db.ApplyRemoteBatch(batch);
+            Assert.False(receipt.IsDuplicate);
+            Assert.Equal(1, receipt.AppliedCount);
+            Assert.Equal(1UL, receipt.CursorEnd);
+            Assert.Equal(new byte[] { 0xA1, 0xB2, 0xC3 }, receipt.ProtocolStateDelta);
+            commitSeq = receipt.CommitSeq;
+
+            Assert.True(db.TryGetBytes(recordId, 5, out var value));
+            Assert.Equal("remote"u8.ToArray(), value);
+            Assert.Equal(0UL, db.GetOutboxHighWatermark());
+
+            var relay = db.ReadRelayBatches(Author(9), 0, 10);
+            Assert.Single(relay);
+            Assert.Equal(1UL, relay[0].JournalSeq);
+            Assert.Single(relay[0].Batch.Writes);
+            Assert.Equal(Change(1), relay[0].Batch.Writes[0].ChangeId);
+
+            var duplicate = db.ApplyRemoteBatch(batch);
+            Assert.True(duplicate.IsDuplicate);
+            Assert.Equal(commitSeq, duplicate.CommitSeq);
+            Assert.Equal(1UL, db.GetRelayJournalHighWatermark());
+            Assert.Equal(0UL, db.GetOutboxHighWatermark());
+
+            db.Checkpoint();
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            Assert.True(reopened.TryGetBytes(recordId, 5, out var value));
+            Assert.Equal("remote"u8.ToArray(), value);
+            Assert.Equal(0UL, reopened.GetOutboxHighWatermark());
+            Assert.Single(reopened.ReadRelayBatches(Author(9), 0, 10));
+
+            var duplicate = reopened.ApplyRemoteBatch(batch);
+            Assert.True(duplicate.IsDuplicate);
+            Assert.Equal(commitSeq, duplicate.CommitSeq);
+        }
+    }
+
+    [Fact]
+    public void ApplyRemoteBatch_retains_lww_loser_for_relay()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var recordId = FldDatabase.NewRecordId();
+        db.Put(recordId, 5, "local-newer"u8);
+        db.Commit();
+        db.Checkpoint();
+
+        var receipt = db.ApplyRemoteBatch(Batch(recordId, "remote-older"u8.ToArray(), 1, 2));
+        Assert.Equal(0, receipt.AppliedCount);
+        Assert.True(db.TryGetBytes(recordId, 5, out var value));
+        Assert.Equal("local-newer"u8.ToArray(), value);
+        Assert.Single(db.ReadRelayBatches(Author(9), 0, 10));
+        Assert.Equal(1UL, db.GetOutboxHighWatermark());
+    }
+
+    [Fact]
+    public void ApplyRemoteBatch_does_not_reclassify_pending_local_write()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var recordId = FldDatabase.NewRecordId();
+        db.Put(recordId, 5, "local"u8);
+        db.ApplyRemoteBatch(Batch(recordId, "remote-winner"u8.ToArray(), ulong.MaxValue, 3));
+
+        db.Commit();
+
+        var outbox = db.ReadOutboxBatch(0, 10);
+        Assert.Single(outbox);
+        Assert.Equal(db.LocalAuthor.ToArray(), outbox[0].AuthorNodeId);
+        Assert.Equal("local"u8.ToArray(), outbox[0].Value);
+        Assert.True(db.TryGetBytes(recordId, 5, out var visible));
+        Assert.Equal("remote-winner"u8.ToArray(), visible);
+    }
+
     [Fact]
     public void ApplyRemote_wins_with_newer_hlc()
     {
