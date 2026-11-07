@@ -237,3 +237,9 @@ Before treating Storage Core as reusable, add tests that prove:
 ## 11. Related synchronization-history audit
 
 The code-backed analysis of FLD local Outbox, remote APPLY/relay retention, BIN-SYNC cross-peer deduplication and peer cursor storage is maintained in [SYNC-HISTORY-STORAGE-AUDIT.md](SYNC-HISTORY-STORAGE-AUDIT.md). This is a Database/BIN-SYNC integration concern, not a reason to add protocol or FLD field semantics to Storage Core. Storage remains a neutral byte engine; higher layers own ChangeId, receipts, peer cursors, relay eligibility and retention policy.
+
+## 12. Relationship to sync metadata compaction
+
+The cross-layer optimization plan is maintained in the FLD-DB [Sync Storage Compaction Roadmap](SYNC-STORAGE-COMPACTION-ROADMAP.md), with code-backed findings in [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).
+
+This roadmap does not move BIN-SYNC protocol semantics into Storage Core. Fld1.Storage remains domain-neutral: it provides atomic byte batches, WAL/recovery, snapshots, ordered scans, checkpoints and safe reclamation. ChangeId identity, batch receipts, peer cursors, relay eligibility, protocol retention and PendingLocal coalescing remain in FLD Database/BIN-SYNC semantic layers or their adapter. The same physical engine may host these records, but Storage Core must not interpret them.
