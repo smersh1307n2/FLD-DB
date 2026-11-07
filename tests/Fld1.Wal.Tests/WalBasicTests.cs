@@ -188,6 +188,59 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Apply_commit_codec_stores_fields_once_and_reconstructs_relay_subset()
+    {
+        var first = new WalFieldMutation
+        {
+            RecordId = Id(10), FieldId = 1, OpKind = 1, KeyEpoch = 0,
+            Wall = 10, Logical = 0, AuthorNodeId = Id(11),
+            ChangeId = Id(12), Value = new byte[1024]
+        };
+        var second = new WalFieldMutation
+        {
+            RecordId = Id(13), FieldId = 2, OpKind = 1, KeyEpoch = 1,
+            Wall = 20, Logical = 1, AuthorNodeId = Id(14),
+            ChangeId = Id(15), Value = Enumerable.Repeat((byte)0xA5, 1024).ToArray()
+        };
+        var commit = new WalApplyCommit
+        {
+            SenderPeer = Id(1), SenderEpoch = 1, NamespaceId = 0,
+            IssuerNodeId = Id(2), IssuerEpoch = 2, BatchId = Id(3),
+            CursorStart = 1, CursorEnd = 2,
+            PreviousBatchDigest = new byte[16], BatchDigest = Id(4), RecordsRoot = Id(5),
+            ProtocolStateDelta = Array.Empty<byte>(), AppliedCount = 2,
+            Fields = [first, second],
+            RelayFields = [second]
+        };
+
+        byte[] payload = ApplyCommitCodec.Encode(commit);
+        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(payload));
+        var decoded = ApplyCommitCodec.Decode(payload);
+
+        Assert.Equal(2, decoded.Fields.Count);
+        Assert.Single(decoded.RelayFields);
+        Assert.Same(decoded.Fields[1], decoded.RelayFields[0]);
+        Assert.Equal(second.ChangeId, decoded.RelayFields[0].ChangeId);
+
+        var relayOnly = new WalApplyCommit
+        {
+            SenderPeer = commit.SenderPeer, SenderEpoch = commit.SenderEpoch,
+            NamespaceId = commit.NamespaceId, IssuerNodeId = commit.IssuerNodeId,
+            IssuerEpoch = commit.IssuerEpoch, BatchId = commit.BatchId,
+            CursorStart = commit.CursorStart, CursorEnd = commit.CursorEnd,
+            PreviousBatchDigest = commit.PreviousBatchDigest, BatchDigest = commit.BatchDigest,
+            RecordsRoot = commit.RecordsRoot, ProtocolStateDelta = commit.ProtocolStateDelta,
+            AppliedCount = commit.AppliedCount,
+            Fields = [second], RelayFields = [second], RelayOnly = true
+        };
+        var journalDecoded = ApplyCommitCodec.Decode(ApplyCommitCodec.Encode(relayOnly));
+        Assert.True(journalDecoded.RelayOnly);
+        Assert.Single(journalDecoded.Fields);
+        Assert.Single(journalDecoded.RelayFields);
+        Assert.Same(journalDecoded.Fields[0], journalDecoded.RelayFields[0]);
+    }
+
+    [Fact]
     public void Codec_roundtrip_empty_group()
     {
         var p = EmptyPayload();
