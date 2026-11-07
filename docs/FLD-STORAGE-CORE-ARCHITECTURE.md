@@ -1,17 +1,17 @@
 # FLD Storage Core — extraction and dependency architecture
 
-**Status:** Architecture decision draft v0.1.  
+**Status:** Architecture decision v0.2 — two independently buildable assemblies.  
 **Purpose:** make the durable storage engine independently reusable without loading or depending on the FLD field-database implementation.  
-**Initial packaging:** one DLL. The source and public API must nevertheless have a clean extraction boundary.
+**Packaging decision:** two DLLs from the first implementation: `Fld1.Storage.dll` and `Fld1.Database.dll`. They are separate projects, build outputs, and packageable artifacts.
 
 ## 1. Decision
 
-FLD-DB will be organized as two logical layers in one assembly:
+FLD-DB is organized as two assemblies:
 
-1. **Storage Core** — a small, domain-neutral embedded storage engine.
-2. **FLD Database** — the field/document semantics implemented on top of Storage Core.
+1. **`Fld1.Storage.dll`** — a small, domain-neutral embedded storage engine.
+2. **`Fld1.Database.dll`** — FLD field/document semantics implemented on top of Storage.
 
-The first release does not need a separate `.Storage.dll`. It does need a separate namespace, source subtree, public API boundary, tests and one-way dependency direction. Later, Storage Core must be movable into its own project/package without changing its storage algorithms or requiring the FLD database code.
+Both assemblies are separate projects and build outputs from the first implementation. `Fld1.Database` references `Fld1.Storage`; the reverse reference is forbidden. Storage must build, test, run and be consumable without compiling, loading or deploying any FLD Database code. A third `Common` assembly is not introduced: genuinely generic primitives belong in Storage; FLD semantics belong in Database. Extracting a third assembly later requires evidence of a stable, independently useful shared contract, not merely duplicated helper methods.
 
 The Storage Core is not a thin wrapper around `FldDatabase`. It is the lower-level engine used by `FldDatabase` and independently by applications that need durable metadata or another compact embedded store.
 
@@ -114,9 +114,9 @@ The following are FLD Database or BIN-SYNC responsibilities, not storage primiti
 
 Storage Core may persist opaque bytes supplied by these layers. It must not construct, validate or reinterpret their values.
 
-## 5. Source layout while keeping one DLL
+## 5. Source and project layout
 
-Keep one build output initially, but organize source and namespaces as if the boundary already existed:
+Create two actual projects and build outputs, not merely namespaces inside one assembly:
 
 ```text
 src/
@@ -138,11 +138,9 @@ src/
     Outbox/
     Apply/
     FldDatabase.cs
-  Fld1.Shared/
-    // only utilities genuinely shared by both layers
 ```
 
-These are source/module boundaries, not a requirement to create multiple assemblies now. Namespaces should mirror the intended future assembly names (for example, `Fld1.Storage` and `Fld1.Database`).
+`Fld1.Storage.csproj` compiles only `src/Fld1.Storage/**`; `Fld1.Database.csproj` compiles only `src/Fld1.Database/**` and references Storage. Tests are split into Storage-only and Database integration suites. Namespaces mirror assembly names. Do not use linked source files or duplicate compilation to simulate sharing.
 
 Do not leave domain-specific types in a catch-all `Fld1.Core` namespace merely because both layers currently compile into one DLL. Audit the existing Core helpers individually:
 
@@ -167,24 +165,17 @@ The existing module names are not proof that their current contents are already 
 
 This is a classification target, not an assertion that every existing class already satisfies it. Before moving a type, inspect its full dependency graph and split mixed files at the lowest stable seam. A generic WAL envelope must not call a field decoder; a generic run reader must not know RecordId; a generic manifest must not manufacture a NamespaceId.
 
-## 6. One DLL now, independent package later
+## 6. Assembly and package boundaries
 
-The initial package can expose both namespaces from the same assembly:
+`Fld1.Storage.dll` and `Fld1.Database.dll` are independently built artifacts. The Storage public API must not expose any FLD Database or BIN-SYNC type in method signatures, generic constraints, events, exceptions or callbacks. Use opaque byte keys/values and storage-native identifiers. Its public dependencies should be BCL-only (including `System.IO.Hashing` where appropriate); do not require BinSync.Core, JSON serializers, a database facade, a network stack or a plugin host.
 
-- `Fld1.Storage.*` — reusable public storage surface;
-- `Fld1.Database.*` — FLD field database surface.
+The project graph is deliberately simple:
 
-The public Storage API must not expose any FLD Database or BIN-SYNC type in method signatures, generic constraints, events, exceptions or callbacks. Use opaque byte keys/values and storage-native identifiers. Its public dependencies should be BCL-only (including `System.IO.Hashing` where appropriate); do not require BinSync.Core, JSON serializers, a database facade, a network stack or a plugin host.
+- `Fld1.Storage.csproj`: no project reference to Database or BIN-SYNC.
+- `Fld1.Database.csproj`: one-way project reference to Storage.
+- Optional BIN-SYNC integration is a separate adapter/package and references the neutral Storage API plus BIN-SYNC contracts; it is not folded into either assembly by default.
 
-When the boundary is proven, extraction should be:
-
-1. Move `src/Fld1.Storage/**` and its tests into `Fld1.Storage.csproj`.
-2. Keep the public namespace and API stable.
-3. Make the FLD Database project reference the new Storage package/project.
-4. Move only genuinely shared low-level utilities with Storage; keep field/HLC/identity code in Database.
-5. Publish the Storage package independently if desired.
-
-No source-level algorithm rewrite should be necessary. Avoid circular references and `InternalsVisibleTo` as a permanent way for Database to reach into Storage internals.
+Both DLLs may be published together as a convenient FLD-DB package, while Storage can also be published independently. Consumers choosing Storage only must not acquire `Fld1.Database.dll` as a transitive runtime dependency. Avoid circular references and `InternalsVisibleTo` as a permanent way for Database to reach into Storage internals.
 
 ## 7. Physical format and engine reuse
 
@@ -236,4 +227,4 @@ Before treating Storage Core as reusable, add tests that prove:
 6. Implement metadata key/value encoding and the BIN-SYNC adapter outside the field database layer.
 7. Only after the boundary is stable, consider publishing a separate Storage assembly/package.
 
-**Core rule:** Storage Core is the durable byte engine; FLD Database is one consumer of it. The engine must never need to know that a field database or a synchronization protocol exists.
+**Core rule:** `Fld1.Storage.dll` is the durable byte engine; `Fld1.Database.dll` is one consumer of it. Storage must never need to know that a field database or a synchronization protocol exists.
