@@ -5,7 +5,7 @@ namespace Fld1.Storage.Integrity;
 /// <summary>Storage-format checksums. No FLD Database or BIN-SYNC semantics.</summary>
 internal static class StorageChecksums
 {
-    public static uint Crc32C(ReadOnlySpan<byte> data) => Crc32C.HashToUInt32(data);
+    public static uint Crc32C(ReadOnlySpan<byte> data) => System.IO.Hashing.Crc32C.HashToUInt32(data);
 
     public static uint Crc32C(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
     {
