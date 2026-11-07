@@ -246,6 +246,11 @@ A later optimization candidate is a WAL-backed Outbox reference:
 
 This can reduce transient duplicate payload storage, but it is more invasive than removing APPLY duplication. It must not be attempted until the simpler Outbox format and APPLY retention work is measured.
 
+## 7.1 Outbox replay dedup key offset correction (2026-11-07)
+
+A restart regression test exposed an incorrect field offset in the Outbox scanner's reconstruction of its in-memory deduplication key. The on-disk fixed record stores ChangeId at bytes 16–31 and RecordId at bytes 32–47; the scanner had read the two 64-bit RecordId halves from offsets 24 and 32. After reopen, replay of an unmaterialized WAL group commit therefore failed to recognize its already-appended Outbox entry and could append a duplicate.
+
+The scanner now reads the RecordId halves from offsets 32 and 40, matching EntryKey.From(OutboxEntry) and the writer layout. This does not change the Outbox v1 bytes or require migration. Regression coverage verifies both several separate commits and a local write followed by a remote APPLY winner across close/reopen; the Outbox must contain exactly the original local operations, with stable sequence order and no replay duplicates.
 ## 8. Pending local coalescing remains valid, but only before publication
 
 Current FLD _dirty collapses repeated writes to the same field before one Commit. Four Put calls followed by one Commit produce one field mutation in that commit. Four separate Put+Commit cycles produce four Outbox entries.
