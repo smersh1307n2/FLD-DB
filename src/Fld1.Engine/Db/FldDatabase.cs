@@ -1263,6 +1263,7 @@ public sealed class FldDatabase : IDisposable
         if (limit <= 0) return Array.Empty<RelayJournalBatch>();
         if (authorNodeId.SequenceEqual(_localAuthor))
             return Array.Empty<RelayJournalBatch>();
+        byte[] authorFilter = authorNodeId.ToArray();
 
         lock (_commitLock)
         {
@@ -1277,7 +1278,7 @@ public sealed class FldDatabase : IDisposable
                 {
                     cursor = item.JournalSeq;
                     var matching = item.Commit.Fields
-                        .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorNodeId))
+                        .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
                         .Select(f => new RemoteFieldWrite(
                             f.RecordId, f.FieldId, f.Value, f.Wall, f.Logical,
                             f.AuthorNodeId, f.ChangeId, f.KeyEpoch, f.OpKind == 2))
