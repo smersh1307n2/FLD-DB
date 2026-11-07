@@ -132,6 +132,71 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Apply_commit_codec_reads_legacy_v2_payload()
+    {
+        var field = new WalFieldMutation
+        {
+            RecordId = Id(6), FieldId = 7, OpKind = 1, KeyEpoch = 2,
+            Wall = 123, Logical = 4, AuthorNodeId = Id(8),
+            ChangeId = Id(9), Value = "legacy"u8.ToArray()
+        };
+        byte[] legacy = EncodeApplyV2(
+            sender: Id(1), issuer: Id(2), batch: Id(3), field,
+            protocolDelta: [0xA1, 0xB2]);
+
+        var decoded = ApplyCommitCodec.Decode(legacy);
+        Assert.Single(decoded.Fields);
+        Assert.Single(decoded.RelayFields);
+        Assert.Equal(field.ChangeId, decoded.RelayFields[0].ChangeId);
+        Assert.False(decoded.RelayOnly);
+    }
+
+    private static byte[] EncodeApplyV2(
+        byte[] sender, byte[] issuer, byte[] batch,
+        WalFieldMutation field, byte[] protocolDelta)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write(2u);
+        writer.Write(sender);
+        writer.Write(3u);
+        writer.Write((ushort)7);
+        writer.Write(issuer);
+        writer.Write(4u);
+        writer.Write(batch);
+        writer.Write(10ul);
+        writer.Write(11ul);
+        writer.Write(new byte[16]);
+        writer.Write(Id(4));
+        writer.Write(Id(5));
+        writer.Write((uint)protocolDelta.Length);
+        writer.Write(protocolDelta);
+        writer.Write(1u);
+        WriteLegacyFields(writer, [field]);
+        WriteLegacyFields(writer, [field]);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static void WriteLegacyFields(BinaryWriter writer, List<WalFieldMutation> fields)
+    {
+        writer.Write((uint)fields.Count);
+        foreach (var field in fields)
+        {
+            writer.Write(field.RecordId);
+            writer.Write(field.FieldId);
+            writer.Write(field.OpKind);
+            writer.Write(field.KeyEpoch);
+            writer.Write(field.Wall);
+            writer.Write(field.Logical);
+            writer.Write(field.AuthorNodeId);
+            writer.Write(field.ChangeId);
+            writer.Write((uint)field.Value.Length);
+            writer.Write(field.Value);
+        }
+    }
+
+    [Fact]
     public void Apply_commit_codec_roundtrip_and_wal_recovery()
     {
         var apply = new WalApplyCommit
