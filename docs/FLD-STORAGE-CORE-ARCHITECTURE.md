@@ -112,7 +112,7 @@ The following are FLD Database or BIN-SYNC responsibilities, not storage primiti
 - network frames, sessions, transport, cryptography and peer state machines;
 - LINQ/typed-record convenience APIs.
 
-Storage Core may persist opaque bytes supplied by these layers. It must not construct, validate or reinterpret their values.
+Storage Core must durably persist opaque bytes supplied by these layers, including the encoded representation of FLD field/record tombstones, but must not construct, validate or reinterpret their semantics. Storage-native deletion markers (for removing a byte key from its own index) are a separate physical-engine concern and must not be confused with FLD lifecycle tombstones. FLD Database decides when a field/record tombstone is safe to reclaim; Storage only performs the requested physical reclamation after that decision.
 
 ## 5. Source and project layout
 
