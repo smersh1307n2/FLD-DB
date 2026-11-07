@@ -583,6 +583,21 @@ public sealed class OutboxLog : IDisposable
         }
     }
 
+    /// <summary>Enumerate using a current fenced consumer lease.</summary>
+    public int VisitBatch(ulong afterSeq, int limit, OutboxLease lease, OutboxEntryVisitor visitor)
+    {
+        ArgumentNullException.ThrowIfNull(visitor);
+        if (limit <= 0)
+            return 0;
+
+        lock (_lock)
+        {
+            EnsureUsable();
+            ValidateLease(lease);
+            return VisitBatchUnlocked(afterSeq, limit, visitor);
+        }
+    }
+
     private int VisitBatchUnlocked(ulong afterSeq, int limit, OutboxEntryVisitor visitor)
     {
         ulong minimumExclusive = Math.Max(afterSeq, _ackedThrough);
@@ -780,23 +795,39 @@ public sealed class OutboxLog : IDisposable
         lock (_lock)
         {
             EnsureUsable();
-            if (throughSeq <= _ackedThrough)
-                return;
-
-            ulong lastAssigned = _nextSeq - 1;
-            if (throughSeq > lastAssigned)
-                throw new ArgumentOutOfRangeException(
-                    nameof(throughSeq),
-                    $"ACK {throughSeq} exceeds last assigned OutboxSeq {lastAssigned}.");
-
-            Span<byte> ack = stackalloc byte[AckSize];
-            BinaryPrimitives.WriteUInt64LittleEndian(ack.Slice(0, 8), throughSeq);
-            BinaryPrimitives.WriteUInt32LittleEndian(
-                ack.Slice(8, 4), Hashes.Crc32C(ack.Slice(0, 8)));
-
-            WriteAtomic(_ackPath, ack);
-            _ackedThrough = throughSeq;
+            AcknowledgeUnlocked(throughSeq);
         }
+    }
+
+    /// <summary>Advance ACK only while holding the current fenced consumer lease.</summary>
+    public void Acknowledge(ulong throughSeq, OutboxLease lease)
+    {
+        lock (_lock)
+        {
+            EnsureUsable();
+            ValidateLease(lease);
+            AcknowledgeUnlocked(throughSeq);
+        }
+    }
+
+    private void AcknowledgeUnlocked(ulong throughSeq)
+    {
+        if (throughSeq <= _ackedThrough)
+            return;
+
+        ulong lastAssigned = _nextSeq - 1;
+        if (throughSeq > lastAssigned)
+            throw new ArgumentOutOfRangeException(
+                nameof(throughSeq),
+                $"ACK {throughSeq} exceeds last assigned OutboxSeq {lastAssigned}.");
+
+        Span<byte> ack = stackalloc byte[AckSize];
+        BinaryPrimitives.WriteUInt64LittleEndian(ack.Slice(0, 8), throughSeq);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            ack.Slice(8, 4), Hashes.Crc32C(ack.Slice(0, 8)));
+
+        WriteAtomic(_ackPath, ack);
+        _ackedThrough = throughSeq;
     }
 
     /// <summary>
