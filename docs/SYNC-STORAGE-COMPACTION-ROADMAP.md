@@ -122,12 +122,12 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 - Relay-eligible LWW losers remain in the relay-only materialization.
 - Receipt metadata and relay payload still share one append-only journal record/file and therefore do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
 
-**2.3 Bounded indexes and seekable paging — open**
-- Replace unbounded all-history in-memory List/Dictionary assumptions with bounded/rebuildable indexes.
-- Seek from JournalSeq/cursor; do not rescan history from the beginning on every page.
+**2.3 Bounded indexes and seekable paging — partially implemented**
+- Implemented lower-bound binary search by JournalSeq in ReadBatches, so a page starts at the first entry after the cursor instead of rescanning the consumed prefix.
+- The in-memory List/Dictionary still retain every historical entry and remain unbounded/rebuildable-index work.
 - Add validated downstream safe watermark before relay payload GC; receipt expiry remains independent.
 
-**Exit:** payload single-encoding and relay-only promotion are implemented and tested; remaining exit gates are independent receipt/relay retention, bounded indexes, seekable paging and crash-tested safe GC.
+**Exit:** payload single-encoding and relay-only promotion are implemented and tested; seek cost is now O(log N + page size), but independent receipt/relay retention, bounded indexes and crash-tested safe GC remain open.
 
 
 ### Phase 3 — Durable local PendingLocal coalescing
@@ -319,3 +319,9 @@ Implemented:
 GitHub Actions run [42348013521](https://github.com/smersh1307n2/FLD-DB/actions/runs/42348013521) passed Release build and all tests at FLD-DB commit `4efc1985d4da633aa97a7e53d0cf9f44186257b0`.
 
 Still open: receipt and relay payload share one append-only journal file; no independent GC/compaction, bounded index or seekable paging exists. The relay payload must remain until downstream safe ACK; the receipt has its own retry/expiry horizon. Do not conflate their lifetimes.
+
+### 7.12 Seekable ApplyJournal paging (2026-11-07)
+
+`ApplyJournal.ReadBatches(afterJournalSeq, limit)` now performs a lower-bound binary search over the monotonic JournalSeq index and reads only the requested page. This removes the prior O(history) skip scan on every page; expected selection cost is O(log N + page size). A regression test writes four relay batches and verifies that paging after JournalSeq 2 returns only entries 3 and 4. The in-memory List and BatchKey Dictionary still grow with the complete journal; bounded/rebuildable indexes and compaction remain open.
+
+GitHub Actions run [42348362149](https://github.com/smersh1307n2/FLD-DB/actions/runs/42348362149) passed Release build and all tests at FLD-DB commit `6586c3afe19dfb34a36ebdc70ee7725e2198acfc`.
