@@ -1184,6 +1184,23 @@ public sealed class FldDatabase : IDisposable
             }
 
             int appliedCount = winners.Count;
+            var relayFields = new List<WalFieldMutation>(batch.RelayWrites.Count);
+            foreach (var write in batch.RelayWrites)
+            {
+                relayFields.Add(new WalFieldMutation
+                {
+                    RecordId = write.RecordId,
+                    FieldId = write.FieldId,
+                    OpKind = write.IsTombstone ? (byte)2 : (byte)1,
+                    KeyEpoch = write.KeyEpoch,
+                    Wall = write.Wall,
+                    Logical = write.Logical,
+                    AuthorNodeId = write.AuthorNodeId,
+                    ChangeId = write.ChangeId,
+                    Value = write.IsTombstone ? Array.Empty<byte>() : write.Value
+                });
+            }
+
             var walCommit = new WalApplyCommit
             {
                 SenderPeer = batch.SenderPeer,
@@ -1199,7 +1216,8 @@ public sealed class FldDatabase : IDisposable
                 RecordsRoot = batch.RecordsRoot,
                 ProtocolStateDelta = batch.ProtocolStateDelta,
                 AppliedCount = checked((uint)appliedCount),
-                Fields = fields
+                Fields = fields,
+                RelayFields = relayFields
             };
             byte[] walPayload = ApplyCommitCodec.Encode(walCommit);
 
@@ -1277,7 +1295,7 @@ public sealed class FldDatabase : IDisposable
                 foreach (var item in page)
                 {
                     cursor = item.JournalSeq;
-                    var matching = item.Commit.Fields
+                    var matching = item.Commit.RelayFields
                         .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
                         .Select(f => new RemoteFieldWrite(
                             f.RecordId, f.FieldId, f.Value, f.Wall, f.Logical,
@@ -1290,7 +1308,7 @@ public sealed class FldDatabase : IDisposable
                         source.SenderPeer, source.SenderEpoch, source.NamespaceId,
                         source.IssuerNodeId, source.IssuerEpoch, source.BatchId,
                         source.CursorStart, source.CursorEnd, source.PreviousBatchDigest,
-                        source.BatchDigest, source.RecordsRoot, matching, source.ProtocolStateDelta);
+                        source.BatchDigest, source.RecordsRoot, matching, matching, source.ProtocolStateDelta);
                     result.Add(new RelayJournalBatch
                     {
                         JournalSeq = item.JournalSeq,
