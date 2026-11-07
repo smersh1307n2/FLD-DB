@@ -112,6 +112,23 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void ApplyJournal_is_rebuilt_from_wal_if_materialization_is_missing()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        var batch = Batch(recordId, "recover-me"u8.ToArray(), 100, 5);
+        using (var db = FldDatabase.Open(_dir))
+            db.ApplyRemoteBatch(batch);
+
+        File.Delete(Path.Combine(_dir, "outbox", "ns_0.apply"));
+
+        using var reopened = FldDatabase.Open(_dir);
+        Assert.True(reopened.TryGetBytes(recordId, 5, out var value));
+        Assert.Equal("recover-me"u8.ToArray(), value);
+        Assert.Single(reopened.ReadRelayBatches(Author(9), 0, 10));
+        Assert.Equal(1UL, reopened.GetRelayJournalHighWatermark());
+    }
+
+    [Fact]
     public void ApplyRemoteBatch_persists_batch_without_enqueuing_non_relayable_change()
     {
         using var db = FldDatabase.Open(_dir);
@@ -141,6 +158,15 @@ public class SyncApplyTests : IDisposable
         Assert.Equal("local-newer"u8.ToArray(), value);
         Assert.Single(db.ReadRelayBatches(Author(9), 0, 10));
         Assert.Equal(1UL, db.GetOutboxHighWatermark());
+
+        // The remote operation loses LWW, so there is no overlay delta to write.
+        // Checkpoint must still seal its WAL commit without discarding relay history.
+        db.Checkpoint();
+        db.Dispose();
+        using var reopened = FldDatabase.Open(_dir);
+        Assert.True(reopened.TryGetBytes(recordId, 5, out var afterRestart));
+        Assert.Equal("local-newer"u8.ToArray(), afterRestart);
+        Assert.Single(reopened.ReadRelayBatches(Author(9), 0, 10));
     }
 
     [Fact]
