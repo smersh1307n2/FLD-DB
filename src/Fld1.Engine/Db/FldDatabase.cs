@@ -27,7 +27,8 @@ public sealed class FldDatabase : IDisposable
     private readonly byte[] _localAuthor;
     private readonly HlcClock _clock;
     private readonly MemOverlay _overlay = new();
-    private readonly HashSet<MemFieldKey> _dirty = new();
+    private readonly Dictionary<MemFieldKey, MemFieldValue> _dirty = new();
+    private ApplyJournal _applyJournal;
     private readonly AtomicManifestStore _manifestStore;
     private readonly object _commitLock = new();
     private WalManager _wal;
@@ -58,6 +59,7 @@ public sealed class FldDatabase : IDisposable
         byte[] localAuthor,
         WalManager wal,
         OutboxLog outbox,
+        ApplyJournal applyJournal,
         AtomicManifestStore manifestStore,
         int autoCheckpointOverlayFields = 0,
         bool truncateSealedWal = true,
@@ -69,6 +71,7 @@ public sealed class FldDatabase : IDisposable
         _clock = new HlcClock(localAuthor);
         _wal = wal;
         _outbox = outbox;
+        _applyJournal = applyJournal;
         _manifestStore = manifestStore;
         _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
         _truncateSealedWal = truncateSealedWal;
@@ -123,13 +126,15 @@ public sealed class FldDatabase : IDisposable
 
         var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
         OutboxLog? outbox = null;
+        ApplyJournal? applyJournal = null;
         try
         {
             outbox = OutboxLog.Open(
                 outboxDir, namespaceId, checkpointedThroughCommitSeq);
+            applyJournal = ApplyJournal.Open(outboxDir, namespaceId);
 
             var db = new FldDatabase(
-                dbDir, namespaceId, author, wal, outbox, manifestStore,
+                dbDir, namespaceId, author, wal, outbox, applyJournal, manifestStore,
                 options.AutoCheckpointOverlayFields,
                 options.TruncateSealedWal,
                 options.AutoCompactRunCount);
@@ -142,8 +147,9 @@ public sealed class FldDatabase : IDisposable
         catch
         {
             // Open must not leak file handles when Manifest/Run/Outbox recovery fails.
+            try { applyJournal?.Dispose(); } catch { /* preserve original open error */ }
             try { outbox?.Dispose(); } catch { /* preserve original open error */ }
-            try { wal.Dispose(); } catch { /* preserve original open error */ }
+            try { wal.Dispose(); catch { /* preserve original open error */ }
             throw;
         }
     }
@@ -301,7 +307,7 @@ public sealed class FldDatabase : IDisposable
         {
             EnsureHealthy();
             _overlay.Put(key, valueState);
-            _dirty.Add(key);
+            _dirty[key] = valueState;
         }
     }
 
@@ -382,14 +388,9 @@ public sealed class FldDatabase : IDisposable
             EnsureHealthy();
             if (_dirty.Count == 0) return 0;
 
-            // Only keys written since last Commit (delta)
-            var snap = new List<KeyValuePair<MemFieldKey, MemFieldValue>>(_dirty.Count);
-            foreach (var key in _dirty)
-            {
-                if (_overlay.TryGet(key, out var v) && v is not null)
-                    snap.Add(new KeyValuePair<MemFieldKey, MemFieldValue>(key, v));
-            }
-            if (snap.Count == 0) { _dirty.Clear(); return 0; }
+            // Capture the actual local operation at write time. A later remote merge may
+            // win the visible overlay, but must not rewrite the local operation's identity.
+            var snap = new List<KeyValuePair<MemFieldKey, MemFieldValue>>(_dirty);
 
             _clientRequestSeq++;
             var fields = new List<WalFieldMutation>(snap.Count);
@@ -975,8 +976,8 @@ public sealed class FldDatabase : IDisposable
 
 
     /// <summary>
-    /// Apply remote fields with LWW (remote HLC/author). Marks dirty for next Commit.
-    /// Transport/BIN-SYNC decode happens outside; this is the storage apply edge.
+    /// Legacy volatile LWW merge only. This method is not durable and MUST NOT be used
+    /// by BIN-SYNC receive; use ApplyRemoteBatch for atomic durable receive.
     /// Returns number of fields that became the LWW winner in overlay.
     /// </summary>
     public int ApplyRemote(ReadOnlySpan<RemoteFieldWrite> writes)
@@ -1013,7 +1014,6 @@ public sealed class FldDatabase : IDisposable
                     ChangeId = changeId
                 });
 
-                _dirty.Add(key);
                 applied++;
             }
 
@@ -1175,6 +1175,7 @@ public sealed class FldDatabase : IDisposable
                 catch { /* best-effort on dispose */ }
             }
             _disposed = true;
+            _applyJournal.Dispose();
             _outbox.Dispose();
             _wal.Dispose();
         }
