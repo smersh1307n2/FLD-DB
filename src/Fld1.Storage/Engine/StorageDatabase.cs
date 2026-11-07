@@ -80,7 +80,7 @@ public sealed class StorageDatabase : IDisposable
 
     public StorageWriteBatch BeginWriteBatch()
     {
-        lock (_gate) { EnsureUsable(); return new StorageWriteBatch(this); }
+        lock (_gate) { EnsureUsable(); return new StorageWriteBatch(this, _lastCommitSeq); }
     }
 
     public bool TryGet(ReadOnlySpan<byte> key, out byte[]? value)
@@ -134,12 +134,14 @@ public sealed class StorageDatabase : IDisposable
         }
     }
 
-    internal ulong Commit(IReadOnlyCollection<StorageMutation> mutations)
+    internal ulong Commit(IReadOnlyCollection<StorageMutation> mutations, ulong expectedBaseCommitSeq)
     {
         lock (_gate)
         {
             EnsureUsable();
             if (mutations.Count == 0) return _lastCommitSeq;
+            if (_lastCommitSeq != expectedBaseCommitSeq)
+                throw new StorageConflictException(expectedBaseCommitSeq, _lastCommitSeq);
             if (mutations.Count > MaxBatchOperations)
                 throw new ArgumentOutOfRangeException(nameof(mutations), "Storage batch operation limit exceeded.");
 
@@ -288,9 +290,28 @@ public sealed class StorageWriteBatch : IDisposable
 {
     private readonly StorageDatabase _database;
     private readonly Dictionary<StorageDatabase.StorageKey, StorageDatabase.StorageMutation> _mutations = new();
+    private readonly ulong _baseCommitSeq;
     private bool _completed;
 
-    internal StorageWriteBatch(StorageDatabase database) => _database = database;
+    internal StorageWriteBatch(StorageDatabase database, ulong baseCommitSeq)
+    {
+        _database = database;
+        _baseCommitSeq = baseCommitSeq;
+    }
+
+    /// <summary>Read-your-writes lookup. Commit fails if the database changed since this batch began.</summary>
+    public bool TryGet(ReadOnlySpan<byte> key, out byte[]? value)
+    {
+        EnsureOpen();
+        if (key.IsEmpty) throw new ArgumentException("Storage key must not be empty.", nameof(key));
+        if (_mutations.TryGetValue(new StorageDatabase.StorageKey(key), out var mutation))
+        {
+            value = mutation.IsDelete ? null : mutation.Value.ToArray();
+            return !mutation.IsDelete;
+        }
+
+        return _database.TryGet(key, out value);
+    }
 
     public void Put(ReadOnlySpan<byte> key, ReadOnlySpan<byte> value)
     {
@@ -312,7 +333,7 @@ public sealed class StorageWriteBatch : IDisposable
     {
         EnsureOpen();
         _completed = true;
-        return _database.Commit(_mutations.Values.ToArray());
+        return _database.Commit(_mutations.Values.ToArray(), _baseCommitSeq);
     }
 
     public void Dispose() => _completed = true;
@@ -371,3 +392,17 @@ public sealed class StorageSnapshot : IDisposable
 }
 
 public sealed record StorageEntry(byte[] Key, byte[] Value);
+
+/// <summary>Optimistic transaction conflict: the database changed after the batch began.</summary>
+public sealed class StorageConflictException : InvalidOperationException
+{
+    public ulong ExpectedCommitSeq { get; }
+    public ulong ActualCommitSeq { get; }
+
+    public StorageConflictException(ulong expectedCommitSeq, ulong actualCommitSeq)
+        : base($"Storage write conflict: expected base CommitSeq {expectedCommitSeq}, actual {actualCommitSeq}.")
+    {
+        ExpectedCommitSeq = expectedCommitSeq;
+        ActualCommitSeq = actualCommitSeq;
+    }
+}
