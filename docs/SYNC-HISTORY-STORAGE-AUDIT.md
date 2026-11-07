@@ -40,7 +40,7 @@ These are distinct logical facts. They may share a physical log or transaction, 
 ## 2. Audited baselines
 
 - FLD-DB audited code ref: branch fix/crash-consistency-outbox at b488dafcfda81d6383717ceaf05a3717a3959923. The implementation baseline is 196628a49d6034559a7041237af7feec36fd9b20; the 17 commits between those refs are documentation-only.
-- FLD-DB final documentation HEAD after this audit: 7724f996aaadf4e92021e4043c12646cd3e9eaff. The three commits added this audit and links from the Storage Core architecture and kernel specification; no source code changed.
+- FLD-DB documentation update: this audit was added in commit 87dfc769882390b714776c73659a5235b0927d21, then linked from the Storage Core architecture and kernel specification in documentation-only commits. The source baseline remains unchanged; no source code changed.
 - BIN-SYNC audited code ref: branch feature/fld-external-storage at dd2dd969d70b6fd46371679903855a69ae9399c3.
 - BIN-SYNC final documentation HEAD after this audit: d868f47953f1d3ef94d590169694e0cb66342e78. Three documentation files were updated; no source code or wire specification changed.
 - Audited BIN-SYNC files include Node.DeltaBatch.cs, Node.ApplyBatch.cs, Node.LocalWrites.cs, NodePersistence.cs, Node.BatchCodec.cs, Wal.cs, METADATA-STORAGE-ARCHITECTURE.md and CHANGE-STAGING-AND-RETENTION.md.
