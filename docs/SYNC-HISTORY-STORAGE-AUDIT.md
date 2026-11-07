@@ -210,7 +210,7 @@ The operation-payload multiplicity is now:
 - non-relay operation: one WAL copy until WAL checkpoint/truncation, then no journal copy;
 - relay-selected operation: one WAL copy plus one relay-only journal copy until WAL checkpoint/truncation, then one journal copy.
 
-The receipt and relay payload are logically distinct but still physically co-located in the same append-only ApplyJournal record/file. They do not yet have independent physical GC lifetimes. No receipt or relay payload is reclaimed.
+The receipt and relay payload are logically distinct but still physically co-located in the same ApplyJournal record/file. Per-author relay ACK and physical relay-payload reclamation are now implemented: a CRC-protected sidecar persists safe JournalSeq watermarks; reads suppress acknowledged payload immediately; checkpoint compacts the journal only after the corresponding WAL commits are sealed/truncated. Compaction removes only acknowledged authors' relay fields and preserves receipt metadata plus other authors' payload. Receipt GC remains independent and is not implemented.
 
 ### 6.3 ApplyJournal index growth remains unbounded; paging scan is fixed
 
