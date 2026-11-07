@@ -335,6 +335,15 @@ When FLD-DB stores synchronized user data, it implements the durable field-store
 - A repeated batch returns the original receipt and ACK semantics; it MUST NOT reapply mutations or enqueue duplicate relay work.
 - Snapshot chunks use the same LWW primitives, preserve field tombstones and lifecycle state, and do not create local-author Outbox entries. Snapshot installation and tail boundary must refer to one consistent state view.
 
+**Current storage amplification and target decomposition:**
+
+- Current ApplyCommitCodec v2 serializes Fields and RelayFields separately even though RelayFields is validated as an exact subset of Fields by ChangeId and byte-identical operation data. Relay payload bytes are therefore duplicated inside one APPLY_COMMIT.
+- FldDatabase then appends the same full encoded APPLY_COMMIT payload to both WAL and ApplyJournal. ApplyJournal retains the full original Fields array even though relay reads only need RelayFields and duplicate-batch handling needs a compact receipt.
+- The inspected ApplyJournal has no public ACK/compaction/truncation boundary. It currently couples duplicate-receipt retention to relay-payload retention and can grow independently of WAL checkpointing.
+- Target: encode each incoming operation once in WAL and represent relay selection with compact indexes/bitmap; persist a compact durable receipt separately from a relay-only journal; materialize both sidecars idempotently from the authoritative WAL CommitSeq; truncate WAL only after sidecars are durable.
+- Receipt GC follows Inbox expiry plus confirmed-log-segment semantics. Relay payload GC follows BIN-SYNC safe downstream ACK. These are independent lifetimes. Do not delete the receipt when relay completes, or relay payload when the receipt expires.
+- This is an internal storage-format/retention redesign, not a wire-format change. The detailed analysis and required crash tests are in the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision.
+
 ### 4.6. Digest domains
 - BIN-SYNC RecordDigest and StateRootDigest follow v2 domains/formulas (§9.1), including FieldWrite-vs-FieldTomb kind and lifecycle author. Outbox cursor/ACK progress is excluded from StateRootDigest.
 - FLD Run StateDigest, DB RootDigest, composition digest, and physical file checksum are private FLD integrity domains. They MUST NOT be substituted for BIN-SYNC RecordDigest, BucketDigest, or StateRootDigest.
