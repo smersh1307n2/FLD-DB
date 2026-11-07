@@ -211,12 +211,17 @@ public sealed class FldDatabase : IDisposable
                     // A sealed journal record may already have had ACKed relay
                     // payload reclaimed. Its durable receipt is authoritative;
                     // do not compare it with the full pre-checkpoint WAL payload.
-                    if (!_applyJournal.TryFindBatch(
+                    if (_applyJournal.TryFindBatch(
                             apply.IssuerNodeId, apply.IssuerEpoch, apply.NamespaceId,
-                            apply.BatchId, out _))
+                            apply.BatchId, out var existingReceipt))
                     {
-                        if (_applyJournal.AppendIfMissing(record.CommitSeq, record.Payload))
-                            needsApplyJournalFlush = true;
+                        if (existingReceipt is null ||
+                            !_applyJournal.MatchesReceiptMetadata(existingReceipt.Commit, apply))
+                            throw new InvalidDataException("Sealed APPLY WAL metadata conflicts with its durable batch receipt.");
+                    }
+                    else if (_applyJournal.AppendIfMissing(record.CommitSeq, record.Payload))
+                    {
+                        needsApplyJournalFlush = true;
                     }
                     continue;
                 }
