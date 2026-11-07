@@ -106,6 +106,46 @@ public class SyncApplyTests : IDisposable
     }
 
     [Fact]
+    public void Outbox_lease_fences_previous_consumers_and_ack()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "leased"u8);
+        db.Commit();
+
+        var first = db.AcquireOutboxLease(Author(1));
+        var second = db.AcquireOutboxLease(Author(2));
+
+        bool Visit(in Fld1.Engine.Outbox.OutboxEntryView entry) => true;
+        Assert.Throws<InvalidOperationException>(
+            () => db.VisitOutboxBatch(0, 10, first, Visit));
+        Assert.Throws<InvalidOperationException>(() => db.AcknowledgeOutbox(1, first));
+
+        Assert.Equal(1, db.VisitOutboxBatch(0, 10, second, Visit));
+        db.AcknowledgeOutbox(1, second);
+        Assert.Equal(1UL, db.GetOutboxWatermark());
+
+        db.ReleaseOutboxLease(second);
+        Assert.Throws<InvalidOperationException>(
+            () => db.VisitOutboxBatch(0, 10, second, Visit));
+    }
+
+    [Fact]
+    public void Outbox_lease_epoch_survives_reopen()
+    {
+        OutboxLease first;
+        using (var db = FldDatabase.Open(_dir))
+            first = db.AcquireOutboxLease(Author(3));
+
+        using var reopened = FldDatabase.Open(_dir);
+        var second = reopened.AcquireOutboxLease(Author(4));
+        Assert.True(second.Epoch > first.Epoch);
+        bool Visit(in Fld1.Engine.Outbox.OutboxEntryView entry) => true;
+        Assert.Throws<InvalidOperationException>(
+            () => reopened.VisitOutboxBatch(0, 10, first, Visit));
+    }
+
+    [Fact]
     public void Outbox_compact_after_ack()
     {
         using var db = FldDatabase.Open(_dir);
