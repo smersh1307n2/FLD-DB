@@ -444,9 +444,9 @@ The existing fail-closed behavior remains mandatory. The research note is a desi
 This section preserves the adapter requirements from the integration handoff. The provenance mapping remains mandatory, but it is **not the next cross-repository implementation task**. The higher-level Metadata Store architecture sequence takes precedence: define and test neutral semantic operations; define Data Provider atomicity modes; move BIN-SYNC persistence behind that boundary; extract FLD Storage-only semantics; implement the Metadata Store adapter; then complete this FLD synchronized-database provenance integration. PendingLocal remains deferred until the applicable storage/adapter gates are closed.
 
 **Verified branch checkpoint:**
-- FLD-DB fix/crash-consistency-outbox: code baseline eacff36; current branch head d4627626 contains documentation-only commits after that code baseline.
-- BIN-SYNC feature/fld-external-storage: code baseline d2e0313; current branch head 8c836f84 contains documentation-only commits after that code baseline.
-- No adapter implementation or code changes are present after those code baselines. Existing public APIs and FLD journal/ACK implementation are the starting point, not a completed adapter.
+- FLD-DB fix/crash-consistency-outbox: latest verified code baseline `81cb93fae0d6` (the later `eacff36` and subsequent commits in this checkpoint sequence are documentation-only).
+- BIN-SYNC feature/fld-external-storage: latest verified code baseline `b3d652236290` (the later `d2e0313` and subsequent commits in this checkpoint sequence are documentation-only).
+- No adapter implementation or source-code changes are present after those code baselines. Existing public APIs and FLD journal/ACK implementation are the starting point, not a completed adapter.
 
 **Existing primitives verified in source:**
 - FLD ReadRelayBatchPage(author, afterJournalSeq, limit) returns author-filtered relay batches plus ScannedThroughJournalSeq, advancing across nonmatching ApplyJournal records.
