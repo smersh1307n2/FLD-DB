@@ -124,7 +124,8 @@ Both DLLs are separately buildable artifacts. They may be delivered together in 
 
 **2.3 Bounded indexes and seekable paging — partially implemented**
 - Implemented a sparse in-memory anchor every 256 JournalSeq records. ReadBatches binary-searches the anchors and scans at most one bounded stride before reading the requested page; it no longer retains a full IndexEntry List or rescans the entire consumed prefix.
-- The BatchKey→IndexEntry Dictionary and on-disk receipt history still grow with every batch; a disk-backed/rebuildable batch index and safe receipt GC remain open.
+- The BatchKey→offset Dictionary and on-disk receipt history still grow with every batch; a disk-backed/rebuildable batch index and safe receipt GC remain open.
+- `ReadRelayBatchPage` now returns `ScannedThroughJournalSeq`, including ranges with no matching author operations. The adapter must persist this scan cursor atomically with all returned relay operations; it is not a safe ACK watermark.
 - Before relay payload GC, persist source provenance mapping (author, JournalSeq, ChangeId → BIN-SYNC OutboxSeq) across restart. BIN-SYNC must compute per-author minimum safe ACK across all interested peers and pass a JournalSeq watermark; receipt expiry remains independent.
 
 **Exit:** payload single-encoding and relay-only promotion are implemented and tested; seek cost is now O(log N + page size), but independent receipt/relay retention, bounded indexes and crash-tested safe GC remain open.
@@ -339,3 +340,9 @@ GitHub Actions run [42348683438](https://github.com/smersh1307n2/BIN-SYNC/action
 The full per-record `_entries` List was removed. ApplyJournal now keeps one sparse `JournalSeq→offset` anchor per 256 records and uses lower-bound binary search to find the nearest anchor, then scans at most one bounded stride to the requested page. The `BatchKey` dictionary now stores only the 64-bit record offset rather than a full repeated IndexEntry; it remains one entry per receipt and is still unbounded. Disk-backed/rebuildable receipt indexing and independent receipt GC remain open.
 
 A restart regression test verifies page reads after JournalSeq 2. The regression test was expanded to 260 batches so it crosses the second sparse anchor and verifies restart reconstruction. The BatchKey dictionary value was then reduced to a 64-bit offset. GitHub Actions run [42348983102](https://github.com/smersh1307n2/FLD-DB/actions/runs/42348983102) passed Release build and all tests at FLD-DB commit `044272f56415270cc332e6e8a8bde16890cfba50`.
+
+### 7.14 Relay page scan cursor (2026-11-07)
+
+Added `FldDatabase.ReadRelayBatchPage(author, afterJournalSeq, limit)`, returning both matching relay batches and `ScannedThroughJournalSeq`. The cursor advances across nonmatching batches as well, so an author with sparse relay traffic does not repeatedly rescan the same empty tail. The legacy `ReadRelayBatches` API remains as a compatibility wrapper. A 260-record test verifies sparse-anchor paging after restart, a one-item page cursor, and an empty-author scan advancing to JournalSeq 260.
+
+The integration contract now requires BIN-SYNC to persist the scan cursor atomically with all relay operations returned in the page. Scan progress is not a downstream-safe ACK and cannot authorize payload reclamation. CI validation is running for the latest API/test changes.
