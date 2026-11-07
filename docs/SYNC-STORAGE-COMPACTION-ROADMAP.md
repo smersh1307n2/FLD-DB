@@ -230,3 +230,15 @@ The current working refs were rechecked against the audited code baselines befor
 - Backup refs `backup/pre-compaction-2026-11-07` in both repositories were compared to the working refs and are identical at the time of this revalidation.
 
 Therefore the source-code findings in the audit remain applicable to the current working branches. No tests or benchmarks have been run in this revalidation; it verifies source baselines and changed-path scope only.
+
+
+### 7.2 First implementation slice — replay-cache reclamation (2026-11-07)
+
+Implemented in BIN-SYNC:
+- `Node.ProcessAckInternal` now removes deterministic `PeerState.Ids` mappings only when the validated per-author contiguous ACK covers the cached cursor range end.
+- The independent `LastStreamDigest` checkpoint is deliberately preserved; it is not replay-cache payload and is needed to seed subsequent digest-chain batches.
+- The test `Ack_watermark_and_pushed_stream_survive_restart_and_duplicate_ack_is_idempotent` now verifies cache removal, digest-checkpoint preservation and the persisted post-ACK state.
+
+Commits: `dc9a1304de00e75bacb0d2bdd864e0f48e687361` (implementation), `402b801e4b2d2781e048f3785766c0abf0425016` (test). GitHub Actions run [42342495367](https://github.com/smersh1307n2/BIN-SYNC/actions/runs/42342495367) completed successfully: .NET 10 build/tests, public samples, coverage threshold, fuzz/lab/hardening jobs all passed.
+
+This closes only the replay-cache pruning subtask. Global route-independent ChangeId dedup and receipt consolidation remain open. No wire format or NodePersistence version changed.
