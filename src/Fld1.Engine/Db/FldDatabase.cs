@@ -147,6 +147,7 @@ public sealed class FldDatabase : IDisposable
             db.LoadRunsFromManifest(manifest);
             db.GcOrphanRuns();
             db.ReplayWalIntoOverlay(walRecords);
+            db._applyJournal.ValidateRelayAckWatermarks();
             if (db._truncateSealedWal && db._lastSealedCommitSeq != 0)
             {
                 db._wal.TruncateSealedSegments(db._lastSealedCommitSeq);
