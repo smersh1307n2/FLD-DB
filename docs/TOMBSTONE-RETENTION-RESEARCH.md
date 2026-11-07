@@ -46,6 +46,10 @@ References:
 - Microsoft Learn, *IForgottenKnowledge*: https://learn.microsoft.com/en-us/windows/win32/api/winsync/nn-winsync-iforgottenknowledge
 - Microsoft Research, *Peer-to-Peer Replication in WinFS* (MSR-TR-2006-78): https://www.microsoft.com/en-us/research/wp-content/uploads/2006/06/tr-2006-78.pdf
 
+A related but distinct Microsoft Research system, WinFS Sync, is also instructive. Its 2006 paper describes a knowledge-driven P2P protocol with compact per-replica version-vector knowledge and per-change-unit version metadata. For tombstone cleanup, the paper reports that the then-current WinFS implementation used a fixed timeout **and retained knowledge of the tombstones that had been discarded** (similar to Bayou's omitted vector). It also states that an involuntarily retired replica cannot be distinguished from a slow replica by the other members; human intervention is required to repair the community. Thus, WinFS is not evidence that a timeout alone is safe: the timeout is paired with forgotten-deletion knowledge, and replica retirement remains an explicit operational problem.
+
+This nuance is separate from Microsoft Sync Framework's documented ForgottenKnowledge API and full-enumeration recovery behavior above. The two Microsoft systems should not be conflated.
+
 ### 2.2 CRDT research: causal stability versus commitment
 
 Shapiro et al., *CRDTs: Consistency without Concurrency Control* (2011), section 4, distinguishes two GC classes:
