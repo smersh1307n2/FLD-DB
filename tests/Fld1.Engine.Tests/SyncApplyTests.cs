@@ -265,6 +265,8 @@ public class SyncApplyTests : IDisposable
         using (var db = FldDatabase.Open(_dir))
         {
             db.ApplyRemoteBatch(batch);
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => db.AcknowledgeRelayBatches(authorA, safeThroughJournalSeq: 2));
             db.AcknowledgeRelayBatches(authorA, safeThroughJournalSeq: 1);
 
             var ackedBeforeRestart = db.ReadRelayBatchPage(authorA, 0, 10);
