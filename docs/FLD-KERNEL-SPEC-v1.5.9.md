@@ -71,7 +71,8 @@ Application A                    Application B
   outbox/ns_<id>.obx           // local-author Outbox
   outbox/ns_<id>.obx.ack       // safe local-Outbox ACK watermark
   outbox/ns_<id>.obx.state     // WAL materialization watermark
-  outbox/ns_<id>.obx.lease     // fenced consumer owner + epoch
+  outbox/ns_<id>.obx.lease     // fenced local-Outbox consumer owner + epoch
+  outbox/ns_<id>.apply         // durable APPLY receipts + opaque protocol delta + relay mutations
   runs/<runId>.fld1            // immutable runs
   del/<runId>.fld1.deleted     // EBR-deferred unlink
   shm.fldm                     // shared memory segment
@@ -445,15 +446,18 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 - Canonical payload validation and SCHEMA_MAP strictness follow BIN-SYNC §§8 and 18.4; malformed, duplicate, unsorted, or ambiguous descriptors are rejected before commit.
 
 ### 11.7. Implementation conformance gates
-The following are mandatory before FLD-DB claims full BIN-SYNC v2.4.17 conformance:
-1. LOCAL/APPLY WAL separation and proof that remote writes never enter local Outbox.
-2. Mandatory immutable ChangeId and durable dedup across restart.
-3. Relay retention for provenance-valid LWW losers, with exact self-echo suppression.
-4. Atomic persistence of opaque BIN-SYNC ProtocolStateDelta (Inbox/cursor/digest-chain/SeenChanges) with field state and relay journal before ACK.
-5. Local Outbox cursor mapping, BIN-SYNC-assigned relay author streams, peer-relative offsets outside FLD, bounded ACK and fenced safe retention.
-6. Snapshot consistency and snapshot-tail binding across concurrent commit/compaction.
-7. BIN-SYNC v2 RecordDigest/StateRoot compatibility tests, including tombstone/lifecycle cases.
-8. Strict schema and unsupported merge-policy behavior.
-9. Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction, and concurrent snapshot acceptance tests.
+The following gates are tracked independently; partial implementation is not full BIN-SYNC conformance:
 
-**Status:** specification alignment only. Items in §11.7 remain implementation gates until covered by code and tests; this document does not claim they are already implemented.
+| Gate | Current implementation state |
+|---|---|
+| LOCAL/APPLY WAL separation; remote writes never enter local Outbox | **Implemented.** KindApplyCommit is separate from KindGroupCommit; recovery dispatches by kind. Only local group commits materialize to .obx. |
+| Mandatory immutable ChangeId; durable batch dedup | **Partial.** Remote ChangeId is required, nonzero and immutable. Apply Journal deduplicates the durable inbox key (IssuerNodeId, NamespaceId, IssuerEpoch, BatchId) across restart; global SeenChanges/ChangeId dedup remains BIN-SYNC-owned. |
+| Relay retention for LWW losers; self-echo suppression | **Partial.** RelayWrites is an explicit BIN-SYNC-prepared subset, independent of LWW winners; LWW losers are retained. BIN-SYNC must exclude already-seen/self-echo operations before constructing the subset. Relay ACK/compaction is not implemented yet. |
+| Atomic ProtocolStateDelta + field state + relay data before ACK | **Partial.** ApplyRemoteBatch writes APPLY_COMMIT to WAL, flushes, materializes the complete payload in outbox/ns_<id>.apply, then publishes field winners and returns a durable receipt. Recovery rematerializes a missing journal record from WAL. Full protocol-state GC/retention remains open. |
+| Local Outbox cursor; relay author streams; peer offsets; bounded ACK/fenced retention | **Partial.** Local Outbox remains LocalAuthor-only and has a fenced lease. Relay journal paging uses an internal JournalSeq (not a sync cursor); relay lease, ACK watermark and safe compaction remain open. |
+| Snapshot consistency and snapshot-tail binding | **Not implemented.** |
+| BIN-SYNC v2 RecordDigest/StateRoot compatibility tests | **Not implemented.** |
+| Strict schema and unsupported merge-policy behavior | **Not implemented.** |
+| Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction and concurrent snapshot tests | **Partial.** APPLY WAL recovery, journal rematerialization, duplicate batch receipt, LWW-loser retention and local-Outbox isolation have tests; mesh, relay ACK/compaction and snapshot concurrency remain open. |
+
+**Current status:** LOCAL/APPLY separation and the first durable remote-apply path are implemented, but FLD-DB does **not** yet claim full BIN-SYNC v2.4.17 conformance. The remaining gates above are still required.
