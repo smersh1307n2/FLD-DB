@@ -412,3 +412,14 @@ A handshake commits the negotiated alias map and peer epoch to Node memory. Sinc
 Verified on BIN-SYNC head 354eab38dc859e2f26838efb332c14310aa17022: Storage Integration 127/127 independently on Ubuntu, Windows and macOS-15; Core 648/648; Fuzz/Lab 31/31; 70.4% line coverage; in-memory and real-TCP samples pass on all three platforms.
 
 The coordinator-level receive process-kill sequence is now covered end to end. True physical power-loss/I/O fault injection remains a separate, open validation gate.
+
+
+## 18. FLD Storage WAL writer-fence source parity (2026-11-08)
+
+The FLD-DB `src/Fld1.Storage` copy was behind the already-verified BIN-SYNC `external/Fld1.Storage` copy: it had no cross-process WAL writer fence, and `StorageDatabase.Open` loaded the snapshot before acquiring any writer ownership. This could let a second process read a snapshot/WAL view while another process was checkpointing.
+
+The FLD source now uses the same named OS Mutex fence and process-wide manager-thread ownership as BIN-SYNC. The fence is acquired by `WalManager.Open` before snapshot load and WAL recovery. The manager thread releases the mutex even when the caller disposes the database from a different thread; abandoned mutex ownership is accepted only as a recovery handoff. Symlink/path aliases are canonicalized before deriving the mutex identity.
+
+FLD Storage tests now cover second-open rejection, cross-thread release/reopen and abandoned-owner recovery. CI on commit `c90171a4d6927402debd940ccfbf8bfca9fa5829` passed 146/146 tests (23 Core, 58 Engine, 9 Manifest, 25 Run, 14 Storage, 17 WAL). This FLD workflow is Ubuntu-only; BIN-SYNC's matching Storage Integration fence suite has three-OS coverage.
+
+This is a storage-source parity fix, not completion of the two-DLL extraction: FLD still builds Core, Engine, Manifest, Run and WAL as separate projects today. The approved target remains exactly `Fld1.Storage.dll` and `Fld1.Database.dll`.
