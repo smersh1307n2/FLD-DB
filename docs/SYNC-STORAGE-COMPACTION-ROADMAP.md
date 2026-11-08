@@ -1706,6 +1706,6 @@ Two boundaries are now exercised by process termination rather than only injecte
 
 The provider-commit cut uses a test-only IDataProvider decorator that blocks immediately after the underlying StorageDataProvider commit. Both crash cuts kill the actual testhost PID; the outer dotnet test process is then reaped. Existing unconditional child cleanup and the three-minute hang-dump guard remain enabled.
 
-**Verification on BIN-SYNC HEAD ea8642e729dbc487f0b6f727d897e81a9d280278:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 125/125 on Ubuntu and Windows; samples pass. macOS-15 is currently running. PR #16 remains Draft/open/unmerged.
+**Verification on BIN-SYNC HEAD ea8642e729dbc487f0b6f727d897e81a9d280278:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 125/125 independently on Ubuntu, Windows and macOS-15; in-memory and real-TCP samples pass on all three platforms. PR #16 remains Draft/open/unmerged.
 
 **Still open in the receive crash matrix:** process kill after PendingApply staging but before Node apply, and after Metadata Store finalization but before network ACK. Also open: physical power-loss/I/O fault injection, legacy Node-owned receive/transport retirement, receipt/dedup/tombstone GC horizons, and FLD JournalSeq provenance/atomic staging. Keep the two-DLL architecture.
