@@ -1,3 +1,5 @@
+> **BIN-SYNC v3.0.0 alignment (2026-11-08):** This roadmap is the FLD storage/compaction work log. For protocol ownership, BIN-SYNC-SPECIFICATION.txt v3.0.0 is authoritative. FLD OutboxSeq, FLD ApplyJournal JournalSeq and WAL CommitSeq are local coordinates, not OriginSequence. BIN-SYNC Metadata Store allocates OriginSequence at durable freeze and owns published ChangeId/Origin, receipts, per-peer delivery state and relay payload. Do not add a duplicate PendingLocal journal or a second authoritative per-source relay history. Tombstones/ghosts remain until the independent v3 membership/full-resync proof authorizes reclamation; TTL/HLC age alone is insufficient. The two runtime DLLs remain Fld1.Storage.dll and Fld1.Database.dll.
+
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
 **Date:** 2026-11-08  
