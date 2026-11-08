@@ -388,3 +388,9 @@ The 2026-11-07 findings above are historical audit evidence. The current BIN-SYN
 **Two-DLL decision remains:** keep `Fld1.Storage.dll` as the reusable BCL-only storage/WAL/snapshot engine and `Fld1.Database.dll` as the FLD database layer/overlay. Keep the source organization separable so the storage DLL can be reused independently; do not add a third shared runtime DLL.
 
 **Open gates:** membership and peer-epoch retirement; receipt/dedup/tombstone GC horizons; legacy non-Storage Node/Transport authority retirement; true physical power-loss/I/O fault injection; complete coordinator process-kill/reopen matrix; FLD cross-commit PendingLocal and `JournalSeq → ChangeId → OutboxSeq` atomic provenance adapter.
+
+## 16. WAL writer-fence hang follow-up (2026-11-08)
+
+The file-share WAL lease experiment was reverted after it stalled the cross-process test/lock lifecycle. The implementation is again a named OS-managed Mutex owned and released by a dedicated process-wide manager thread. The process-kill regression now terminates the actual testhost PID that owns the StorageDatabase, not only the outer dotnet test process. Child-process cleanup is unconditional and bounded, and the Storage Integration workflow now uses a three-minute dotnet test --blame-hang-timeout with a mini dump.
+
+On BIN-SYNC head 532baa0010140b799f3759e1c88d0c722cdf6727, verification passed: Core 648/648, Fuzz/Lab 31/31, 70.4% line coverage, Storage Integration 122/122 on Ubuntu and Windows, and both in-memory/TCP samples. macOS-15 is still queued. This supersedes the prior 122/122 checkpoint at 75133279fc9eca941983fe1ffcce94f63a1e0f70; do not mark the three-OS gate complete until macOS finishes.
