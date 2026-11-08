@@ -1696,22 +1696,24 @@ The interrupted continuation exposed a long-running Storage Integration test aro
 
 
 
-### 7.34 Coordinator process-kill recovery across three receive durability cuts (2026-11-08)
 
-Added real subprocess crash tests around the Storage-backed receive coordinator. The parent test starts a filtered child testhost, waits for a durable crash-cut marker, kills the actual process holding the WAL Mutex, reopens the same physical database, and verifies recovery.
+### 7.34 Coordinator process-kill recovery across the receive durability sequence (2026-11-08)
 
-Three boundaries are now exercised by process termination rather than only injected exceptions:
+Added real subprocess crash tests around the Storage-backed receive coordinator. The parent test starts a filtered child testhost, waits for a durable crash-cut marker, kills the actual process holding the WAL Mutex, reopens the same physical database, and verifies the state appropriate to that commit boundary.
 
-- **After PendingApply staging, before Node apply:** the intent and exact wire payload are durable; the Node checkpoint still has no incoming field and provider state is absent. Recovery uses the saved negotiated alias map, replays the immutable intent into Node/provider and finalizes metadata.
-- **After Node checkpoint, before provider apply:** the intent and applied Node checkpoint are durable; provider state is absent. Recovery replays the intent, idempotently materializes provider state and finalizes metadata.
-- **After provider commit, before Metadata Store finalization:** Node checkpoint and provider mutation are durable while PendingApply remains. Recovery repeats provider apply using the same ApplyToken, recognizes the provider's idempotent receipt, and finalizes metadata without losing or duplicating the operation.
+Four boundaries are now exercised by process termination rather than only injected exceptions:
+
+- **After PendingApply staging, before Node apply:** the intent and exact wire payload are durable; the Node checkpoint has no incoming field and provider state is absent. Recovery replays the immutable intent.
+- **After Node checkpoint, before provider apply:** PendingApply and the applied Node checkpoint are durable; provider state is absent. Recovery completes provider application and metadata finalization.
+- **After provider commit, before Metadata Store finalization:** Node checkpoint and provider mutation are durable while PendingApply remains. Recovery repeats provider apply using the same ApplyToken, recognizes the idempotent receipt and finalizes metadata.
+- **After Metadata Store finalization, before network ACK:** Node/provider state and the durable receive cursor/receipt are committed, PendingApply is already gone, but the callback blocks before ACK. After process death, recovery correctly finds no pending intent and the committed cursor remains advanced.
 
 The process-kill harness terminates the actual testhost PID, then reaps the outer dotnet test process. On Windows, the parent retries WAL reopen for up to ten seconds because the OS may release the killed process's WAL file handle slightly after process exit. Child cleanup remains unconditional and bounded.
 
-**Session checkpoint contract:** a successful SyncSession handshake mutates the Node's negotiated alias table and peer epoch. These values are required to decode a staged wire payload during restart recovery. Therefore StorageNodePersistence.Save must be called after each successful handshake and before the first inbound durable batch. The API documentation and Storage array/TCP samples now show this ordering.
+**Session checkpoint contract:** a successful SyncSession handshake mutates the Node's negotiated alias table and peer epoch. These values are required to decode a staged wire payload during restart recovery. Therefore StorageNodePersistence.Save must be called after each successful handshake and before the first inbound durable batch. The persistence API documentation and both Storage array/TCP samples now demonstrate this ordering.
 
 Storage Integration runs with --blame-hang-timeout 3m --blame-hang-dump-type mini so a future stalled test yields diagnostics.
 
-**Verification on BIN-SYNC HEAD b47c86a02998b3d9aa6a8dcbfc991d9c0245ea1e:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 126/126 independently on Ubuntu, Windows and macOS-15; both in-memory and real-TCP samples pass on all three platforms. PR #16 remains Draft/open/unmerged.
+**Verification on BIN-SYNC HEAD 354eab38dc859e2f26838efb332c14310aa17022:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 127/127 independently on Ubuntu, Windows and macOS-15; both in-memory and real-TCP samples pass on all three platforms. PR #16 remains Draft/open/unmerged.
 
-**Still open in the receive crash matrix:** process kill after Metadata Store finalization but before network ACK. Also open: physical power-loss/I/O fault injection, legacy Node-owned receive/transport retirement, other-author relay state migration, receipt/dedup/tombstone GC horizons, and FLD (author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq provenance with atomic staging/freeze. Keep exactly two DLLs: Fld1.Storage.dll and Fld1.Database.dll; do not add a third shared runtime DLL.
+**Remaining:** true physical power-loss/I/O fault injection; retirement of legacy Node-owned receive/transport and other-author relay state; receipt/dedup/tombstone GC horizons; and FLD (author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq provenance with atomic staging/freeze. Keep exactly two DLLs: Fld1.Storage.dll and Fld1.Database.dll; do not add a third shared runtime DLL.
