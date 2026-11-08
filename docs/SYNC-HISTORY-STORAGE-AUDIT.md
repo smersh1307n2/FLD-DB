@@ -1,3 +1,5 @@
+> **BIN-SYNC v3.0.0 alignment (2026-11-08):** This audit is historical design evidence. The v3 normative spec supersedes earlier proposals that derive protocol sequence from FLD OutboxSeq/JournalSeq, create duplicate PendingLocal journals, or keep per-source copies of published payload. Use one immutable published ChangeId/Origin record plus compact per-peer/per-author delivery state in the BIN-SYNC Metadata Store. FLD source cursors remain local. Keep tombstones until the independent v3 GC proof completes.
+
 # Audit: compact change history and multi-peer synchronization storage
 
 **Date:** 2026-11-07  
