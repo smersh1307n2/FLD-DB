@@ -1732,8 +1732,24 @@ The source parity gap is now closed:
 - Added FLD Storage tests for same-partition second-open rejection, cross-thread disposal/reopen and abandoned-mutex recovery.
 - No FLD1 run/WAL/manifest wire format or database-level field semantics changed.
 
-**Verification:** FLD-DB code/test head `a1f882be887518cc16354fd7ffb66800b97d5db3` built successfully and passed 148/148 tests independently on Ubuntu, Windows and macOS-15: Core 23, Engine 58, Manifest 9, Run 25, Storage 16 and WAL 17. The FLD workflow now runs the full solution test suite on all three operating systems.
+**Verification:** FLD-DB code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a` built successfully and passed 163/163 tests independently on Ubuntu, Windows and macOS-15: Core 23, Engine 58, Manifest 9, Run 25, Storage 31 and WAL 17. The FLD workflow runs the full solution test suite on all three operating systems.
 
 **Backup:** `backup/pre-fld-storage-wal-fence-port-2026-11-08` preserves the FLD branch before this port.
 
 **Next:** physical Storage write/flush/rename failure injection and power-loss testing remain open. The writer fence is a single-writer correctness prerequisite, not proof of power-loss durability.
+
+
+### 7.36 Deterministic Storage durability-boundary fault injection (2026-11-08)
+
+The physical on-disk crash matrix exposed one retry gap: after a crash between publishing a snapshot generation and publishing its manifest, the unreferenced generation could remain on disk and block the next checkpoint from reusing that generation. A failed checkpoint also left the live StorageDatabase instance usable even though its in-memory generation no longer represented the authoritative manifest/WAL pair.
+
+The generic Storage implementation now addresses both cases:
+
+- On open, after validating the authoritative manifest and referenced snapshot, `StorageSnapshotFile.Load` removes unreferenced snapshot generations and abandoned `.snap.tmp` / `.manifest.tmp` files for that partition. If no manifest exists, every snapshot generation is orphaned and is removed. Cleanup is partition-scoped and does not run when a referenced manifest/snapshot is corrupt; corruption remains fail-closed.
+- `StorageDatabase.Checkpoint` marks the live instance faulted after any checkpoint exception. Reopen re-reads the manifest/WAL pair and is the only path back to a usable instance.
+- Added internal-only deterministic fault points after WAL append/before flush, after WAL flush/before in-memory publication, after snapshot temp-file flush, after snapshot rename, after manifest temp-file flush and after manifest rename/before WAL reclamation. These hooks are not public Storage API.
+- Regressions inject each boundary failure, verify the live instance rejects further access, reopen, verify the committed value is recovered exactly once, and successfully run another checkpoint. A separate regression proves that an orphan snapshot generation and temp files are cleaned so checkpoint generation reuse succeeds.
+
+**Verification:** FLD-DB code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a`: 163/163 tests on Ubuntu, Windows and macOS-15. BIN-SYNC code/test head `18430c949b268caa512325320bb134587c722422`: Core 648/648, Fuzz/Lab 31/31, Storage Integration 134/134 independently on Ubuntu, Windows and macOS-15; line coverage 70.4%.
+
+**Limit:** these are deterministic exceptions at successful I/O boundaries plus reconstructed on-disk crash states. They do not yet inject partial OS writes, real fsync/device errors, directory-entry durability loss or actual power failure. Those remain open; do not mark the physical I/O/power-loss gate complete.
