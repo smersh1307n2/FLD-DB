@@ -293,4 +293,34 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Throws<IOException>(() => StorageDatabase.Open(alias, 112));
     }
 
+    [Fact]
+    public void Checkpoint_failure_requires_reopen_and_recovers_from_wal()
+    {
+        const ulong partitionId = 113;
+        string directory = Path.Combine(_dir, "checkpoint-publication-failure");
+        Directory.CreateDirectory(directory);
+        string snapshots = Path.Combine(directory, "snapshots");
+
+        using (var database = StorageDatabase.Open(directory, partitionId))
+        {
+            using (var batch = database.BeginWriteBatch())
+            {
+                batch.Put("durable"u8, "wal-value"u8);
+                batch.Commit();
+            }
+
+            Directory.CreateDirectory(snapshots);
+            File.WriteAllBytes(Path.Combine(snapshots, $"p_{partitionId}.1.snap"),
+                new byte[] { 0xFA, 0xFB });
+            Assert.Throws<IOException>(() => database.Checkpoint());
+            Assert.Throws<InvalidOperationException>(() => database.TryGet("durable"u8, out _));
+        }
+
+        using var recovered = StorageDatabase.Open(directory, partitionId);
+        Assert.Equal(1UL, recovered.LastCommitSeq);
+        Assert.True(recovered.TryGet("durable"u8, out var value));
+        Assert.Equal("wal-value"u8.ToArray(), value);
+        Assert.False(File.Exists(Path.Combine(snapshots, $"p_{partitionId}.1.snap")));
+    }
+
 }
