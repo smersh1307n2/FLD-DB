@@ -235,4 +235,27 @@ public sealed class StorageDatabaseTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Wal_writer_fence_recovers_abandoned_mutex_before_wal_recovery()
+    {
+        const ulong partitionId = 110;
+        string walDirectory = Path.Combine(_dir, "wal");
+        Directory.CreateDirectory(walDirectory);
+        string identity = Path.GetFullPath(walDirectory) + "|" +
+            partitionId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string digest = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity)));
+        string mutexName = "Fld1Storage_" + digest;
+
+        using var abandoned = new Mutex(initiallyOwned: false, mutexName);
+        var owner = new Thread(() => abandoned.WaitOne());
+        owner.Start();
+        Assert.True(owner.Join(TimeSpan.FromSeconds(5)));
+
+        using var recovered = StorageDatabase.Open(_dir, partitionId);
+        using var batch = recovered.BeginWriteBatch();
+        batch.Put("after-abandon"u8, "recovered"u8);
+        Assert.Equal(1UL, batch.Commit());
+    }
+
 }
