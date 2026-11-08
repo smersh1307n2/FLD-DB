@@ -394,3 +394,13 @@ The 2026-11-07 findings above are historical audit evidence. The current BIN-SYN
 The file-share WAL lease experiment was reverted after it stalled the cross-process test/lock lifecycle. The implementation is again a named OS-managed Mutex owned and released by a dedicated process-wide manager thread. The process-kill regression now terminates the actual testhost PID that owns the StorageDatabase, not only the outer dotnet test process. Child-process cleanup is unconditional and bounded, and the Storage Integration workflow now uses a three-minute dotnet test --blame-hang-timeout with a mini dump.
 
 On BIN-SYNC head 532baa0010140b799f3759e1c88d0c722cdf6727, verification passed: Core 648/648, Fuzz/Lab 31/31, 70.4% line coverage, Storage Integration 122/122 on Ubuntu and Windows, and both in-memory/TCP samples. macOS-15 is still queued. This supersedes the prior 122/122 checkpoint at 75133279fc9eca941983fe1ffcce94f63a1e0f70; do not mark the three-OS gate complete until macOS finishes.
+
+
+## 17. Coordinator process-kill receive crash cuts (2026-11-08)
+
+The Storage Integration suite now kills the actual testhost process at two durable receive boundaries and reopens the same physical Storage database:
+
+1. After Node has applied the batch and its checkpoint is durable, but before provider apply. The provider is absent before recovery; PendingApply replay restores provider state and finalizes metadata.
+2. After provider commit, but before Metadata Store finalization. The provider mutation and Node checkpoint survive process death while PendingApply remains; recovery repeats the same ApplyToken idempotently and finalizes the receipt.
+
+Verified on BIN-SYNC head ea8642e729dbc487f0b6f727d897e81a9d280278: Storage Integration 125/125 on Ubuntu and Windows, Core 648/648, Fuzz/Lab 31/31, 70.4% line coverage. macOS-15 is running. The receive crash matrix still needs process-kill cuts immediately after PendingApply staging and after Metadata Store finalization but before network ACK; the broader physical power-loss/I/O matrix remains separate.
