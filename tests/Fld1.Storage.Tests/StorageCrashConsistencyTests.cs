@@ -312,4 +312,65 @@ public sealed class StorageCrashConsistencyTests
             // Best-effort cleanup keeps the primary assertion failure visible.
         }
     }
+    [Theory]
+    [InlineData(StorageFaultPoint.AfterWalAppendBeforeFlush)]
+    [InlineData(StorageFaultPoint.AfterWalFlushBeforePublish)]
+    public void Wal_commit_fault_points_require_reopen_and_recover_the_complete_commit(StorageFaultPoint faultPoint)
+    {
+        const ulong partitionId = 920;
+        string directory = Path.Combine(_root, "wal-fault-" + faultPoint);
+
+        using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+        {
+            if (point == faultPoint)
+                throw new IOException("Injected WAL durability boundary failure.");
+        }))
+        {
+            using var batch = database.BeginWriteBatch();
+            batch.Put("fault-key"u8, "fault-value"u8);
+            Assert.Throws<IOException>(() => batch.Commit());
+            Assert.Throws<InvalidOperationException>(() => database.TryGet("fault-key"u8, out _));
+        }
+
+        using var recovered = StorageDatabase.Open(directory, partitionId);
+        Assert.Equal(1UL, recovered.LastCommitSeq);
+        Assert.True(recovered.TryGet("fault-key"u8, out var value));
+        Assert.Equal("fault-value"u8.ToArray(), value);
+    }
+
+    [Theory]
+    [InlineData(StorageFaultPoint.AfterSnapshotFileFlushBeforeRename)]
+    [InlineData(StorageFaultPoint.AfterSnapshotRenameBeforeManifest)]
+    [InlineData(StorageFaultPoint.AfterManifestFileFlushBeforeRename)]
+    [InlineData(StorageFaultPoint.AfterManifestRenameBeforeWalTruncate)]
+    public void Checkpoint_fault_points_recover_and_allow_a_new_checkpoint(StorageFaultPoint faultPoint)
+    {
+        const ulong partitionId = 921;
+        string directory = Path.Combine(_root, "checkpoint-fault-" + faultPoint);
+
+        using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+        {
+            if (point == faultPoint)
+                throw new IOException("Injected snapshot publication boundary failure.");
+        }))
+        {
+            Put(database, 0x31, 0x41);
+            Assert.Throws<IOException>(() => database.Checkpoint());
+            Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x31 }, out _));
+        }
+
+        using (var recovered = StorageDatabase.Open(directory, partitionId))
+        {
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet(new byte[] { 0x31 }, out var value));
+            Assert.Equal(new byte[] { 0x41 }, value);
+            recovered.Checkpoint();
+        }
+
+        using var reopened = StorageDatabase.Open(directory, partitionId);
+        Assert.Equal(1UL, reopened.LastCommitSeq);
+        Assert.True(reopened.TryGet(new byte[] { 0x31 }, out var reopenedValue));
+        Assert.Equal(new byte[] { 0x41 }, reopenedValue);
+    }
+
 }
