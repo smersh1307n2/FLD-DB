@@ -241,11 +241,16 @@ public sealed class StorageDatabaseTests : IDisposable
         const ulong partitionId = 110;
         string walDirectory = Path.Combine(_dir, "wal");
         Directory.CreateDirectory(walDirectory);
-        string identity = Path.GetFullPath(walDirectory) + "|" +
+        string fullPath = Path.GetFullPath(walDirectory);
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+            fullPath = fullPath.ToUpperInvariant();
+        string identity = fullPath + "|" +
             partitionId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string digest = Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity)));
-        string mutexName = "Fld1Storage_" + digest;
+        string mutexName = OperatingSystem.IsWindows()
+            ? "Global\\Fld1Storage_" + digest
+            : "Fld1Storage_" + digest;
 
         using var abandoned = new Mutex(initiallyOwned: false, mutexName);
         var owner = new Thread(() => abandoned.WaitOne());
