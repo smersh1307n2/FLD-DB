@@ -1732,7 +1732,7 @@ The source parity gap is now closed:
 - Added FLD Storage tests for same-partition second-open rejection, cross-thread disposal/reopen and abandoned-mutex recovery.
 - No FLD1 run/WAL/manifest wire format or database-level field semantics changed.
 
-**Verification:** FLD-DB commit `c90171a4d6927402debd940ccfbf8bfca9fa5829` built successfully and passed 146/146 tests: Core 23, Engine 58, Manifest 9, Run 25, Storage 14 and WAL 17. The earlier `b3ccf806` run passed 145/145 before the abandoned-mutex regression was added. FLD's own workflow currently runs on Ubuntu; the equivalent BIN-SYNC Storage Integration fence tests already passed on Ubuntu, Windows and macOS-15.
+**Verification:** FLD-DB code/test head `a1f882be887518cc16354fd7ffb66800b97d5db3` built successfully and passed 148/148 tests independently on Ubuntu, Windows and macOS-15: Core 23, Engine 58, Manifest 9, Run 25, Storage 16 and WAL 17. The FLD workflow now runs the full solution test suite on all three operating systems.
 
 **Backup:** `backup/pre-fld-storage-wal-fence-port-2026-11-08` preserves the FLD branch before this port.
 
