@@ -420,6 +420,22 @@ The FLD-DB `src/Fld1.Storage` copy was behind the already-verified BIN-SYNC `ext
 
 The FLD source now uses the same named OS Mutex fence and process-wide manager-thread ownership as BIN-SYNC. The fence is acquired by `WalManager.Open` before snapshot load and WAL recovery. The manager thread releases the mutex even when the caller disposes the database from a different thread; abandoned mutex ownership is accepted only as a recovery handoff. Symlink/path aliases are canonicalized before deriving the mutex identity.
 
-FLD Storage tests now cover second-open rejection, cross-thread release/reopen, abandoned-owner recovery, symlink aliases and case aliases on case-insensitive filesystems. CI on code/test head `a1f882be887518cc16354fd7ffb66800b97d5db3` passed 148/148 tests independently on Ubuntu, Windows and macOS-15 (23 Core, 58 Engine, 9 Manifest, 25 Run, 16 Storage, 17 WAL). The FLD workflow now has a three-OS matrix.
+FLD Storage tests now cover second-open rejection, cross-thread release/reopen, abandoned-owner recovery, symlink aliases and case aliases on case-insensitive filesystems. CI on code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a` passed 163/163 tests independently on Ubuntu, Windows and macOS-15 (23 Core, 58 Engine, 9 Manifest, 25 Run, 31 Storage, 17 WAL). The FLD workflow now has a three-OS matrix.
 
 This is a storage-source parity fix, not completion of the two-DLL extraction: FLD still builds Core, Engine, Manifest, Run and WAL as separate projects today. The approved target remains exactly `Fld1.Storage.dll` and `Fld1.Database.dll`.
+
+
+## 19. Snapshot publication recovery and deterministic fault points (2026-11-08)
+
+A crash after renaming a new snapshot file but before publishing the manifest leaves an unreferenced final `.snap` file. Previously, `StorageSnapshotFile.Store` rejected an existing target generation, while `Load` did not reclaim the orphan. A subsequent checkpoint could therefore remain blocked after a perfectly recoverable crash. In addition, a failed checkpoint did not fault the live database instance even though its in-memory generation could be stale relative to the manifest/WAL pair.
+
+The fix is implemented in both FLD-DB `src/Fld1.Storage` and the synchronized BIN-SYNC `external/Fld1.Storage` copy:
+
+- `Load` validates the manifest and referenced snapshot first, then removes unreferenced generations and abandoned snapshot/manifest temp files. With no manifest, all snapshot generations are unreferenced. Corrupt authoritative roots still fail closed before cleanup.
+- Any exception during `Checkpoint` faults the current StorageDatabase; callers must reopen before further reads/writes/checkpointing.
+- Internal test-only fault points cover WAL append/flush publication and snapshot/manifest file-flush/rename boundaries. Tests inject exceptions, assert fail-closed live-instance behavior, reopen, validate the value and repeat checkpointing.
+- The previous orphan-generation crash test now asserts that recovery deletes the orphan/temp files and that the next checkpoint can reuse the generation.
+
+FLD-DB passed 163/163 tests on Ubuntu, Windows and macOS-15 at code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a`. BIN-SYNC passed 648/648 Core, 31/31 Fuzz/Lab and 134/134 Storage Integration tests on all three operating systems at `18430c949b268caa512325320bb134587c722422`; line coverage remains 70.4%.
+
+The new fault points are deterministic exception injection after successful file operations. They do **not** simulate partial writes, real Flush/fsync/device errors, loss of directory-entry durability or actual power failure. Those are still separate validation gates.
