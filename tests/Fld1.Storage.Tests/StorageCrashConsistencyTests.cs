@@ -313,10 +313,11 @@ public sealed class StorageCrashConsistencyTests
         }
     }
     [Theory]
-    [InlineData(StorageFaultPoint.AfterWalAppendBeforeFlush)]
-    [InlineData(StorageFaultPoint.AfterWalFlushBeforePublish)]
-    public void Wal_commit_fault_points_require_reopen_and_recover_the_complete_commit(StorageFaultPoint faultPoint)
+    [InlineData((int)StorageFaultPoint.AfterWalAppendBeforeFlush)]
+    [InlineData((int)StorageFaultPoint.AfterWalFlushBeforePublish)]
+    public void Wal_commit_fault_points_require_reopen_and_recover_the_complete_commit(int faultPointValue)
     {
+        StorageFaultPoint faultPoint = (StorageFaultPoint)faultPointValue;
         const ulong partitionId = 920;
         string directory = Path.Combine(_root, "wal-fault-" + faultPoint);
 
@@ -339,12 +340,13 @@ public sealed class StorageCrashConsistencyTests
     }
 
     [Theory]
-    [InlineData(StorageFaultPoint.AfterSnapshotFileFlushBeforeRename)]
-    [InlineData(StorageFaultPoint.AfterSnapshotRenameBeforeManifest)]
-    [InlineData(StorageFaultPoint.AfterManifestFileFlushBeforeRename)]
-    [InlineData(StorageFaultPoint.AfterManifestRenameBeforeWalTruncate)]
-    public void Checkpoint_fault_points_recover_and_allow_a_new_checkpoint(StorageFaultPoint faultPoint)
+    [InlineData((int)StorageFaultPoint.AfterSnapshotFileFlushBeforeRename)]
+    [InlineData((int)StorageFaultPoint.AfterSnapshotRenameBeforeManifest)]
+    [InlineData((int)StorageFaultPoint.AfterManifestFileFlushBeforeRename)]
+    [InlineData((int)StorageFaultPoint.AfterManifestRenameBeforeWalTruncate)]
+    public void Checkpoint_fault_points_recover_and_allow_a_new_checkpoint(int faultPointValue)
     {
+        StorageFaultPoint faultPoint = (StorageFaultPoint)faultPointValue;
         const ulong partitionId = 921;
         string directory = Path.Combine(_root, "checkpoint-fault-" + faultPoint);
 
