@@ -113,14 +113,24 @@ public sealed class StorageDatabase : IDisposable
             EnsureUsable();
             if (_lastCommitSeq == _snapshotCommitSeq) return;
 
-            _wal.Flush();
-            _wal.Rotate();
-            ulong generation = checked(_snapshotGeneration + 1);
-            StorageSnapshotFile.Store(_directory, PartitionId, generation, _lastCommitSeq,
-                new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance));
-            _snapshotGeneration = generation;
-            _snapshotCommitSeq = _lastCommitSeq;
-            _wal.TruncateSealedSegments(_snapshotCommitSeq);
+            try
+            {
+                _wal.Flush();
+                _wal.Rotate();
+                ulong generation = checked(_snapshotGeneration + 1);
+                StorageSnapshotFile.Store(_directory, PartitionId, generation, _lastCommitSeq,
+                    new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance));
+                _snapshotGeneration = generation;
+                _snapshotCommitSeq = _lastCommitSeq;
+                _wal.TruncateSealedSegments(_snapshotCommitSeq);
+            }
+            catch
+            {
+                // A failed checkpoint may have published an orphan snapshot or a new
+                // WAL segment. Reopen is the only authority for the manifest/WAL pair.
+                _faulted = true;
+                throw;
+            }
         }
     }
 
