@@ -21,11 +21,15 @@ Embedded field-store с multi-process доступом через FLD Shared Eng
 ```
 Application A                    Application B
      │                                │
- Fld.Client.dll                  Fld.Client.dll
+Fld1.Database.dll                Fld1.Database.dll
+(client facade)                  (client facade)
      │                                │
      └────────── IPC/SHM ─────────────┘
                    │
-            FLD ENGINE PROCESS (один на базу)
+            FLD ENGINE HOST (EXE)
+            один владелец на базу
+                   │
+        Fld1.Database.dll + Fld1.Storage.dll
                    │
        ┌───────────┼───────────┐
        │           │           │
@@ -36,7 +40,9 @@ Application A                    Application B
               FLD1 FILES
 ```
 
-**[E-ENGINE-SINGLETON]** Один Engine на физическую базу; единственный владелец изменяемого состояния (WAL, manifest, L0, compaction). Клиенты читают immutable runs через локальный read-only MMF.
+**[E-ENGINE-SINGLETON]** Один Engine на физическую базу; единственный владелец изменяемого состояния (WAL, manifest, L0, compaction). Независимые приложения используют клиентский фасад через IPC/SHM; клиенты не открывают физический WAL для записи. Клиенты читают immutable runs через локальный read-only MMF. Direct embedded mode для одного процесса остаётся допустимым, но независимые процессы не могут одновременно открывать одну партицию напрямую.
+
+**[E-TWO-DLL-CLIENT]** Клиентская роль на диаграмме не вводит третью runtime DLL: FLD-клиентский фасад размещается в `Fld1.Database.dll`, generic Storage-клиент — в `Fld1.Storage.dll`. Engine Host — отдельный EXE/process, не третья DLL. Для Storage-only сценария Engine и клиент могут использовать только `Fld1.Storage.dll`; полноценная FLD Database загружает обе DLL с зависимостью Database → Storage.
 
 ### 0.3. Цели / не-цели
 **Цели:** детерминированная сходимость; 1 логическое чтение inline / 2 external; zero-copy hot path; field LWW; delete-wins lifecycle; crash-safety без torn-state; конкурентные писатели через group commit.
