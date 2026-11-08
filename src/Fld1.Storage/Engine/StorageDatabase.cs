@@ -17,6 +17,7 @@ public sealed class StorageDatabase : IDisposable
     private readonly Dictionary<StorageKey, byte[]> _values = new();
     private readonly WalManager _wal;
     private readonly string _directory;
+    private readonly Action<StorageFaultPoint>? _faultInjector;
     private ulong _snapshotGeneration;
     private ulong _snapshotCommitSeq;
     private bool _disposed;
@@ -27,13 +28,31 @@ public sealed class StorageDatabase : IDisposable
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
     public int Count { get { lock (_gate) { EnsureUsable(); return _values.Count; } } }
 
-    private StorageDatabase(string directory, WalManager wal)
+    private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector)
     {
         _directory = directory;
         _wal = wal;
+        _faultInjector = faultInjector;
     }
 
     public static StorageDatabase Open(string directory, ulong partitionId, long walRotateAfterBytes = 64L * 1024 * 1024)
+        => OpenCore(directory, partitionId, walRotateAfterBytes, faultInjector: null);
+
+    internal static StorageDatabase OpenForTesting(
+        string directory,
+        ulong partitionId,
+        Action<StorageFaultPoint> faultInjector,
+        long walRotateAfterBytes = 64L * 1024 * 1024)
+    {
+        ArgumentNullException.ThrowIfNull(faultInjector);
+        return OpenCore(directory, partitionId, walRotateAfterBytes, faultInjector);
+    }
+
+    private static StorageDatabase OpenCore(
+        string directory,
+        ulong partitionId,
+        long walRotateAfterBytes,
+        Action<StorageFaultPoint>? faultInjector)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (walRotateAfterBytes < 0) throw new ArgumentOutOfRangeException(nameof(walRotateAfterBytes));
@@ -42,7 +61,7 @@ public sealed class StorageDatabase : IDisposable
         // Acquire the partition's exclusive writer fence before reading the snapshot
         // or WAL. Otherwise a second process could race recovery against a checkpoint.
         var (wal, records) = WalManager.Open(walDirectory, partitionId, walRotateAfterBytes);
-        var database = new StorageDatabase(directory, wal);
+        var database = new StorageDatabase(directory, wal, faultInjector);
         try
         {
             var snapshot = StorageSnapshotFile.Load(directory, partitionId);
@@ -119,7 +138,7 @@ public sealed class StorageDatabase : IDisposable
                 _wal.Rotate();
                 ulong generation = checked(_snapshotGeneration + 1);
                 StorageSnapshotFile.Store(_directory, PartitionId, generation, _lastCommitSeq,
-                    new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance));
+                    new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance), _faultInjector);
                 _snapshotGeneration = generation;
                 _snapshotCommitSeq = _lastCommitSeq;
                 _wal.TruncateSealedSegments(_snapshotCommitSeq);
@@ -161,7 +180,9 @@ public sealed class StorageDatabase : IDisposable
             try
             {
                 ulong commitSeq = _wal.Append(BatchCommitKind, payload);
+                _faultInjector?.Invoke(StorageFaultPoint.AfterWalAppendBeforeFlush);
                 _wal.Flush();
+                _faultInjector?.Invoke(StorageFaultPoint.AfterWalFlushBeforePublish);
 
                 foreach (var mutation in mutations)
                 {
