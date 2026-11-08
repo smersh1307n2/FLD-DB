@@ -1,7 +1,7 @@
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
 **Date:** 2026-11-08  
-**Status:** BIN-SYNC metadata P1 and FLD remote APPLY P2 remain implemented on their working branches without a DELTA_BATCH wire-format change. The neutral `Fld1.Storage` engine has an executable byte-key/value WAL/snapshot/checkpoint slice, and BIN-SYNC has public durable Storage adapters, provider/metadata conformance, PendingApply recovery, real-TCP examples and an opt-in provider-authoritative outbound cutover. The latest verified BIN-SYNC code/test head is `0399e8f0dfda39b5e860eca50364406323c7b7fa` (644 core, 100 Storage Integration, 31 Fuzz/Lab; 70.8% coverage). Remaining cross-repository work: complete FLD Database persistence migration onto the two-DLL Storage Core, implement the FLD JournalSeq provenance adapter and its atomic publication gate, implement FLD-specific durable PendingLocal/freeze recovery, add physical Storage crash injection and controlled large-partition benchmarks, and prove protocol-safe receipt/dedup/tombstone reclamation. The BIN-SYNC outbound cutover is a provider-feed/Metadata Store milestone; it does not by itself complete FLD Database integration or FLD's durable PendingLocal transaction protocol.  
+**Status:** BIN-SYNC metadata P1 and FLD remote APPLY P2 remain implemented on their working branches without a DELTA_BATCH wire-format change. The neutral `Fld1.Storage` engine has an executable byte-key/value WAL/snapshot/checkpoint slice, and BIN-SYNC has public durable Storage adapters, provider/metadata conformance, PendingApply recovery, real-TCP examples and an opt-in provider-authoritative outbound cutover. The latest verified BIN-SYNC code/test head is `833433a515e262417b10590c285576cc5441e69d` (644 core, 102 Storage Integration, 31 Fuzz/Lab; 70.8% coverage). Remaining cross-repository work: complete FLD Database persistence migration onto the two-DLL Storage Core, implement the FLD JournalSeq provenance adapter and its atomic publication gate, implement FLD-specific durable PendingLocal/freeze recovery, add physical Storage crash injection and controlled large-partition benchmarks, and prove protocol-safe receipt/dedup/tombstone reclamation. The BIN-SYNC outbound cutover is a provider-feed/Metadata Store milestone; it does not by itself complete FLD Database integration or FLD's durable PendingLocal transaction protocol.  
 **Primary audit:** [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).  
 **FLD normative design:** [FLD Kernel Specification v1.5.9](FLD-KERNEL-SPEC-v1.5.9.md) and [FLD Storage Core Architecture](FLD-STORAGE-CORE-ARCHITECTURE.md).  
 **BIN-SYNC normative protocol:** [BIN-SYNC CORE v2.4.20 FINAL](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/BIN-SYNC-SPECIFICATION.txt), including E-24 (global ChangeId identity/equivocation) and E-25 (fail-closed tombstone retention).  
@@ -711,7 +711,7 @@ At BIN-SYNC commit `aa5c52e2daa85638326f4df94c0fdec5e312b467`, FLD Storage Integ
 
 The BIN-SYNC Storage adapter now has an explicit, durable outbound authority cutover. This advances the cross-repository metadata boundary but does not mark the FLD Database adapter or Phase 3 complete.
 
-Verified implementation on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`, code/test head `0399e8f0dfda39b5e860eca50364406323c7b7fa`:
+Verified implementation on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage`, code/test head `833433a515e262417b10590c285576cc5441e69d`:
 
 - `StorageDataProvider` persists a stable 128-bit ChangeId in each local-feed row and a durable one-way publication cutover watermark.
 - Cutover requires a fully acknowledged/empty provider feed and exact alignment between Node and Metadata Store outbound high-watermarks. The Node Outbox sequence becomes a fence after cutover.
@@ -723,3 +723,12 @@ Verified implementation on `smersh1307n2/BIN-SYNC` `feature/fld-external-storage
 **Interpretation for the FLD roadmap:** the provider feed can serve as the durable PendingLocal journal for a generic external provider, but this is not yet the FLD Database's atomic pending-staging/freeze protocol. Phase 3 remains open until FLD commits, concurrent remote APPLY, snapshot/checkpoint and Outbox promotion satisfy the StageSeq/freeze-intent crash matrix in §7.22. Do not add a second per-edit metadata table or weaken the rule that frozen operations are immutable.
 
 The next FLD-specific integration gate remains: persist the mapping `(author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq` with the relay scan cursor and publication gate, then test restart, partial page, ACK interruption, remote winner and compaction/reopen. Keep the exact two-DLL dependency boundary: `Fld1.Database.dll → Fld1.Storage.dll`; no third Common/Shared runtime DLL.
+
+
+### 7.25 Storage transaction serialization and WAL single-writer fence (2026-11-08)
+
+The BIN-SYNC Storage adapter now serializes all in-process transactions attached to the same `StorageDatabase` object through a shared gate used by `StorageDataProvider`, `StorageMetadataStore` and `StorageNodePersistence.Save`. A concurrency regression runs 64 provider appends alongside 64 metadata freezes and verifies all 128 commits complete without stale-base conflicts.
+
+The generic Storage engine now acquires a named OS-managed Mutex for each normalized WAL directory/partition before reading the snapshot or replaying WAL. A process-wide manager thread owns/releases named mutexes so disposal can occur on any caller thread. The OS releases the mutex when the process terminates; abandoned acquisition proceeds into WAL recovery. A second open is rejected, and reopen after disposal is tested. The implementation is BCL-only, with no native interop.
+
+This is a **single-writer partition contract**, not multi-writer concurrency. Remaining validation: independent-process contention/termination tests on each supported OS, symlink/path alias canonicalization, and power-loss cuts around WAL rotation and checkpoint replacement. The shared adapter gate is process-local; separate StorageDatabase objects for the same partition are excluded by the named mutex.
