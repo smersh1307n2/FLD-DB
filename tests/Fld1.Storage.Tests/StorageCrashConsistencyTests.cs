@@ -220,6 +220,14 @@ public sealed class StorageCrashConsistencyTests
                 Assert.Equal(new byte[] { 0x66 }, first);
                 Assert.True(recovered.TryGet(new byte[] { 0x07 }, out var second));
                 Assert.Equal(new byte[] { 0x77 }, second);
+
+                if (!newManifestWasPublished)
+                {
+                    // The old manifest remains authoritative. Recovery removes the
+                    // unreferenced generation so a subsequent checkpoint can reuse it.
+                    Assert.False(File.Exists(secondSnapshotPath));
+                    recovered.Checkpoint();
+                }
             }
 
             using var reopened = StorageDatabase.Open(directory, partitionId);
