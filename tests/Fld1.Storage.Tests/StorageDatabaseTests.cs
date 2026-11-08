@@ -258,4 +258,34 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Equal(1UL, batch.Commit());
     }
 
+    [Fact]
+    public void Wal_writer_fence_rejects_symlink_alias_of_same_partition()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Symlink creation may require Developer Mode or elevated privileges.
+
+        string physical = Path.Combine(_dir, "physical-wal-directory");
+        string alias = Path.Combine(_dir, "wal-directory-alias");
+        Directory.CreateDirectory(physical);
+        Directory.CreateSymbolicLink(alias, physical);
+        Assert.NotNull(new DirectoryInfo(alias).LinkTarget);
+        Assert.NotNull(new DirectoryInfo(alias).ResolveLinkTarget(returnFinalTarget: true));
+
+        using var first = StorageDatabase.Open(physical, 111);
+        Assert.Throws<IOException>(() => StorageDatabase.Open(alias, 111));
+    }
+
+    [Fact]
+    public void Wal_writer_fence_rejects_case_alias_on_case_insensitive_filesystems()
+    {
+        string directory = Path.Combine(_dir, "case-alias-wal-directory");
+        Directory.CreateDirectory(directory);
+        string alias = directory.ToUpperInvariant();
+        if (!Directory.Exists(alias) || string.Equals(directory, alias, StringComparison.Ordinal))
+            return;
+
+        using var first = StorageDatabase.Open(directory, 112);
+        Assert.Throws<IOException>(() => StorageDatabase.Open(alias, 112));
+    }
+
 }
