@@ -1750,6 +1750,18 @@ The generic Storage implementation now addresses both cases:
 - Added internal-only deterministic fault points after WAL append/before flush, after WAL flush/before in-memory publication, after snapshot temp-file flush, after snapshot rename, after manifest temp-file flush and after manifest rename/before WAL reclamation. These hooks are not public Storage API.
 - Regressions inject each boundary failure, verify the live instance rejects further access, reopen, verify the committed value is recovered exactly once, and successfully run another checkpoint. A separate regression proves that an orphan snapshot generation and temp files are cleaned so checkpoint generation reuse succeeds.
 
-**Verification:** FLD-DB code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a`: 163/163 tests on Ubuntu, Windows and macOS-15. BIN-SYNC code/test head `18430c949b268caa512325320bb134587c722422`: Core 648/648, Fuzz/Lab 31/31, Storage Integration 134/134 independently on Ubuntu, Windows and macOS-15; line coverage 70.4%.
+**Verification:** FLD-DB code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a`: 163/163 tests on Ubuntu, Windows and macOS-15. BIN-SYNC code/test head `1961a84a90aca48c8aacf2c0c39cff4008a208aa`: Core 648/648, Fuzz/Lab 31/31, Storage Integration 135/135 independently on Ubuntu, Windows and macOS-15; line coverage 70.4%.
 
 **Limit:** these are deterministic exceptions at successful I/O boundaries plus reconstructed on-disk crash states. They do not yet inject partial OS writes, real fsync/device errors, directory-entry durability loss or actual power failure. Those remain open; do not mark the physical I/O/power-loss gate complete.
+
+
+### 7.37 Namespace-scoped Node authority fence includes sealed local writes (2026-11-08)
+
+The BIN-SYNC provider-cutover fence now rejects `WriteFieldSealed` in addition to ordinary local field/record writes, direct/manual Outbox publication, public Node batch creation and the legacy Node-owned transport builder. The check is applied at the Node API boundary and is namespace-scoped: other namespaces on the same Node retain their independent Node-owned path. Metadata-reserved outbound sends remain allowed. The durable provider cutover marker reinstalls the fence when the coordinator is reconstructed.
+
+- Regression coverage configures an E2EE key ring and verifies `WriteFieldSealed` fails closed after cutover.
+- Latest BIN-SYNC code/test head: `1961a84a90aca48c8aacf2c0c39cff4008a208aa`.
+- Verified CI: Core 648/648, Fuzz + Lab 31/31, Storage Integration 135/135 on Ubuntu, Windows and macOS-15; line coverage 70.4%.
+- PR #16 remains Draft/open/unmerged.
+
+**Next:** continue retiring the remaining legacy Node-owned receive/transport and other-author relay state. Keep receipt/ChangeId/tombstone GC disabled until contiguous-prefix/snapshot-barrier and peer-retirement proofs exist. Physical partial-write/fsync/device/power-loss injection and full normative cross-implementation audit remain open. Do not begin FLD JournalSeq provenance integration until BIN-SYNC and Storage gates are complete.
