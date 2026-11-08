@@ -227,6 +227,19 @@ internal static class StorageSnapshotFile
             changed = true;
         }
 
+        foreach (string temporary in Directory.EnumerateFiles(directory, prefix + "*.snap.tmp"))
+        {
+            File.Delete(temporary);
+            changed = true;
+        }
+
+        string temporaryManifest = ManifestPath(directory, partitionId) + ".tmp";
+        if (File.Exists(temporaryManifest))
+        {
+            File.Delete(temporaryManifest);
+            changed = true;
+        }
+
         if (changed)
             TryFsyncDirectory(directory);
     }
