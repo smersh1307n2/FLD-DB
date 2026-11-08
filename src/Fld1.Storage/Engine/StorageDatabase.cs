@@ -45,6 +45,7 @@ public sealed class StorageDatabase : IDisposable
         var database = new StorageDatabase(directory, wal);
         try
         {
+            var snapshot = StorageSnapshotFile.Load(directory, partitionId);
             if (snapshot is not null)
             {
                 foreach (var pair in snapshot.Values)
