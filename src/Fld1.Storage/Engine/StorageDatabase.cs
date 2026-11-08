@@ -39,7 +39,8 @@ public sealed class StorageDatabase : IDisposable
         if (walRotateAfterBytes < 0) throw new ArgumentOutOfRangeException(nameof(walRotateAfterBytes));
         Directory.CreateDirectory(directory);
         string walDirectory = Path.Combine(directory, "wal");
-        var snapshot = StorageSnapshotFile.Load(directory, partitionId);
+        // Acquire the partition's exclusive writer fence before reading the snapshot
+        // or WAL. Otherwise a second process could race recovery against a checkpoint.
         var (wal, records) = WalManager.Open(walDirectory, partitionId, walRotateAfterBytes);
         var database = new StorageDatabase(directory, wal);
         try
