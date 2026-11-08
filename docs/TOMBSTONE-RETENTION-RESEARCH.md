@@ -1,3 +1,5 @@
+> **BIN-SYNC v3.0.0 retention override (2026-11-08):** This research is supporting evidence, not GC authorization. Tombstone/ghost reclamation is disabled until the v3 namespace membership, author-epoch retirement, complete-resync and safe-frontier proof is implemented and tested. TTL, wall-clock age, HLC age, ACK of one peer, or payload compaction alone never authorizes deletion. Inbox receipt, ChangeId ledger and tombstone/ghost horizons are independent.
+
 # Tombstone Retention and Safe Garbage Collection — Research Note
 
 **Date:** 2026-11-07  
