@@ -73,7 +73,7 @@ internal static class StorageSnapshotFile
     {
         if (generation == 0) throw new ArgumentOutOfRangeException(nameof(generation));
         string snapshots = Path.Combine(directory, "snapshots");
-        Directory.CreateDirectory(snapshots);
+        StorageDirectorySync.CreateDirectoryDurable(snapshots);
 
         byte[] snapshot = EncodeSnapshot(partitionId, generation, commitSeq, values);
         uint snapshotCrc = BinaryPrimitives.ReadUInt32LittleEndian(snapshot.AsSpan(snapshot.Length - 4));
@@ -255,18 +255,5 @@ internal static class StorageSnapshotFile
     }
 
     private static void TryFsyncDirectory(string path)
-    {
-        try
-        {
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            {
-                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                stream.Flush(flushToDisk: true);
-            }
-        }
-        catch
-        {
-            // Directory handles are not flushable on every supported filesystem.
-        }
-    }
+        => StorageDirectorySync.Flush(path);
 }
