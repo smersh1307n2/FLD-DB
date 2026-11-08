@@ -68,7 +68,8 @@ internal static class StorageSnapshotFile
         ulong partitionId,
         ulong generation,
         ulong commitSeq,
-        SortedDictionary<StorageDatabase.StorageKey, byte[]> values)
+        SortedDictionary<StorageDatabase.StorageKey, byte[]> values,
+        Action<StorageFaultPoint>? faultInjector = null)
     {
         if (generation == 0) throw new ArgumentOutOfRangeException(nameof(generation));
         string snapshots = Path.Combine(directory, "snapshots");
@@ -82,7 +83,9 @@ internal static class StorageSnapshotFile
             throw new IOException($"Storage snapshot generation already exists: {generation}.");
         TryDelete(tempSnapshot);
         WriteDurable(tempSnapshot, snapshot);
+        faultInjector?.Invoke(StorageFaultPoint.AfterSnapshotFileFlushBeforeRename);
         File.Move(tempSnapshot, finalSnapshot);
+        faultInjector?.Invoke(StorageFaultPoint.AfterSnapshotRenameBeforeManifest);
         TryFsyncDirectory(snapshots);
 
         byte[] manifest = EncodeManifest(partitionId, generation, commitSeq, (ulong)snapshot.Length, snapshotCrc);
@@ -90,7 +93,9 @@ internal static class StorageSnapshotFile
         string tempManifest = finalManifest + ".tmp";
         TryDelete(tempManifest);
         WriteDurable(tempManifest, manifest);
+        faultInjector?.Invoke(StorageFaultPoint.AfterManifestFileFlushBeforeRename);
         File.Move(tempManifest, finalManifest, overwrite: true);
+        faultInjector?.Invoke(StorageFaultPoint.AfterManifestRenameBeforeWalTruncate);
         TryFsyncDirectory(snapshots);
 
         // The manifest is now the durable root for the new generation. StorageSnapshot
