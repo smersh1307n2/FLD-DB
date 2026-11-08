@@ -420,6 +420,6 @@ The FLD-DB `src/Fld1.Storage` copy was behind the already-verified BIN-SYNC `ext
 
 The FLD source now uses the same named OS Mutex fence and process-wide manager-thread ownership as BIN-SYNC. The fence is acquired by `WalManager.Open` before snapshot load and WAL recovery. The manager thread releases the mutex even when the caller disposes the database from a different thread; abandoned mutex ownership is accepted only as a recovery handoff. Symlink/path aliases are canonicalized before deriving the mutex identity.
 
-FLD Storage tests now cover second-open rejection, cross-thread release/reopen and abandoned-owner recovery. CI on commit `c90171a4d6927402debd940ccfbf8bfca9fa5829` passed 146/146 tests (23 Core, 58 Engine, 9 Manifest, 25 Run, 14 Storage, 17 WAL). This FLD workflow is Ubuntu-only; BIN-SYNC's matching Storage Integration fence suite has three-OS coverage.
+FLD Storage tests now cover second-open rejection, cross-thread release/reopen, abandoned-owner recovery, symlink aliases and case aliases on case-insensitive filesystems. CI on code/test head `a1f882be887518cc16354fd7ffb66800b97d5db3` passed 148/148 tests independently on Ubuntu, Windows and macOS-15 (23 Core, 58 Engine, 9 Manifest, 25 Run, 16 Storage, 17 WAL). The FLD workflow now has a three-OS matrix.
 
 This is a storage-source parity fix, not completion of the two-DLL extraction: FLD still builds Core, Engine, Manifest, Run and WAL as separate projects today. The approved target remains exactly `Fld1.Storage.dll` and `Fld1.Database.dll`.
