@@ -1,12 +1,14 @@
+> **BIN-SYNC v3 ownership override (2026-11-08):** BIN-SYNC-SPECIFICATION.txt v3.0.0 is the sole protocol authority. Older v2.4.19/E-24/E-25 statements below are historical where they conflict with v3. In particular, FLD OutboxSeq and JournalSeq are local source/recovery cursors, not OriginSequence. BIN-SYNC Metadata Store allocates and persists OriginSequence when a ChangeId is durably frozen for publication. The Metadata Store is the authoritative owner of published ChangeId/Origin identity, inbox receipts, per-peer delivery progress and relay payload. FLD owns user field state, tombstones, local unpublished feed, WAL and provider apply idempotency; its old ApplyJournal/RelayJournal protocol-payload path is transition-only and must not remain a second authoritative relay history after v3 adapter cutover. No separate duplicate PendingLocal journal is permitted; coalescing is allowed only before durable freeze, and frozen operations are immutable. The target runtime remains exactly Fld1.Storage.dll and Fld1.Database.dll (Database → Storage).
+
 # FLD KERNEL SPECIFICATION — v1.5.9-DRAFT
 ## Consolidated Final Specification
 
 **Статус:** NORMATIVE DESIGN DRAFT (pre-FINAL FREEZE)
 **Формат:** FLD1 (magic `46 4C 44 31`, binaryVersion 1)
 **Целевой рантайм:** C# 12+ / .NET 10 (FLD1 Core + BinSync.Net integration)
-**Совместимость (протокол):** BIN-SYNC CORE **v2.4.19 FINAL** (включая исторические errata v2.3.7, v2.3.8, v2.4.0, v2.4.4–v2.4.8, а также нормативные E-24 (v2.4.18) и E-25 (v2.4.19)) — без изменения формата FLD1 Run/WAL
+**Совместимость (протокол):** BIN-SYNC CORE **v3.0.0 DRAFT** — breaking clean cut; v2.x wire/storage readers and migrations are not supported. FLD1 physical format remains independently versioned.
 **Совместимость (пакет):** `BinSync.Core` **3.0.0**; SemVer пакета ≠ версия протокола. Нормативная совместимость wire-протокола определяется BIN-SYNC CORE v2.4.19 FINAL, а не номером NuGet-пакета.
-**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–9; совместимость с runtime API `BinSync.Core` 3.0.0; wire baseline — BIN-SYNC CORE v2.4.19 FINAL.
+**Консолидация:** v1.3 → v1.4.1–10 → v1.5.0–9; runtime API `BinSync.Core` 3.0.0; normative wire baseline — BIN-SYNC CORE v3.0.0 DRAFT.
 **Правило чтения:** PART I–VI — обязательства; PART VII — ADR без обязательств; PART VIII — приёмка; PART IX — реализационные заметки.
 **Конвенция:** диапазоны inclusive; байтовые индексы перечисляются явно.
 
@@ -302,9 +304,9 @@ FREE→CLAIMING→ACTIVE→FREE; pin-then-deref; RetireEpoch without −1; recla
 
 **Storage extraction boundary:** the physical engine is separated from field/database semantics into exactly two independently buildable runtime DLLs. See [FLD Storage Core architecture](FLD-STORAGE-CORE-ARCHITECTURE.md). `Fld1.Storage.dll` is the domain-neutral byte engine; `Fld1.Database.dll` owns RecordId/FieldId, HLC/LWW, lifecycle, Outbox and APPLY semantics. Dependency is one-way (Database → Storage); no third Common/Shared runtime DLL is introduced. Storage must be independently usable without constructing or loading `FldDatabase`.
 
-## PART IV. BIN-SYNC / CRDT (v2.4.19)
+## PART IV. BIN-SYNC / CRDT (v3.0.0)
 
-When FLD-DB stores synchronized user data, it implements the durable field-store side of BIN-SYNC CORE v2.4.19 FINAL. This PART IV defines that synchronized-database role only. A separate use case — FLD-DB as a generic Metadata Store for an external Data Provider — is defined by the BIN-SYNC Metadata Storage and External Data Provider Architecture (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The related pending-change lifecycle and safe LWW coalescing policy are defined in the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md). That use case requires an explicit Storage-only role and MUST NOT be implemented by routing metadata writes through ordinary synchronized FldDatabase semantics. FLD-DB MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
+When FLD-DB stores synchronized user data, it implements the durable field-store side of BIN-SYNC CORE v3.0.0 DRAFT. This PART IV defines that synchronized-database role only. A separate use case — FLD-DB as a generic Metadata Store for an external Data Provider — is defined by the BIN-SYNC Metadata Storage and External Data Provider Architecture (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The related pending-change lifecycle and safe LWW coalescing policy are defined in the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision (https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md). That use case requires an explicit Storage-only role and MUST NOT be implemented by routing metadata writes through ordinary synchronized FldDatabase semantics. FLD-DB MUST NOT define an independent wire protocol or reinterpret BIN-SYNC cursors, identities, merge rules, or digest domains.
 
 ### 4.1. Canonical identity and authorship
 - `NodeId`, `RecordId`, `ChangeId`, `BatchId` are exactly 16 bytes at the durable/wire boundary. BIN-SYNC public API normalization does not authorize FLD to hash, truncate, or regenerate an already accepted identifier.
@@ -328,11 +330,11 @@ When FLD-DB stores synchronized user data, it implements the durable field-store
 - Every published local mutation has one stable nonzero ChangeId, preserved through WAL, frozen Outbox, compaction, recovery, retry and relay. The current implementation generates it during Put/PutOwned; the proposed pending-staging design may defer protocol ChangeId allocation until the pending operation is frozen. Superseded unpublished provisional identities may be discarded, but a frozen/published ChangeId MUST never change. See the BIN-SYNC Change Staging, Coalescing, and Metadata Retention decision.
 
 ### 4.4. Local Outbox, relay journal, and author streams
-- FLD local Outbox contains only operations authored by LocalAuthor. Its OutboxSeq is monotonic within the namespace and maps directly to the BIN-SYNC stream (LocalAuthor, namespaceId).
-- Current implementation materializes Outbox entries at each durable Commit; multiple writes to one field before the same Commit are collapsed by the dirty overlay, but separate commits produce separate Outbox entries. The proposed optimization is a distinct durable pending-local staging area: coalesce only unpublished LWW operations by exact field key, then atomically freeze them into the append-only Outbox before any transport can expose them. This staging/freeze optimization is a design target, not implemented behavior. The Outbox itself MUST NOT be rewritten to coalesce unacknowledged entries.
-- FLD does not assign sequence numbers to remote relay operations. RelayJournal stores immutable original mutation data and provenance; BIN-SYNC owns relay policy and assigns/restores per-author relay sequence.
-- FLD OutboxSeq is an immutable local durable cursor. BIN-SYNC peer-relative StreamOffset/wire cursor mapping belongs to BIN-SYNC PeerState and MUST NOT renumber or mutate FLD Outbox entries.
-- WAL CommitSeq, local OutboxSeq, HLC wall, relay sequence, and peer wire cursor are distinct domains and MUST NOT be substituted for one another.
+- FLD local Outbox contains only unpublished operations authored by LocalAuthor. Its OutboxSeq is a local provider-feed cursor; it is not OriginSequence and is not a peer/relay cursor.
+- Coalescing is permitted only while changes remain unpublished. Do not add a second PendingLocal/Pending journal with duplicate mutation facts. Use the existing provider feed/Outbox as the sole unpublished-local source; at durable publication freeze BIN-SYNC allocates ChangeId/OriginSequence and the operation becomes immutable. Published Outbox/Metadata Store payloads MUST NOT be rewritten or coalesced.
+- FLD does not assign sequence numbers to remote relay operations. In the final v3 path, BIN-SYNC Metadata Store owns immutable relay payload, original Origin tuple and per-author relay sequence. Existing FLD RelayJournal payload rows are transition-only and must not duplicate the authoritative Metadata Store history after cutover.
+- FLD OutboxSeq is an immutable local feed cursor. BIN-SYNC OriginSequence is allocated at freeze; peer-relative SenderCursor/StreamOffset belongs to BIN-SYNC Metadata Store. None may renumber or mutate the FLD source feed.
+- WAL CommitSeq, local OutboxSeq, FLD JournalSeq, HLC wall, BIN-SYNC OriginSequence, relay sequence and peer SenderCursor are distinct domains and MUST NOT be substituted for one another.
 - FLD does not aggregate author streams into a namespace-wide scalar cursor. StateRootDigest excludes Outbox cursor and all ACK/peer progress.
 - Safe local-Outbox and relay-retention boundaries are computed by BIN-SYNC from interested-peer ACK state and supplied to FLD. Missing peer state is not an ACK and MUST hold the relevant prefix. Acknowledgement/compaction MUST be fenced against stale consumers.
 - Compaction may remove only entries at or below the proven safe boundary; it MUST preserve local Outbox sequence continuity and all ChangeId/provenance fields of retained Outbox and relay entries.
@@ -433,15 +435,16 @@ v1.5.8-DRAFT: EBR RetireEpoch без −1 + CLAIMING→min_epoch=0; WAL serializ
 | FLD physical format | FLD1 binaryVersion **1** | Unchanged by this compatibility alignment |
 
 ### 11.2. Explicit cursor mapping
-- Local FLD OutboxSeq maps only to the BIN-SYNC stream `(LocalAuthor, namespaceId)`.
-- FLD OutboxSeq remains immutable and local. Peer-relative StreamOffset and wire cursor are owned by BIN-SYNC per `(peer, namespaceId, authorNodeId)`.
+- Local FLD OutboxSeq identifies progress through the provider's unpublished local feed only; it does not map directly to OriginSequence or a peer wire cursor.
+- BIN-SYNC Metadata Store allocates OriginSequence durably at publication freeze per `(scope, namespaceId, originAuthorNodeId)` and preserves it through retries/relay.
+- FLD OutboxSeq remains immutable and local. Peer-relative SenderCursor/StreamOffset are owned by BIN-SYNC per `(peer, namespaceId, authorNodeId)`.
 - `CommitSeq` is WAL ordering only. It is never a sync cursor.
 - There is no namespace-wide aggregate Outbox cursor in StateRootDigest. Legacy STATE_DIGEST OutboxCursor is zero on send and ignored on receive.
 - Missing PeerState means unacknowledged; compaction cannot infer ACK from absence.
 - ACK is validated against the exact peer/author stream pushed range before retention state can advance.
 
 ### 11.3. Durable change identity
-- ChangeId is mandatory, nonzero, exactly 16 bytes, and immutable from local creation through relay.
+- ChangeId is mandatory, nonzero, exactly 16 bytes, and immutable from publication freeze through relay. PublishedOperation also has mandatory immutable Origin `(originAuthorNodeId, originAuthorEpoch, originSequence)`; missing Origin is rejected and is never inferred from OutboxSeq, JournalSeq, HLC or sender cursor.
 - Remote input with absent/invalid ChangeId is rejected. FLD MUST NOT synthesize a new ChangeId.
 - BIN-SYNC owns the semantics of Inbox, receive cursors, digest-chain state, SeenChanges, and relay policy. It prepares an opaque ProtocolStateDelta for the storage transaction; FLD stores that extension without interpreting it. FLD atomically commits field winners, ChangeId/provenance state, relay journal entries, and ProtocolStateDelta before returning a durable receipt. A duplicate batch returns its original durable receipt; BIN-SYNC remains responsible for interpreting it and producing the protocol ACK.
 - LWW loser retention is separate from field winner publication: provenance-valid new operations remain relay-eligible even when they do not replace the current field winner, except exact self-echo/already-seen operations.
@@ -479,4 +482,4 @@ The following gates are tracked independently; partial implementation is not ful
 | Strict schema and unsupported merge-policy behavior | **Not implemented.** |
 | Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction and concurrent snapshot tests | **Partial.** APPLY WAL recovery, journal rematerialization, duplicate batch receipt, LWW-loser retention, local-Outbox isolation and per-author relay ACK/compaction recovery have tests; end-to-end mesh/provenance-gate and snapshot concurrency remain open. |
 
-**Current status:** LOCAL/APPLY separation and the first durable remote-apply path are implemented, but FLD-DB does **not** yet claim full BIN-SYNC v2.4.19 conformance. The remaining gates above are still required.
+**Current status:** FLD-DB's LOCAL/APPLY and Storage Core work is in progress, but it does **not** yet claim full BIN-SYNC v3.0.0 conformance. The remaining gates include the v3 Metadata Store adapter, exact Origin/ChangeId persistence, single authoritative relay history, atomic PendingApply/provider apply, safe receipt/ChangeId/tombstone GC proofs, multi-hop conformance and cross-platform crash tests.
