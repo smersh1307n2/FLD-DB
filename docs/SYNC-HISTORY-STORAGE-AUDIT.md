@@ -396,11 +396,17 @@ The file-share WAL lease experiment was reverted after it stalled the cross-proc
 On BIN-SYNC head 532baa0010140b799f3759e1c88d0c722cdf6727, verification passed: Core 648/648, Fuzz/Lab 31/31, 70.4% line coverage, Storage Integration 122/122 on Ubuntu and Windows, and both in-memory/TCP samples. macOS-15 is still queued. This supersedes the prior 122/122 checkpoint at 75133279fc9eca941983fe1ffcce94f63a1e0f70; do not mark the three-OS gate complete until macOS finishes.
 
 
-## 17. Coordinator process-kill receive crash cuts (2026-11-08)
 
-The Storage Integration suite now kills the actual testhost process at two durable receive boundaries and reopens the same physical Storage database:
+## 17. Coordinator process-kill receive crash cuts and session checkpoint ordering (2026-11-08)
 
-1. After Node has applied the batch and its checkpoint is durable, but before provider apply. The provider is absent before recovery; PendingApply replay restores provider state and finalizes metadata.
-2. After provider commit, but before Metadata Store finalization. The provider mutation and Node checkpoint survive process death while PendingApply remains; recovery repeats the same ApplyToken idempotently and finalizes the receipt.
+The Storage Integration suite now kills the actual testhost process at three durable receive boundaries and reopens the same physical Storage database:
 
-Verified on BIN-SYNC head ea8642e729dbc487f0b6f727d897e81a9d280278: Storage Integration 125/125 independently on Ubuntu, Windows and macOS-15, Core 648/648, Fuzz/Lab 31/31, 70.4% line coverage; in-memory and real-TCP samples pass on all three platforms. The receive crash matrix still needs process-kill cuts immediately after PendingApply staging and after Metadata Store finalization but before network ACK; the broader physical power-loss/I/O matrix remains separate.
+1. **After PendingApply staging, before Node apply:** the PendingApply intent and wire payload are durable, but the Node field and provider mutation are absent. Recovery replays the intent using the persisted negotiated alias table.
+2. **After Node checkpoint, before provider apply:** the Node field is durable while provider state is absent. Recovery completes provider application and metadata finalization.
+3. **After provider commit, before Metadata Store finalization:** Node and provider state are durable while PendingApply remains. Recovery repeats the same ApplyToken idempotently and finalizes the receipt.
+
+A handshake commits the negotiated alias map and peer epoch to Node memory. Since restart replay decodes the original wire payload, StorageNodePersistence.Save is required after successful SyncSession establishment and before the first inbound durable batch. This requirement is now documented in the persistence API and demonstrated in both Storage array samples. Windows process-kill recovery retries WAL reopen briefly to account for delayed OS handle release; the test harness cleanup is bounded and the test workflow emits a mini dump after a three-minute hang.
+
+Verified on BIN-SYNC head b47c86a02998b3d9aa6a8dcbfc991d9c0245ea1e: Storage Integration 126/126 independently on Ubuntu, Windows and macOS-15; Core 648/648; Fuzz/Lab 31/31; 70.4% line coverage; in-memory and real-TCP samples pass on all three platforms.
+
+The remaining coordinator crash cut is after Metadata Store finalization but before network ACK. This is distinct from true physical power-loss/I/O fault injection, which remains open.
