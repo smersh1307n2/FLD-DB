@@ -1678,3 +1678,18 @@ BIN-SYNC adds `StorageCrashConsistencyTests` in `BinSync.Net/tests/BinSync.Stora
 **Verification:** GitHub Actions run `42446095432` passed 119/119 Storage Integration tests independently on Ubuntu, Windows and macOS. On the same code/test head `2667fb81f41f726d2c286b98f34acd7857c2a7eb`, run `42446095441` passed 648/648 BIN-SYNC Core tests, 31/31 Fuzz/Lab cases and the 70.4% line-coverage gate. PR #16 remains Draft/open/unmerged.
 
 **Scope limitation:** these are deterministic reconstructed on-disk crash states, not forced power loss or injected OS/filesystem failures at each `Write`, `Flush(true)`, `Move` or directory-fsync call. True power-loss/I/O fault injection and the coordinator-level PendingApply → provider effect → Metadata Store finalize → Node checkpoint → ACK process-kill matrix remain open. Do not mark the full crash-consistency audit complete.
+
+
+### 7.33 WAL writer-fence hang diagnosis and bounded test cleanup (2026-11-08)
+
+The interrupted continuation exposed a long-running Storage Integration test around cross-process WAL writer ownership. The investigation isolated the regression to an experimental OS file-share lease: it could stall the test/lock lifecycle. That implementation was reverted; the current implementation is the named OS-managed Mutex with a dedicated process-wide owner thread. Do not reintroduce the file-share lease without a separate cross-platform proof.
+
+- The manager thread owns every named Mutex acquisition/release, so callers may dispose a StorageDatabase from a different thread without violating Mutex thread affinity.
+- The cross-process tests distinguish normal owner-process termination from forcibly killing the actual testhost process that owns the database. The latter writes its PID explicitly; killing only the outer dotnet test process is insufficient.
+- Both child-process tests now have unconditional cleanup: signal the child to exit, kill its process tree if it remains alive, wait with a bounded timeout, and only then remove the temporary directory.
+- Storage Integration now runs dotnet test with --blame-hang-timeout 3m --blame-hang-dump-type mini, matching the core test workflow. A stuck test therefore produces hang diagnostics instead of silently consuming the whole 30-minute job timeout.
+- The cross-thread release test comment was corrected to describe the named-Mutex manager-thread implementation rather than the reverted file-share lease.
+
+**Verification on BIN-SYNC HEAD 532baa0010140b799f3759e1c88d0c722cdf6727:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 122/122 on Ubuntu and Windows; in-memory and TCP samples pass. The macOS-15 Storage Integration job is still queued, so cross-platform completion is not yet claimed. PR #16 remains Draft/open/unmerged.
+
+**Next gates remain:** coordinator-level process-kill/reopen cuts through PendingApply staging, Node checkpoint, provider apply, Metadata Store finalization and ACK; true physical Storage/power-loss I/O fault injection; retirement of legacy Node-owned receive/transport and other-author relay state; receipt/dedup/tombstone GC horizons; and FLD (author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq provenance with atomic staging/freeze recovery. Keep exactly two DLLs: Fld1.Storage.dll and Fld1.Database.dll; do not add a third shared runtime DLL.
