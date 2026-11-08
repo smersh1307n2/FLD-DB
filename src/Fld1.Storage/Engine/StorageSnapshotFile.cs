@@ -211,6 +211,9 @@ internal static class StorageSnapshotFile
 
     private static void CleanupUnreferencedSnapshots(string directory, ulong partitionId, ulong? keepGeneration)
     {
+        if (!Directory.Exists(directory))
+            return;
+
         string prefix = $"p_{partitionId}.";
         bool changed = false;
         foreach (string path in Directory.EnumerateFiles(directory, prefix + "*.snap"))
