@@ -226,6 +226,8 @@ public sealed class StorageCrashConsistencyTests
                     // The old manifest remains authoritative. Recovery removes the
                     // unreferenced generation so a subsequent checkpoint can reuse it.
                     Assert.False(File.Exists(secondSnapshotPath));
+                    Assert.False(File.Exists(secondSnapshotPath + ".tmp"));
+                    Assert.False(File.Exists(manifestPath + ".tmp"));
                     recovered.Checkpoint();
                 }
             }
