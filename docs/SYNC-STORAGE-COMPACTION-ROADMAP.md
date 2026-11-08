@@ -1678,13 +1678,3 @@ BIN-SYNC adds `StorageCrashConsistencyTests` in `BinSync.Net/tests/BinSync.Stora
 **Verification:** GitHub Actions run `42446095432` passed 119/119 Storage Integration tests independently on Ubuntu, Windows and macOS. On the same code/test head `2667fb81f41f726d2c286b98f34acd7857c2a7eb`, run `42446095441` passed 648/648 BIN-SYNC Core tests, 31/31 Fuzz/Lab cases and the 70.4% line-coverage gate. PR #16 remains Draft/open/unmerged.
 
 **Scope limitation:** these are deterministic reconstructed on-disk crash states, not forced power loss or injected OS/filesystem failures at each `Write`, `Flush(true)`, `Move` or directory-fsync call. True power-loss/I/O fault injection and the coordinator-level PendingApply → provider effect → Metadata Store finalize → Node checkpoint → ACK process-kill matrix remain open. Do not mark the full crash-consistency audit complete.
-
-### 7.33 Cross-platform WAL writer lease correction after abrupt-process-kill regression (2026-11-08)
-
-The first true owner-process-kill regression showed that the named `Mutex` approach did not release the writer fence as expected on macOS (and the subsequent Linux attempt also exposed that the test was killing the `dotnet test` parent rather than the actual testhost owner). The fence was replaced with a persistent per-partition lock file opened using `FileShare.None`.
-
-- `WalWriterFence` now canonicalizes the physical WAL directory, rejects duplicate opens inside the process using a static identity set, and holds the exclusive lock-file handle for the lifetime of `StorageDatabase`.
-- The OS closes the owning handle on process exit; there is no thread-affinity constraint or background manager thread. The lock file is persistent, is not part of WAL segment enumeration, and must not be deleted while the database is open.
-- The abrupt-kill test now records and kills the actual testhost PID that owns the database, then retries opening until the OS releases the lease. A separate test verifies disposal from a different thread.
-- Snapshot crash-state reconstruction deliberately excludes the lock file; it is an OS lease, not durable WAL state.
-- Current CI at code/test head `aafff5c5e12c901c2da4bd49fbabc03158418794`: 122/122 Storage Integration tests pass on Ubuntu and Windows. The macOS job is queued; do not mark this change cross-platform complete until it passes.
