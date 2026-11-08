@@ -193,7 +193,7 @@ A genuinely reusable Storage engine therefore needs a generic ordered byte-key/v
 
 Do not create dummy namespaces or synthetic field records to represent metadata.
 
-The single-process storage path must remain usable without starting the FLD Shared Engine process. Multi-process coordination may be an optional layer over Storage Core; it must not become a mandatory dependency for a simple embedded consumer.
+The single-process embedded Storage path must remain usable without starting the FLD Shared Engine process. However, the product requirement for multiple independent applications/processes to access the same physical FLD database file is served by the FLD Shared Engine mode described in §14 below; it is not implemented by opening the same Storage partition independently from every process. The shared Engine is optional for single-process consumers but required for multi-process shared-file access.
 
 ## 8. Performance and API constraints
 
@@ -251,6 +251,52 @@ Every Storage partition must acquire its OS-managed single-writer fence before r
 
 The current implementation uses a named OS Mutex keyed by the canonical physical WAL directory and partition ID. A process-wide manager thread owns acquisition and release so a StorageDatabase may be disposed from any caller thread without violating Mutex thread affinity. If the previous process terminates while holding the mutex, the next owner accepts the abandoned-mutex handoff and performs normal fail-closed WAL/snapshot recovery while holding the fence.
 
-Path identity is canonicalized across symlinks and aliases before deriving the mutex name. A second writer for the same physical partition must fail before it loads the snapshot or changes WAL state. Do not replace this with a file-share lease without a separate cross-platform proof; the earlier FileShare-based experiment stalled the integration lifecycle.
+Path identity is canonicalized across symlinks and aliases before deriving the mutex name. A second direct opener/writer for the same physical partition must fail before it loads the snapshot or changes WAL state. This is the safety rule for direct embedded mode; it is not the multi-application sharing mechanism. In shared-file mode, all mutating clients submit requests to the one FLD Shared Engine process, which alone owns the physical Storage partitions and WAL. Do not weaken the mutex or let clients bypass the Engine. Do not replace this with a file-share lease without a separate cross-platform proof; the earlier FileShare-based experiment stalled the integration lifecycle.
 
 The FLD-DB Storage source now matches the implementation verified in BIN-SYNC. Regression coverage includes same-partition writer rejection, cross-thread disposal/reopen, abandoned-owner recovery, symlink aliases and case aliases on case-insensitive filesystems. Snapshot recovery removes unreferenced generations and abandoned temp files only after validating the authoritative root; failed checkpoint operations fault the live database and require reopen. Internal deterministic fault points cover WAL append/flush and snapshot/manifest publication boundaries. FLD-DB CI passed 163/163 tests independently on Ubuntu, Windows and macOS-15 at code/test head `0efa1cdb8287ee82082186a5dcb8c163baf3528a`. These controls do not replace partial-write, real filesystem/device error, directory durability or power-loss testing.
+
+## 14. Multi-application access to one physical database file
+
+**Binding product requirement:** independent applications/processes must be able to open and use one physical FLD database without independently owning or mutating its files. This requirement predates the Storage extraction and is part of the original FLD Shared Engine design in `FLD-KERNEL-SPEC-v1.5.9.md` §0.1–0.2 and PART III. The shared-file requirement must not be lost when the physical engine is split into Storage and Database layers.
+
+### 14.1 Two operating modes
+
+1. **Direct embedded mode (one owning process).** An application opens `Fld1.Storage` directly (or through `Fld1.Database`). The process owns the partition writer fence and performs local reads/writes. A second process cannot independently open the same physical partition for writing; it fails before manifest/WAL recovery. This is the current implemented Storage ownership model.
+2. **Shared-file mode (multiple client processes).** Exactly one FLD Shared Engine process owns a physical database. Independent applications connect to it through local IPC/shared-memory interfaces. The Engine is the only process allowed to mutate WAL, manifest, mutable L0/catalog state and compaction state. All writes are submitted to the Engine and may be combined into group commits. Clients read a consistent published view; immutable run/page generations may be exposed through read-only memory mapping with explicit snapshot/epoch lifetime protection.
+
+These modes share the same Storage durability engine and on-disk format. Shared-file mode is not implemented by relaxing or bypassing `WalWriterFence`.
+
+### 14.2 Preserve exactly two runtime DLLs
+
+The assembly boundary remains exactly:
+
+- `Fld1.Storage.dll`: physical byte engine plus generic local/IPC client capability. It knows storage keys, values, transactions, snapshots and storage-native sequence numbers only.
+- `Fld1.Database.dll`: FLD records/fields, HLC/LWW, lifecycle, indexes/projections and the FLD-facing client/facade. It may use the Storage client capability when connected to a shared Engine.
+
+The Shared Engine Host is a process/executable, not a third runtime DLL. It hosts the Storage owner and, for a full FLD database, the Database semantic layer. A Storage-only deployment must be able to host/use Storage without loading `Fld1.Database.dll`. The old `Fld.Client.dll` label in the v1.5.9 conceptual diagram is a logical client role, not authorization to add a third runtime DLL: its generic Storage-facing implementation belongs in Storage and its FLD-facing facade belongs in Database.
+
+Dependency direction remains `Fld1.Database.dll → Fld1.Storage.dll`; Storage must not depend on Database. BIN-SYNC remains an external adapter/consumer and must not become a dependency of either Storage or the Shared Engine's generic IPC contract.
+
+### 14.3 Shared Engine invariants
+
+- One Engine owner per canonical physical database identity; startup/bootstrap must prevent two owners from racing to open the same files.
+- Clients never append/truncate WAL, publish manifests, run compaction, or mutate the physical database files directly.
+- Request submission is bounded and session-fenced. Client death/timeout must not leave a permanently owned request slot or writer lease.
+- A successful write response is returned only after the Engine's documented durability boundary (including required WAL flush) has been met.
+- Group commit may combine independent client requests, but transaction atomicity and result correlation remain per request; unrelated calls must not be reported as one application transaction.
+- Reads use a stable published snapshot. Long-running reads pin generations/epochs; they must not hold the writer lock while clients perform application work.
+- Engine restart recovers the database before accepting clients. Client reconnect/retry must distinguish a committed request from an unknown outcome and use durable request identity where retry safety requires it.
+- IPC authorization is scoped to the local machine/user/session and physical database access rights. Network filesystems (NFS/SMB) remain outside the current v1.5.9 non-goals unless separately designed and tested.
+
+### 14.4 Implementation boundary and acceptance tests
+
+The current named OS Mutex is the physical single-owner fence beneath both modes. It protects the Engine owner; it is not a substitute for IPC or a multi-writer database protocol. The following work remains before shared-file mode can be claimed implemented:
+
+1. Define the Engine Host lifecycle, discovery/bootstrap, canonical database identity and stale-owner recovery.
+2. Define versioned local IPC request/response framing, bounded queues, session generation, cancellation and request-result recovery.
+3. Define how Storage snapshots and immutable generations are safely exposed to clients (read-only MMF/SHM or an equivalent implementation).
+4. Place generic Storage client operations in Storage and FLD Database client operations in Database without introducing a third runtime DLL.
+5. Add two-independent-process tests: concurrent reads; concurrent writes from both clients; group-commit correctness; one durable result per request; client termination during queued/in-flight work; Engine termination/restart; reconnect after ambiguous commit; snapshot pinning during compaction; and proof that a second Engine owner cannot start.
+6. Verify a Storage-only client can use the shared Engine without loading or referencing `Fld1.Database.dll`.
+
+Until these gates pass, describe the current implementation as **single-process direct Storage with cross-process single-owner fencing**, and describe multi-application shared-file access as a preserved architectural requirement/design, not a completed feature.
