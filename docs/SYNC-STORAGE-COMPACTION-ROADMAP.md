@@ -759,7 +759,7 @@ The provider retry benchmark is now an end-to-end coordinator scenario rather th
 - These are full-path figures, not scan-only figures. They include `InstallProviderSnapshot` → `RestoreProviderSnapshot`, which rebuilds the namespace dictionary, validates uniqueness with temporary sets, materializes operation objects and copies field values. The 1,024-row case was noisy (24.9% relative standard deviation); 4,096 rows was more stable (1.02%).
 - The separate frozen ChangeId lookup remained allocation-free at all sizes: 81.70/81.78/80.00 ns at 256/1,024/4,096 ledger rows.
 
-**Implementation completed in BIN-SYNC:** ordinary provider-authoritative publication now applies the exact scanned provider-feed prefix incrementally to the Node data cache after Metadata Store freeze, checkpoints Node before provider ACK, and retains full snapshot installation for initial cutover/startup recovery. Copy-on-write staging ensures malformed or failed cache application does not partially publish changed records. ACK retry replays the same HLC mutations idempotently. The first end-to-end incremental retry benchmark is recorded in §7.28; a same-runner baseline comparison remains open.
+**Implementation completed in BIN-SYNC:** ordinary provider-authoritative publication now applies the exact scanned provider-feed prefix incrementally to the Node data cache after Metadata Store freeze, checkpoints Node before provider ACK, and retains full snapshot installation for initial cutover/startup recovery. Copy-on-write staging ensures malformed or failed cache application does not partially publish changed records. ACK retry replays the same HLC mutations idempotently. The first end-to-end incremental retry benchmark is recorded in §7.28; the matched-runner full-snapshot comparison is recorded in §7.30.
 
 **Authority caveat to resolve before finalizing that optimization:** the current Node apply path still has a durable `GlobalChangeLedger` projection even when Metadata Store owns receive identities. A later contract step must pass per-operation accepted/duplicate decisions from PendingApply into Node application, so the Metadata Store remains the only global ChangeId authority and Node does not recreate duplicate identity metadata.
 
@@ -776,7 +776,7 @@ The per-publication full Node snapshot rebuild identified in §7.27 has been rep
 - Incremental retry benchmark (GitHub Actions run `42440960333`, .NET 10.0.14, Ubuntu 26.04.1, AMD EPYC 9V74): 256 rows = 1.523 ms / 875.93 KB; 1,024 rows = 3.829 ms / 3,516.38 KB; 4,096 rows = 15.869 ms / 14,148.12 KB.
 - The prior full-snapshot baseline (§7.27) ran on AMD EPYC 7763, so latency comparison is directional, not controlled. At 4,096 rows measured allocation fell from 33.92 MB to 14,148 KB, but a same-runner old-vs-new benchmark is still required. The 256-row incremental measurement is noisy; the 4,096-row result is more stable. See BIN-SYNC docs/METADATA-STORE-BENCHMARKS.md for raw scope and caveats.
 
-**Remaining gates:** matched-runner retry comparison (workflow is running); reduce feed materialization/operation-encoding/copy-on-write allocations if profiling justifies it; deterministic physical Storage crash cuts; legacy Node/Transport state migration and receipt/dedup/tombstone GC; and FLD's `(author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq` provenance plus atomic staging/freeze integration. Keep exactly two DLLs: `Fld1.Database.dll → Fld1.Storage.dll`; do not add a third shared runtime DLL.
+**Remaining gates:** reduce feed materialization/operation-encoding/copy-on-write allocations if profiling justifies it; deterministic physical Storage crash cuts; legacy Node/Transport state migration and receipt/dedup/tombstone GC; and FLD's `(author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq` provenance plus atomic staging/freeze integration. Keep exactly two DLLs: `Fld1.Database.dll → Fld1.Storage.dll`; do not add a third shared runtime DLL.
 
 ### 7.29 Metadata Store as the sole ChangeId authority for receive (2026-11-08)
 
@@ -789,4 +789,19 @@ The Storage-backed receive path now avoids keeping a second global ChangeId iden
 - Conformance regressions verify mixed duplicate/new masks, stable mask reconstruction from pending intents, reservation of unfinalized ChangeIds against both another PendingApply and immediate accept, and conflict rejection. Storage integration verifies metadata receive does not create Node global-ledger rows, lost-ACK replay remains a durable duplicate, and incremental provider cache preserves field/record tombstone ordering.
 - Verified BIN-SYNC code/test head `e5f7c493d461671c8b0b88940127a702ee2a4dd9`: core 648/648, Storage Integration 110/110 on Ubuntu/Windows/macOS, Fuzz/Lab 31/31, 70.4% line coverage. PR #16 remains Draft/open/unmerged.
 
-**Remaining gates:** deterministic crash cuts at every boundary from PendingApply staging through Node checkpoint, provider apply, Metadata Store finalization and ACK; legacy Node-ledger/WAL migration or explicit fail-closed fencing before authority switch; matched-runner retry comparison; physical Storage/power-loss testing; receipt/dedup/tombstone GC horizons; and FLD JournalSeq provenance/atomic staging integration.
+**Remaining gates:** deterministic crash cuts at every boundary from PendingApply staging through Node checkpoint, provider apply, Metadata Store finalization and ACK; legacy Node-ledger/WAL migration or explicit fail-closed fencing before authority switch; physical Storage/power-loss testing; receipt/dedup/tombstone GC horizons; and FLD JournalSeq provenance/atomic staging integration.
+### 7.30 Matched-runner full-snapshot vs incremental retry benchmark (2026-11-08)
+
+GitHub Actions workflow run `42444167368` checked out the full-snapshot baseline at `8e6833e5aa5fe7086dbd72b18cf71e45f30169c9` and the incremental implementation at `69ed0b5c964357a3c90552b9d697026d86280447`, then ran both sequentially on the same Ubuntu 26.04.1 / AMD EPYC 7763 / .NET 10.0.14 runner with the same BenchmarkDotNet 0.14.0 configuration.
+
+| Pending provider-feed rows | Full snapshot mean | Incremental mean | Mean latency reduction | Full snapshot allocation | Incremental allocation | Allocation reduction |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 3.796 ms | 2.308 ms | 39.2% | 1.52 MB | 876.14 KB | 43.7% |
+| 1,024 | 7.384 ms | 4.746 ms | 35.7% | 6.47 MB | 3,516.05 KB | 46.9% |
+| 4,096 | 40.997 ms | 17.522 ms | 57.3% | 33.92 MB | 14,147.82 KB | 59.3% |
+
+Relative standard deviations were 36.9% / 16.1% / 2.16% for the full-snapshot path and 12.3% / 12.8% / 2.13% for the incremental path at 256/1,024/4,096 rows. The 256-row baseline is noisy; the 4,096-row comparison is stable. BenchmarkDotNet still warns that stateful single-invocation iterations are below its recommended 100 ms window.
+
+**Decision:** retain incremental publication. The matched-runner comparison confirms lower mean latency and managed allocation at all three tested feed sizes, with the strongest stable result at 4,096 rows. This closes the same-runner retry benchmark gate; continue profiling remaining feed materialization, operation encoding and changed-record copy-on-write allocations before further optimization. The full snapshot remains required for initial cutover and startup recovery.
+
+Raw CSV/Markdown reports are attached to BIN-SYNC workflow run `42444167368` as artifact `metadata-retry-comparison`.
