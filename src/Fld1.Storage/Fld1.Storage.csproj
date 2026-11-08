@@ -10,4 +10,8 @@
     <Version>0.1.0-alpha</Version>
     <Description>Domain-neutral durable storage primitives for embedded applications.</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fld1.Storage.Tests" />
+    <InternalsVisibleTo Include="BinSync.Storage.Integration" />
+  </ItemGroup>
 </Project>
