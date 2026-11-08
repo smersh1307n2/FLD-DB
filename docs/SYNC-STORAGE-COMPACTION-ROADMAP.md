@@ -1791,3 +1791,20 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 - Backup branches created in both repositories: `backup/post-cutover-receive-fence-2026-11-08` (BIN-SYNC snapshot at the verified code head; FLD-DB snapshot at the current roadmap head).
 
 **Remaining before FLD integration:** legacy Node-owned mode policy for non-cutover/volatile namespaces; physical partial-write/fsync/device/power-loss proof; external peer-removal and safe GC horizons; 1m/deployment benchmark; requirement-ID and cross-implementation normative audit. The two-DLL decision remains `Fld1.Storage.dll` plus `Fld1.Database.dll`.
+
+
+## 2026-11-08 — BIN-SYNC v3 cross-repository alignment
+
+**Normative references:** BIN-SYNC CORE v3.0.0 in `smersh1307n2/BIN-SYNC`, `docs/BIN-SYNC-ROADMAP-v3.md`; current BIN-SYNC implementation branch `feature/fld-external-storage`, reviewed code/doc checkpoint `bdb00c7509cd25e762a095a5bbc4bf818523f3d0`. FLD implementation branch remains `fix/crash-consistency-outbox` at `4ad95ca99d8cc0b904f28ccb7ae722e316dd2044`; no FLD source-code changes are included in this documentation alignment.
+
+- [x] Preserve exactly two runtime DLLs: `Fld1.Storage.dll` (opaque byte engine) and `Fld1.Database.dll` (field semantics, Database → Storage).
+- [x] Correct the integration contract: FLD `OutboxSeq`, APPLY `JournalSeq` and WAL `CommitSeq` are local source/recovery coordinates, never BIN-SYNC `OriginSequence`.
+- [x] Record that BIN-SYNC Metadata Store allocates durable `OriginSequence` at publication freeze and owns published ChangeId/Origin identity, receipts, peer delivery state and relay payload.
+- [x] Record that no separate duplicate PendingLocal journal is permitted; coalescing ends at durable publication freeze.
+- [x] Make tombstone/ghost GC contingent on the independent v3 membership, author-epoch retirement, complete-resync and safe-frontier proof; TTL/HLC age alone is insufficient.
+- [ ] Implement the BIN-SYNC Metadata Store adapter over the neutral FLD Storage API (including BMS3 identity, transaction semantics, ordered scans and compact per-peer/per-author state).
+- [ ] Implement the FLD Data Provider adapter for durable local feed, snapshots and idempotent remote apply without making FLD Storage depend on BIN-SYNC.
+- [ ] Remove the legacy FLD ApplyJournal/RelayJournal payload path as an independent authoritative relay history after the v3 adapter becomes authoritative; retain only required field-state recovery and provider apply receipts.
+- [ ] Prove crash consistency across FLD field APPLY and BIN-SYNC PendingApply/receipt when both share one Storage transaction domain; define idempotent recovery when stores are separate.
+- [ ] Implement and test v3 receipt, ChangeId and tombstone/ghost GC horizons independently.
+- [ ] Run cross-platform crash/reopen, multi-hop relay, duplicate/equivocation and 500/10k/100k/1M metadata cardinality benchmarks before declaring FLD integration complete.
