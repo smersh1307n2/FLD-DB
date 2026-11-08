@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using Fld1.Storage.Engine;
 using Fld1.Storage.Integrity;
 using Fld1.Storage.Wal.Format;
 
@@ -11,6 +12,7 @@ namespace Fld1.Storage.Wal.IO;
 public sealed class WalWriter : IDisposable
 {
     private readonly FileStream _fs;
+    private readonly Action<StorageFaultPoint>? _faultInjector;
     private readonly object _mutex = new();
     private ulong _writeOffset;
     private ulong _publishedWalEnd;
@@ -29,9 +31,11 @@ public sealed class WalWriter : IDisposable
         get { lock (_mutex) return _nextCommitSeq; }
     }
 
-    private WalWriter(FileStream fs, ulong partitionId, ulong writeOffset, ulong firstCommitSeq)
+    private WalWriter(FileStream fs, ulong partitionId, ulong writeOffset, ulong firstCommitSeq,
+        Action<StorageFaultPoint>? faultInjector)
     {
         _fs = fs;
+        _faultInjector = faultInjector;
         PartitionId = partitionId;
         _writeOffset = writeOffset;
         _publishedWalEnd = writeOffset;
@@ -40,25 +44,57 @@ public sealed class WalWriter : IDisposable
 
     /// <summary>Create a new WAL file with header. firstCommitSeq is the first seq that will be assigned.</summary>
     public static WalWriter Create(string path, ulong partitionId, ulong firstCommitSeq = 1)
+        => CreateCore(path, partitionId, firstCommitSeq, faultInjector: null);
+
+    internal static WalWriter CreateForTesting(string path, ulong partitionId, ulong firstCommitSeq,
+        Action<StorageFaultPoint> faultInjector)
+        => CreateCore(path, partitionId, firstCommitSeq, faultInjector);
+
+    private static WalWriter CreateCore(string path, ulong partitionId, ulong firstCommitSeq,
+        Action<StorageFaultPoint>? faultInjector)
     {
         var fs = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read,
             bufferSize: 64 * 1024, FileOptions.None);
-        Span<byte> hdr = stackalloc byte[WalHeader.Size];
-        WalHeader.Write(hdr, partitionId, firstCommitSeq);
-        fs.Write(hdr);
-        fs.Flush(flushToDisk: true);
-        return new WalWriter(fs, partitionId, WalHeader.Size, firstCommitSeq);
+        try
+        {
+            Span<byte> hdr = stackalloc byte[WalHeader.Size];
+            WalHeader.Write(hdr, partitionId, firstCommitSeq);
+            fs.Write(hdr);
+            fs.Flush(flushToDisk: true);
+            return new WalWriter(fs, partitionId, WalHeader.Size, firstCommitSeq, faultInjector);
+        }
+        catch
+        {
+            fs.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Open existing WAL for append after recovery (writeOffset = end of valid prefix).</summary>
     public static WalWriter OpenForAppend(string path, ulong partitionId, ulong writeOffset, ulong nextCommitSeq)
+        => OpenForAppendCore(path, partitionId, writeOffset, nextCommitSeq, faultInjector: null);
+
+    internal static WalWriter OpenForAppendForTesting(string path, ulong partitionId, ulong writeOffset,
+        ulong nextCommitSeq, Action<StorageFaultPoint> faultInjector)
+        => OpenForAppendCore(path, partitionId, writeOffset, nextCommitSeq, faultInjector);
+
+    private static WalWriter OpenForAppendCore(string path, ulong partitionId, ulong writeOffset,
+        ulong nextCommitSeq, Action<StorageFaultPoint>? faultInjector)
     {
         var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
             bufferSize: 64 * 1024, FileOptions.None);
-        if (writeOffset < WalHeader.Size)
-            throw new ArgumentException("writeOffset < header");
-        fs.Seek((long)writeOffset, SeekOrigin.Begin);
-        return new WalWriter(fs, partitionId, writeOffset, nextCommitSeq);
+        try
+        {
+            if (writeOffset < WalHeader.Size)
+                throw new ArgumentException("writeOffset < header");
+            fs.Seek((long)writeOffset, SeekOrigin.Begin);
+            return new WalWriter(fs, partitionId, writeOffset, nextCommitSeq, faultInjector);
+        }
+        catch
+        {
+            fs.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -98,7 +134,17 @@ public sealed class WalWriter : IDisposable
 
             try
             {
-                _fs.Write(record);
+                if (_faultInjector is not null)
+                {
+                    int partialLength = Math.Max(1, record.Length / 2);
+                    _fs.Write(record.AsSpan(0, partialLength));
+                    _faultInjector(StorageFaultPoint.AfterWalPartialWrite);
+                    _fs.Write(record.AsSpan(partialLength));
+                }
+                else
+                {
+                    _fs.Write(record);
+                }
             }
             catch
             {
@@ -131,6 +177,7 @@ public sealed class WalWriter : IDisposable
             ulong target = Volatile.Read(ref _publishedWalEnd);
             try
             {
+                _faultInjector?.Invoke(StorageFaultPoint.BeforeWalFsync);
                 _fs.Flush(flushToDisk: true);
                 return target;
             }
