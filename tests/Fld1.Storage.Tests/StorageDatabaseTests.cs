@@ -206,4 +206,33 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Equal("committed"u8.ToArray(), other);
     }
 
+    [Fact]
+    public void Wal_writer_fence_rejects_same_partition_and_releases_from_another_thread()
+    {
+        var first = StorageDatabase.Open(_dir, 109);
+        try
+        {
+            Assert.Throws<IOException>(() => StorageDatabase.Open(_dir, 109));
+
+            Exception? disposeError = null;
+            var disposer = new Thread(() =>
+            {
+                try { first.Dispose(); }
+                catch (Exception ex) { disposeError = ex; }
+            });
+            disposer.Start();
+            Assert.True(disposer.Join(TimeSpan.FromSeconds(5)));
+            Assert.Null(disposeError);
+
+            using var reopened = StorageDatabase.Open(_dir, 109);
+            using var batch = reopened.BeginWriteBatch();
+            batch.Put("fenced"u8, "reopened"u8);
+            Assert.Equal(1UL, batch.Commit());
+        }
+        finally
+        {
+            first.Dispose();
+        }
+    }
+
 }
