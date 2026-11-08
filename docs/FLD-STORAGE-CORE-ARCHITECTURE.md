@@ -243,3 +243,14 @@ The code-backed analysis of FLD local Outbox, remote APPLY/relay retention, BIN-
 The cross-layer optimization plan is maintained in the FLD-DB [Sync Storage Compaction Roadmap](SYNC-STORAGE-COMPACTION-ROADMAP.md), with code-backed findings in [Sync History Storage Audit](SYNC-HISTORY-STORAGE-AUDIT.md).
 
 This roadmap does not move BIN-SYNC protocol semantics into Storage Core. Fld1.Storage remains domain-neutral: it provides atomic byte batches, WAL/recovery, snapshots, ordered scans, checkpoints and safe reclamation. ChangeId identity, batch receipts, peer cursors, relay eligibility, protocol retention and PendingLocal coalescing remain in FLD Database/BIN-SYNC semantic layers or their adapter. The same physical engine may host these records, but Storage Core must not interpret them.
+
+
+## 13. WAL single-writer ownership and recovery ordering
+
+Every Storage partition must acquire its OS-managed single-writer fence before reading the snapshot manifest or replaying WAL. The fence belongs to the generic Storage engine, not to FLD field semantics or BIN-SYNC protocol code.
+
+The current implementation uses a named OS Mutex keyed by the canonical physical WAL directory and partition ID. A process-wide manager thread owns acquisition and release so a StorageDatabase may be disposed from any caller thread without violating Mutex thread affinity. If the previous process terminates while holding the mutex, the next owner accepts the abandoned-mutex handoff and performs normal fail-closed WAL/snapshot recovery while holding the fence.
+
+Path identity is canonicalized across symlinks and aliases before deriving the mutex name. A second writer for the same physical partition must fail before it loads the snapshot or changes WAL state. Do not replace this with a file-share lease without a separate cross-platform proof; the earlier FileShare-based experiment stalled the integration lifecycle.
+
+The FLD-DB Storage source now matches the implementation verified in BIN-SYNC. Regression coverage includes same-partition writer rejection, cross-thread disposal/reopen and abandoned-owner recovery. This fence prevents concurrent recovery/checkpoint races; it does not replace durable flush ordering, checksums, crash-state recovery tests or physical I/O/power-loss fault injection.
