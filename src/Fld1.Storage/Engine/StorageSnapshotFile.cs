@@ -25,7 +25,11 @@ internal static class StorageSnapshotFile
     {
         string snapshots = Path.Combine(directory, "snapshots");
         string manifestPath = ManifestPath(snapshots, partitionId);
-        if (!File.Exists(manifestPath)) return null;
+        if (!File.Exists(manifestPath))
+        {
+            CleanupUnreferencedSnapshots(snapshots, partitionId, keepGeneration: null);
+            return null;
+        }
 
         byte[] manifest = File.ReadAllBytes(manifestPath);
         if (manifest.Length != ManifestSize || !manifest.AsSpan(0, 4).SequenceEqual(ManifestMagic))
@@ -54,7 +58,9 @@ internal static class StorageSnapshotFile
             !StorageChecksums.IsCrc32COrLegacy(bytes.AsSpan(0, bytes.Length - 4), snapshotCrc))
             throw new InvalidDataException("Storage snapshot file length or checksum does not match its manifest.");
 
-        return DecodeSnapshot(bytes, partitionId, generation, commitSeq);
+        State state = DecodeSnapshot(bytes, partitionId, generation, commitSeq);
+        CleanupUnreferencedSnapshots(snapshots, partitionId, generation);
+        return state;
     }
 
     public static void Store(
@@ -201,6 +207,25 @@ internal static class StorageSnapshotFile
             bufferSize: 64 * 1024, FileOptions.WriteThrough);
         stream.Write(bytes);
         stream.Flush(flushToDisk: true);
+    }
+
+    private static void CleanupUnreferencedSnapshots(string directory, ulong partitionId, ulong? keepGeneration)
+    {
+        string prefix = $"p_{partitionId}.";
+        bool changed = false;
+        foreach (string path in Directory.EnumerateFiles(directory, prefix + "*.snap"))
+        {
+            if (keepGeneration.HasValue &&
+                string.Equals(path, SnapshotPath(directory, partitionId, keepGeneration.Value),
+                    StringComparison.Ordinal))
+                continue;
+
+            File.Delete(path);
+            changed = true;
+        }
+
+        if (changed)
+            TryFsyncDirectory(directory);
     }
 
     private static void TryDelete(string path)
