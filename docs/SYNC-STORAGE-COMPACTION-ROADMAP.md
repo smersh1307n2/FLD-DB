@@ -1693,3 +1693,19 @@ The interrupted continuation exposed a long-running Storage Integration test aro
 **Verification on BIN-SYNC HEAD 532baa0010140b799f3759e1c88d0c722cdf6727:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 122/122 on Ubuntu and Windows; in-memory and TCP samples pass. The macOS-15 Storage Integration job is still queued, so cross-platform completion is not yet claimed. PR #16 remains Draft/open/unmerged.
 
 **Next gates remain:** coordinator-level process-kill/reopen cuts through PendingApply staging, Node checkpoint, provider apply, Metadata Store finalization and ACK; true physical Storage/power-loss I/O fault injection; retirement of legacy Node-owned receive/transport and other-author relay state; receipt/dedup/tombstone GC horizons; and FLD (author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq provenance with atomic staging/freeze recovery. Keep exactly two DLLs: Fld1.Storage.dll and Fld1.Database.dll; do not add a third shared runtime DLL.
+
+
+### 7.34 Coordinator process-kill recovery at two receive durability cuts (2026-11-08)
+
+Added a real subprocess crash test around the Storage-backed receive coordinator. The parent test starts a filtered child testhost, waits for a durable crash-cut marker, kills the actual process holding the WAL Mutex, reopens the same physical database, and runs PendingApply recovery.
+
+Two boundaries are now exercised by process termination rather than only injected exceptions:
+
+- **After Node checkpoint, before provider apply:** Metadata Store PendingApply and the applied Node checkpoint are durable; provider state is still absent. Recovery replays the immutable intent, idempotently materializes Node/provider state and finalizes metadata.
+- **After provider commit, before Metadata Store finalization:** Node checkpoint and provider mutation are durable while PendingApply remains. Recovery repeats provider apply using the same ApplyToken, recognizes the provider's idempotent receipt, and finalizes the metadata receipt without losing or duplicating the operation.
+
+The provider-commit cut uses a test-only IDataProvider decorator that blocks immediately after the underlying StorageDataProvider commit. Both crash cuts kill the actual testhost PID; the outer dotnet test process is then reaped. Existing unconditional child cleanup and the three-minute hang-dump guard remain enabled.
+
+**Verification on BIN-SYNC HEAD ea8642e729dbc487f0b6f727d897e81a9d280278:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 125/125 on Ubuntu and Windows; samples pass. macOS-15 is currently running. PR #16 remains Draft/open/unmerged.
+
+**Still open in the receive crash matrix:** process kill after PendingApply staging but before Node apply, and after Metadata Store finalization but before network ACK. Also open: physical power-loss/I/O fault injection, legacy Node-owned receive/transport retirement, receipt/dedup/tombstone GC horizons, and FLD JournalSeq provenance/atomic staging. Keep the two-DLL architecture.
