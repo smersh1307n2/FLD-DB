@@ -12,7 +12,7 @@ namespace Fld1.Storage.Tests;
 public sealed class StorageCrashConsistencyTests
 {
     private readonly string _root = Path.Combine(
-        Path.GetTempPath(), "fld-storage-crash-" + Guid.NewGuid().ToString("N"));
+        Path.GetTempPath(), "binsync-storage-crash-" + Guid.NewGuid().ToString("N"));
 
     [Fact]
     public void Final_torn_wal_tail_is_truncated_and_database_can_append_again()
@@ -312,6 +312,181 @@ public sealed class StorageCrashConsistencyTests
             // Best-effort cleanup keeps the primary assertion failure visible.
         }
     }
+    [Fact]
+    public void Checkpoint_failure_requires_reopen_and_recovers_from_wal()
+    {
+        const ulong partitionId = 907;
+        string directory = Path.Combine(_root, "checkpoint-publication-failure");
+        Directory.CreateDirectory(directory);
+        string snapshots = Path.Combine(directory, "snapshots");
+
+        try
+        {
+            using (var database = StorageDatabase.Open(directory, partitionId))
+            {
+                Put(database, 0x12, 0x34);
+                Directory.CreateDirectory(snapshots);
+                File.WriteAllBytes(Path.Combine(snapshots, $"p_{partitionId}.1.snap"),
+                    new byte[] { 0xFA, 0xFB });
+                Assert.Throws<IOException>(() => database.Checkpoint());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x12 }, out _));
+            }
+
+            using var recovered = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet(new byte[] { 0x12 }, out var value));
+            Assert.Equal(new byte[] { 0x34 }, value);
+            Assert.False(File.Exists(Path.Combine(snapshots, $"p_{partitionId}.1.snap")));
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void First_open_durably_creates_nested_database_directories()
+    {
+        const ulong partitionId = 925;
+        string directory = Path.Combine(_root, "new-parent", "new-database");
+
+        try
+        {
+            using (var database = StorageDatabase.Open(directory, partitionId))
+                Put(database, 0x51, 0x15);
+
+            using var reopened = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, reopened.LastCommitSeq);
+            Assert.True(reopened.TryGet(new byte[] { 0x51 }, out var value));
+            Assert.Equal(new byte[] { 0x15 }, value);
+        }
+        finally
+        {
+            TryDeleteDirectory(_root);
+        }
+    }
+
+    [Fact]
+    public void Unix_directory_fsync_rejects_a_non_directory_path()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Windows directory-entry durability is not claimed by this engine.
+
+        string directory = Path.Combine(_root, "directory-fsync-error");
+        Directory.CreateDirectory(directory);
+        string regularFile = Path.Combine(directory, "not-a-directory");
+        File.WriteAllBytes(regularFile, new byte[] { 0x01 });
+
+        IOException error = Assert.Throws<IOException>(() => StorageDirectorySync.Flush(regularFile));
+        Assert.Contains("directory", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Wal_directory_fsync_failure_after_segment_reclamation_requires_reopen()
+    {
+        const ulong partitionId = 924;
+        string directory = Path.Combine(_root, "wal-directory-fsync-failure");
+        int directorySyncCount = 0;
+
+        try
+        {
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (point == StorageFaultPoint.BeforeWalDirectoryFsync &&
+                    Interlocked.Increment(ref directorySyncCount) == 2)
+                    throw new IOException("Injected WAL directory fsync failure after reclamation.");
+            }))
+            {
+                Put(database, 0x42, 0x24);
+                Assert.Throws<IOException>(() => database.Checkpoint());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x42 }, out _));
+            }
+
+            using var recovered = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet(new byte[] { 0x42 }, out var value));
+            Assert.Equal(new byte[] { 0x24 }, value);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void Partial_wal_write_fails_closed_and_recovery_discards_the_torn_record()
+    {
+        const ulong partitionId = 922;
+        string directory = Path.Combine(_root, "wal-partial-write");
+
+        try
+        {
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (point == StorageFaultPoint.AfterWalPartialWrite)
+                    throw new IOException("Injected partial WAL write.");
+            }, walRotateAfterBytes: long.MaxValue))
+            {
+                using var batch = database.BeginWriteBatch();
+                batch.Put("partial-write-key"u8, "must-not-commit"u8);
+                Assert.Throws<IOException>(() => batch.Commit());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet("partial-write-key"u8, out _));
+            }
+
+            using (var recovered = StorageDatabase.Open(directory, partitionId))
+            {
+                Assert.Equal(0UL, recovered.LastCommitSeq);
+                Assert.False(recovered.TryGet("partial-write-key"u8, out _));
+                using var batch = recovered.BeginWriteBatch();
+                batch.Put("after-recovery"u8, "usable"u8);
+                Assert.Equal(1UL, batch.Commit());
+            }
+
+            using var reopened = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, reopened.LastCommitSeq);
+            Assert.True(reopened.TryGet("after-recovery"u8, out var value));
+            Assert.Equal("usable"u8.ToArray(), value);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void Wal_fsync_failure_fails_closed_and_reopen_resolves_the_complete_record()
+    {
+        const ulong partitionId = 923;
+        string directory = Path.Combine(_root, "wal-fsync-failure");
+
+        try
+        {
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (point == StorageFaultPoint.BeforeWalFsync)
+                    throw new IOException("Injected WAL fsync failure.");
+            }, walRotateAfterBytes: long.MaxValue))
+            {
+                using var batch = database.BeginWriteBatch();
+                batch.Put("fsync-key"u8, "durable-boundary"u8);
+                Assert.Throws<IOException>(() => batch.Commit());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet("fsync-key"u8, out _));
+            }
+
+            // The test simulates the fsync error while leaving the just-written bytes
+            // visible to reopen. A real device/power-loss outcome is intentionally not
+            // inferred from this process-level fault injection.
+            using var recovered = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet("fsync-key"u8, out var value));
+            Assert.Equal("durable-boundary"u8.ToArray(), value);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
     [Theory]
     [InlineData((int)StorageFaultPoint.AfterWalAppendBeforeFlush)]
     [InlineData((int)StorageFaultPoint.AfterWalFlushBeforePublish)]
@@ -321,22 +496,29 @@ public sealed class StorageCrashConsistencyTests
         const ulong partitionId = 920;
         string directory = Path.Combine(_root, "wal-fault-" + faultPoint);
 
-        using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+        try
         {
-            if (point == faultPoint)
-                throw new IOException("Injected WAL durability boundary failure.");
-        }))
-        {
-            using var batch = database.BeginWriteBatch();
-            batch.Put("fault-key"u8, "fault-value"u8);
-            Assert.Throws<IOException>(() => batch.Commit());
-            Assert.Throws<InvalidOperationException>(() => database.TryGet("fault-key"u8, out _));
-        }
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (point == faultPoint)
+                    throw new IOException("Injected WAL durability boundary failure.");
+            }))
+            {
+                using var batch = database.BeginWriteBatch();
+                batch.Put("fault-key"u8, "fault-value"u8);
+                Assert.Throws<IOException>(() => batch.Commit());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet("fault-key"u8, out _));
+            }
 
-        using var recovered = StorageDatabase.Open(directory, partitionId);
-        Assert.Equal(1UL, recovered.LastCommitSeq);
-        Assert.True(recovered.TryGet("fault-key"u8, out var value));
-        Assert.Equal("fault-value"u8.ToArray(), value);
+            using var recovered = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet("fault-key"u8, out var value));
+            Assert.Equal("fault-value"u8.ToArray(), value);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
     }
 
     [Theory]
@@ -350,29 +532,36 @@ public sealed class StorageCrashConsistencyTests
         const ulong partitionId = 921;
         string directory = Path.Combine(_root, "checkpoint-fault-" + faultPoint);
 
-        using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+        try
         {
-            if (point == faultPoint)
-                throw new IOException("Injected snapshot publication boundary failure.");
-        }))
-        {
-            Put(database, 0x31, 0x41);
-            Assert.Throws<IOException>(() => database.Checkpoint());
-            Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x31 }, out _));
-        }
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (point == faultPoint)
+                    throw new IOException("Injected snapshot publication boundary failure.");
+            }))
+            {
+                Put(database, 0x31, 0x41);
+                Assert.Throws<IOException>(() => database.Checkpoint());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x31 }, out _));
+            }
 
-        using (var recovered = StorageDatabase.Open(directory, partitionId))
-        {
-            Assert.Equal(1UL, recovered.LastCommitSeq);
-            Assert.True(recovered.TryGet(new byte[] { 0x31 }, out var value));
-            Assert.Equal(new byte[] { 0x41 }, value);
-            recovered.Checkpoint();
-        }
+            using (var recovered = StorageDatabase.Open(directory, partitionId))
+            {
+                Assert.Equal(1UL, recovered.LastCommitSeq);
+                Assert.True(recovered.TryGet(new byte[] { 0x31 }, out var value));
+                Assert.Equal(new byte[] { 0x41 }, value);
+                recovered.Checkpoint();
+            }
 
-        using var reopened = StorageDatabase.Open(directory, partitionId);
-        Assert.Equal(1UL, reopened.LastCommitSeq);
-        Assert.True(reopened.TryGet(new byte[] { 0x31 }, out var reopenedValue));
-        Assert.Equal(new byte[] { 0x41 }, reopenedValue);
+            using var reopened = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, reopened.LastCommitSeq);
+            Assert.True(reopened.TryGet(new byte[] { 0x31 }, out var reopenedValue));
+            Assert.Equal(new byte[] { 0x41 }, reopenedValue);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
     }
 
 }
