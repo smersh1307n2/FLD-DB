@@ -397,16 +397,18 @@ On BIN-SYNC head 532baa0010140b799f3759e1c88d0c722cdf6727, verification passed: 
 
 
 
+
 ## 17. Coordinator process-kill receive crash cuts and session checkpoint ordering (2026-11-08)
 
-The Storage Integration suite now kills the actual testhost process at three durable receive boundaries and reopens the same physical Storage database:
+The Storage Integration suite kills the actual testhost process at all four receive durability boundaries and reopens the same physical Storage database:
 
-1. **After PendingApply staging, before Node apply:** the PendingApply intent and wire payload are durable, but the Node field and provider mutation are absent. Recovery replays the intent using the persisted negotiated alias table.
-2. **After Node checkpoint, before provider apply:** the Node field is durable while provider state is absent. Recovery completes provider application and metadata finalization.
-3. **After provider commit, before Metadata Store finalization:** Node and provider state are durable while PendingApply remains. Recovery repeats the same ApplyToken idempotently and finalizes the receipt.
+1. **After PendingApply staging, before Node apply:** the intent/wire payload is durable; Node and provider have not applied the incoming field. Recovery replays the intent.
+2. **After Node checkpoint, before provider apply:** Node is durable and provider is not. Recovery applies the provider mutation and finalizes metadata.
+3. **After provider commit, before Metadata Store finalization:** provider and Node are durable while PendingApply remains. Recovery repeats the same ApplyToken idempotently and finalizes the receipt.
+4. **After Metadata Store finalization, before network ACK:** Node/provider state and receive cursor/receipt are durable, PendingApply is gone, and the process is killed while the before-ACK callback is blocked. Reopen observes the committed cursor and no pending work.
 
-A handshake commits the negotiated alias map and peer epoch to Node memory. Since restart replay decodes the original wire payload, StorageNodePersistence.Save is required after successful SyncSession establishment and before the first inbound durable batch. This requirement is now documented in the persistence API and demonstrated in both Storage array samples. Windows process-kill recovery retries WAL reopen briefly to account for delayed OS handle release; the test harness cleanup is bounded and the test workflow emits a mini dump after a three-minute hang.
+A handshake commits the negotiated alias map and peer epoch to Node memory. Since restart replay decodes the original wire payload, StorageNodePersistence.Save is required after successful SyncSession establishment and before the first inbound durable batch. This requirement is documented in the persistence API and demonstrated in both Storage array samples. Windows process-kill recovery retries WAL reopen briefly to account for delayed OS handle release; the test harness cleanup is bounded and the workflow emits a mini dump after a three-minute hang.
 
-Verified on BIN-SYNC head b47c86a02998b3d9aa6a8dcbfc991d9c0245ea1e: Storage Integration 126/126 independently on Ubuntu, Windows and macOS-15; Core 648/648; Fuzz/Lab 31/31; 70.4% line coverage; in-memory and real-TCP samples pass on all three platforms.
+Verified on BIN-SYNC head 354eab38dc859e2f26838efb332c14310aa17022: Storage Integration 127/127 independently on Ubuntu, Windows and macOS-15; Core 648/648; Fuzz/Lab 31/31; 70.4% line coverage; in-memory and real-TCP samples pass on all three platforms.
 
-The remaining coordinator crash cut is after Metadata Store finalization but before network ACK. This is distinct from true physical power-loss/I/O fault injection, which remains open.
+The coordinator-level receive process-kill sequence is now covered end to end. True physical power-loss/I/O fault injection remains a separate, open validation gate.
