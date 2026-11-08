@@ -11,6 +11,7 @@ public sealed class WalManager : IDisposable
 {
     private readonly string _walDir;
     private readonly ulong _partitionId;
+    private readonly WalWriterFence _writerFence;
     private readonly long _rotateAfterBytes;
     private readonly object _lock = new();
     private WalWriter _active;
@@ -29,13 +30,15 @@ public sealed class WalManager : IDisposable
         get { lock (_lock) return (long)_active.WriteOffset; }
     }
 
-    private WalManager(string walDir, ulong partitionId, long rotateAfterBytes, WalWriter active, int activeSeg)
+    private WalManager(string walDir, ulong partitionId, long rotateAfterBytes, WalWriter active, int activeSeg,
+        WalWriterFence writerFence)
     {
         _walDir = walDir;
         _partitionId = partitionId;
         _rotateAfterBytes = rotateAfterBytes;
         _active = active;
         _activeSeg = activeSeg;
+        _writerFence = writerFence;
     }
 
     public static string SegmentPath(string walDir, ulong partitionId, int seg)
@@ -50,16 +53,21 @@ public sealed class WalManager : IDisposable
         ulong partitionId,
         long rotateAfterBytes = 64L * 1024 * 1024)
     {
+        walDir = Path.GetFullPath(walDir);
         Directory.CreateDirectory(walDir);
-        var segs = ListSegments(walDir, partitionId);
-        var allRecords = new List<WalRecoveredRecord>();
-
-        if (segs.Count == 0)
+        WalWriterFence writerFence = WalWriterFence.Acquire(walDir, partitionId);
+        try
         {
-            string path = SegmentPath(walDir, partitionId, 0);
-            var w = WalWriter.Create(path, partitionId, firstCommitSeq: 1);
-            return (new WalManager(walDir, partitionId, rotateAfterBytes, w, 0), allRecords);
-        }
+            var segs = ListSegments(walDir, partitionId);
+            var allRecords = new List<WalRecoveredRecord>();
+
+            if (segs.Count == 0)
+            {
+                string path = SegmentPath(walDir, partitionId, 0);
+                var w = WalWriter.Create(path, partitionId, firstCommitSeq: 1);
+                return (new WalManager(walDir, partitionId, rotateAfterBytes, w, 0,
+                    writerFence), allRecords);
+            }
 
         ulong? expectedNextSeq = null;
         Span<byte> segmentHeader = stackalloc byte[WalHeader.Size];
@@ -131,8 +139,15 @@ public sealed class WalManager : IDisposable
         }
 
         ulong nextSeq = expectedNextSeq!.Value;
-        var writer = WalWriter.OpenForAppend(lastPath, partitionId, (ulong)lastValidEnd, nextSeq);
-        return (new WalManager(walDir, partitionId, rotateAfterBytes, writer, lastSeg), allRecords);
+            var writer = WalWriter.OpenForAppend(lastPath, partitionId, (ulong)lastValidEnd, nextSeq);
+            return (new WalManager(walDir, partitionId, rotateAfterBytes, writer, lastSeg,
+                writerFence), allRecords);
+        }
+        catch
+        {
+            writerFence.Dispose();
+            throw;
+        }
     }
 
     private static List<int> ListSegments(string walDir, ulong partitionId)
@@ -318,7 +333,8 @@ public sealed class WalManager : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            _active.Dispose();
+            try { _active.Dispose(); }
+            finally { _writerFence.Dispose(); }
         }
     }
 }
