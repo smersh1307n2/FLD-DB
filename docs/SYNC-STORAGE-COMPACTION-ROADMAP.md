@@ -755,7 +755,7 @@ The provider retry benchmark is now an end-to-end coordinator scenario rather th
 
 - Setup uses the real `StorageDataProvider` and `StorageMetadataStore`; the first publication freezes immutable ChangeIds and then injects a provider ACK interruption.
 - The measured retry scans the same still-pending frozen feed, validates the canonical fingerprints, ACKs the feed and refreshes the Node cache from the provider snapshot.
-- Results on GitHub Actions (.NET 10.0.14, Ubuntu 26.04.1, AMD EPYC 7763): 256 rows = 2.112 ms / 1.52 MB; 1,024 rows = 12.768 ms / 6.47 MB; 4,096 rows = 35.213 ms / 33.92 MB.
+- Results on GitHub Actions (.NET 10.0.14, Ubuntu 26.04.1, AMD EPYC 7763): 256 rows = 2.055 ms / 1.52 MB; 1,024 rows = 14.324 ms / 6.47 MB; 4,096 rows = 34.651 ms / 33.92 MB.
 - These are full-path figures, not scan-only figures. They include `InstallProviderSnapshot` → `RestoreProviderSnapshot`, which rebuilds the namespace dictionary, validates uniqueness with temporary sets, materializes operation objects and copies field values. The 1,024-row case was noisy (24.9% relative standard deviation); 4,096 rows was more stable (1.02%).
 - The separate frozen ChangeId lookup remained allocation-free at all sizes: 81.70/81.78/80.00 ns at 256/1,024/4,096 ledger rows.
 
