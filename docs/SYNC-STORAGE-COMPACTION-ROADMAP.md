@@ -1717,3 +1717,23 @@ Storage Integration runs with --blame-hang-timeout 3m --blame-hang-dump-type min
 **Verification on BIN-SYNC HEAD 354eab38dc859e2f26838efb332c14310aa17022:** Core Release 648/648; Fuzz + Lab 31/31; line coverage 70.4%; Storage Integration 127/127 independently on Ubuntu, Windows and macOS-15; both in-memory and real-TCP samples pass on all three platforms. PR #16 remains Draft/open/unmerged.
 
 **Remaining:** true physical power-loss/I/O fault injection; retirement of legacy Node-owned receive/transport and other-author relay state; receipt/dedup/tombstone GC horizons; and FLD (author, JournalSeq, ChangeId) → BIN-SYNC OutboxSeq provenance with atomic staging/freeze. Keep exactly two DLLs: Fld1.Storage.dll and Fld1.Database.dll; do not add a third shared runtime DLL.
+
+
+### 7.35 FLD Storage WAL writer-fence parity with BIN-SYNC (2026-11-08)
+
+A source comparison found that the standalone `src/Fld1.Storage` copy in FLD-DB had not yet received the single-writer fence already verified in BIN-SYNC's `external/Fld1.Storage` copy. The FLD version also loaded the snapshot manifest **before** opening/fencing the WAL, allowing a second process to race snapshot recovery against a live checkpoint.
+
+The source parity gap is now closed:
+
+- Ported the named OS-managed `WalWriterFence` and fenced `WalManager.Open` implementation from the verified BIN-SYNC Storage copy.
+- `StorageDatabase.Open` now acquires the partition writer fence through `WalManager.Open` before loading the snapshot manifest or replaying WAL.
+- A dedicated process-wide manager thread owns Mutex acquisition/release. This preserves Mutex thread affinity while allowing database disposal from another caller thread; abandoned ownership is recovered before WAL replay.
+- Physical path canonicalization covers symlink targets and path/case aliases; a second same-process or cross-process writer is rejected.
+- Added FLD Storage tests for same-partition second-open rejection, cross-thread disposal/reopen and abandoned-mutex recovery.
+- No FLD1 run/WAL/manifest wire format or database-level field semantics changed.
+
+**Verification:** FLD-DB commit `c90171a4d6927402debd940ccfbf8bfca9fa5829` built successfully and passed 146/146 tests: Core 23, Engine 58, Manifest 9, Run 25, Storage 14 and WAL 17. The earlier `b3ccf806` run passed 145/145 before the abandoned-mutex regression was added. FLD's own workflow currently runs on Ubuntu; the equivalent BIN-SYNC Storage Integration fence tests already passed on Ubuntu, Windows and macOS-15.
+
+**Backup:** `backup/pre-fld-storage-wal-fence-port-2026-11-08` preserves the FLD branch before this port.
+
+**Next:** physical Storage write/flush/rename failure injection and power-loss testing remain open. The writer fence is a single-writer correctness prerequisite, not proof of power-loss durability.
