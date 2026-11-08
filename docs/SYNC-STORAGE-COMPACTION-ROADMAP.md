@@ -1760,8 +1760,22 @@ The generic Storage implementation now addresses both cases:
 The BIN-SYNC provider-cutover fence now rejects `WriteFieldSealed` in addition to ordinary local field/record writes, direct/manual Outbox publication, public Node batch creation and the legacy Node-owned transport builder. The check is applied at the Node API boundary and is namespace-scoped: other namespaces on the same Node retain their independent Node-owned path. Metadata-reserved outbound sends remain allowed. The durable provider cutover marker reinstalls the fence when the coordinator is reconstructed.
 
 - Regression coverage configures an E2EE key ring and verifies `WriteFieldSealed` fails closed after cutover.
-- Latest BIN-SYNC code/test head: `1961a84a90aca48c8aacf2c0c39cff4008a208aa`.
-- Verified CI: Core 648/648, Fuzz + Lab 31/31, Storage Integration 135/135 on Ubuntu, Windows and macOS-15; line coverage 70.4%.
+- Latest BIN-SYNC code/test head at this checkpoint: `92f6631871072799087ee1732f4d65bdaeeff523`.
+- Verified CI: Core 648/648, Fuzz + Lab 31/31, Storage Integration 136/136 on Ubuntu, Windows and macOS-15; line coverage 70.4%.
 - PR #16 remains Draft/open/unmerged.
 
-**Next:** continue retiring the remaining legacy Node-owned receive/transport and other-author relay state. Keep receipt/ChangeId/tombstone GC disabled until contiguous-prefix/snapshot-barrier and peer-retirement proofs exist. Physical partial-write/fsync/device/power-loss injection and full normative cross-implementation audit remain open. Do not begin FLD JournalSeq provenance integration until BIN-SYNC and Storage gates are complete.
+**Next:** finish the explicit policy for legacy Node-owned mode in namespaces that never enter provider cutover (including volatile/non-Storage use). Keep receipt/ChangeId/tombstone GC disabled until contiguous-prefix/snapshot-barrier and external peer-retirement proofs exist. Physical partial-write/fsync/device/power-loss injection, the 1,000,000-row mutation benchmark and full normative cross-implementation audit remain open. Do not begin FLD JournalSeq provenance integration until BIN-SYNC and Storage gates are complete.
+
+
+### 7.38 Complete namespace cutover authority and relay cache cleanup (2026-11-08)
+
+The provider-authoritative cutover now removes every retained Node Outbox payload projection in the namespace, not only local-author rows. This includes legacy relay payloads left by pre-cutover Node-owned receive. Per-author sequence high-watermarks and WAL/ChangeId replay identities remain intact; relay payloads already committed to Metadata Store are retained and remain the only downstream delivery source. The same cleanup is repeated during startup/reconciliation when a stale pre-cleanup Node checkpoint is loaded.
+
+The Node namespace fence now rejects legacy Node-owned receive validation in addition to local writes, manual Outbox publication and the legacy Node-owned outbound batch builder. `StorageSyncCoordinator.ReceiveBatchBeforeAckAsync` remains available after cutover and is tested. The real-TCP array sample now uses that Metadata-Store-authoritative receive path instead of the legacy Node-owned receive callback.
+
+- Added regression coverage for dropping a stale legacy relay cache row while preserving the Metadata Store relay, and for successful Metadata-Store-authoritative receive after cutover.
+- Verification at BIN-SYNC code/test head `92f6631871072799087ee1732f4d65bdaeeff523`: Core 648/648, Fuzz + Lab 31/31, Storage Integration 136/136 on Ubuntu, Windows and macOS-15; both in-memory and real-TCP samples pass on all three platforms; line coverage 70.4%.
+- Metadata freeze cardinality benchmark at 10k/100k unrelated ledger rows: 506.8/431.0 µs mean and 9.63/10.46 KB allocated. This is a short-window structural check only; 1m rows and deployment hardware remain open.
+- Backup branches created in both repositories: `backup/post-cutover-receive-fence-2026-11-08` (BIN-SYNC snapshot at the verified code head; FLD-DB snapshot at the current roadmap head).
+
+**Remaining before FLD integration:** legacy Node-owned mode policy for non-cutover/volatile namespaces; physical partial-write/fsync/device/power-loss proof; external peer-removal and safe GC horizons; 1m/deployment benchmark; requirement-ID and cross-implementation normative audit. The two-DLL decision remains `Fld1.Storage.dll` plus `Fld1.Database.dll`.
