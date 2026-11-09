@@ -14,6 +14,9 @@ public sealed class FieldWrite
     public byte[] AuthorNodeId { get; }
     public ushort KeyEpoch { get; }
     public bool IsTombstone { get; }
+    public byte[] ChangeId { get; }
+    public uint OriginAuthorEpoch { get; }
+    public ulong OriginSequence { get; }
 
     public FieldWrite(
         ReadOnlySpan<byte> recordId,
@@ -23,13 +26,29 @@ public sealed class FieldWrite
         uint logical,
         ReadOnlySpan<byte> authorNodeId,
         ushort keyEpoch = 0,
-        bool isTombstone = false)
+        bool isTombstone = false,
+        ReadOnlySpan<byte> changeId = default,
+        uint originAuthorEpoch = 0,
+        ulong originSequence = 0)
     {
         if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes");
         if (authorNodeId.Length != 16) throw new ArgumentException("AuthorNodeId must be 16 bytes");
         if (value.Length > Format.RunConstants.MaxBlobLen)
             throw new ArgumentException("value > 4 MB");
         if (wall == 0) throw new ArgumentException("HLC wall must be > 0", nameof(wall));
+        if (changeId.Length is not (0 or 16))
+            throw new ArgumentException("ChangeId must be empty or 16 bytes.", nameof(changeId));
+        if (changeId.Length == 16)
+        {
+            byte aggregate = 0;
+            foreach (byte part in changeId) aggregate |= part;
+            if (aggregate == 0)
+                throw new ArgumentException("ChangeId must be nonzero.", nameof(changeId));
+        }
+        if ((originAuthorEpoch == 0) != (originSequence == 0))
+            throw new ArgumentException("Origin epoch and sequence must be both zero or both nonzero.");
+        if (originAuthorEpoch != 0 && changeId.IsEmpty)
+            throw new ArgumentException("OperationOrigin requires a stable ChangeId.");
 
         RecordId = recordId.ToArray();
         FieldId = fieldId;
@@ -39,5 +58,8 @@ public sealed class FieldWrite
         AuthorNodeId = authorNodeId.ToArray();
         KeyEpoch = keyEpoch;
         IsTombstone = isTombstone;
+        ChangeId = changeId.ToArray();
+        OriginAuthorEpoch = originAuthorEpoch;
+        OriginSequence = originSequence;
     }
 }
