@@ -1,6 +1,6 @@
 # FLD Storage Core — extraction and dependency architecture
 
-**Status:** Target architecture decision v0.2 — two independently buildable assemblies (not yet reflected by the current source/project graph).  
+**Status:** Target architecture decision v0.2 — two physical runtime projects are present; generic Storage backend reuse by FLD Database remains incomplete and CI is currently red.  
 **Purpose:** make the durable storage engine independently reusable without loading or depending on the FLD field-database implementation.  
 **Packaging decision:** two DLLs from the first implementation: `Fld1.Storage.dll` and `Fld1.Database.dll`. They are separate projects, build outputs, and packageable artifacts.
 
@@ -47,18 +47,16 @@ Allowed dependency direction:
 
 The adapter should normally live outside FLD-DB (for example, in a BIN-SYNC integration package). This prevents the storage engine from acquiring protocol dependencies just because its first consumer is BIN-SYNC.
 
-## 2.1 Current source graph — implementation gap (2026-11-09)
+## 2.1 Current source graph — physical projects present, backend reuse incomplete (2026-11-09)
 
-The two-DLL statement above is normative target architecture, not a claim about the current repository build. The current branch still has these separate projects:
+The source project graph now has the approved two physical runtime projects:
 
 - `Fld1.Storage`: an independent opaque byte-key/value engine with atomic batches, snapshots/prefix scans and generic WAL.
-- `Fld1.Engine`: `FldDatabase` and FLD semantic orchestration; it currently references `Fld1.Core`, `Fld1.Run`, `Fld1.Wal` and `Fld1.Manifest`.
-- `Fld1.Core`: a mixed set of generic byte/hash primitives and FLD-specific IDs, HLC and semantic contracts.
-- `Fld1.Run`, `Fld1.Manifest`, `Fld1.Wal`: FLD1-specific field/run/index/manifest/commit-recovery formats.
+- `Fld1.Database`: one physical project that owns the former Core, Engine, Manifest, Run and WAL source files under separate code folders/namespaces. The five component project files were removed; no linked-source compilation shortcut is used.
 
-There is no `Fld1.Database.csproj` yet, and `FldDatabase` does not currently use `StorageDatabase` as its physical backend. Therefore the repository does **not** yet produce the approved two-DLL FLD runtime. Do not claim that project separation or the existing `Fld1.Storage` assembly alone completes the extraction.
+This closes the physical two-project consolidation, but it does **not** complete generic engine reuse. `FldDatabase` still uses the legacy field-aware Run/Manifest/WAL path now housed inside `Fld1.Database`; it does not yet use `StorageDatabase` as its physical backend. The generic Storage engine and FLD Database currently have separate durability implementations. The remaining extraction must classify and migrate generic mechanics without moving FLD-specific codecs/semantics into Storage, while preserving the frozen FLD1 physical format and recovery compatibility.
 
-The source-backed extraction order and compatibility gates are tracked in `SYNC-STORAGE-COMPACTION-ROADMAP.md` §7.50. The critical decision is to preserve the frozen FLD1 physical format unless an explicit format-version decision says otherwise; do not silently replace Run/Manifest/WAL with opaque key/value storage. No third `Common` runtime DLL and no linked-source compilation shortcut are permitted.
+The source-backed extraction order and compatibility gates are tracked in `SYNC-STORAGE-COMPACTION-ROADMAP.md` §7.50 and §7.57. No third `Common` runtime DLL and no linked-source compilation shortcut are permitted. CI for the consolidated project is currently red/unverified; do not claim a validated release build until the exact-head cross-platform run passes.
 
 ## 3. What belongs in Storage Core
 
