@@ -1845,3 +1845,11 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 - [x] Added \`HasPendingChangeIdReference()\` and \`HasPendingRecordReference()\` over dirty local state, unacknowledged Outbox entries and retained ApplyJournal field/relay payloads. Any unsealed WAL prefix blocks conservatively until checkpoint/seal; malformed/faulted state throws rather than authorizing deletion.
 - [~] These are neutral FLD engine primitives only. The thin adapter implementing BIN-SYNC \`IApplicationGcReferenceScanner\` belongs in the integration layer and must forward the partition identity on every call; FLD does not reference BIN-SYNC types.
 - [~] Exact-head CI is running for this code slice. Do not treat these APIs as validated until all FLD test assemblies pass on the exact branch head.
+
+
+### 7.42 Zero-copy host safety scans over the Outbox suffix (2026-11-09)
+
+- [x] Added read-only \`OutboxLog.VisitUnackedBatch\` using borrowed \`OutboxEntryView\` spans. It does not acquire/fence a consumer lease and cannot mutate or ACK the Outbox.
+- [x] Reworked FLD draft-horizon, ChangeId and RecordId scans to consume borrowed Outbox views in bounded 512-entry pages. Large field values are not copied merely to inspect IDs/HLC; the cursor advances only through visited entries.
+- [x] ApplyJournal reference scans remain bounded in 256-record pages. Any retained receipt/relay payload remains a live reference; any unsealed WAL prefix blocks ChangeId/record/receipt reclamation conservatively.
+- [~] Benchmark allocations and CPU on large Outbox values and 1M-entry histories in the T/O pass. Exact-head CI is pending for this commit.
