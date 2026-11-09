@@ -2111,3 +2111,12 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] BIN-SYNC `AcknowledgeAllAsync` applies safe ACK per author in order: compute per-author downstream-safe sequence, invoke idempotent FLD `AcknowledgeRelayBatches`, then prune RPM3. Partial failure can be retried using remaining map cursors.
 - [~ T] Verify author cache across restart, partial ACK, new apply after ACK, FLD-ACK-before-map-prune crash, multi-author partial failure and retry.
 - [~ C] Host still must provide the real callbacks and use one shared coordinator/gate for the namespace; no BIN-SYNC dependency is added to FLD.
+
+### 7.77 Exact-head CI triage after two-project FLD consolidation (2026-11-09)
+
+- [x C] Confirmed branch HEAD `df44f3530d1581ea3b6edc8133c762d1e49850ed` is a documentation-only refresh after the physical `Fld1.Database` source consolidation and relay paging code.
+- [x C] The latest `.NET CI` run (`42561687647`) reports all three OS jobs failed, but GitHub's Jobs API shows `runner_id=0`, empty `steps`, identical ~2-second start/completion windows, no uploaded artifacts, and no retrievable logs. This is an infrastructure/dispatch-level failure signal, not evidence of a C# compiler or test failure. Do not diagnose source code from it.
+- [~ T] Need a run that actually allocates runners and executes Restore/Build/Test on Windows, Ubuntu and macOS. Existing diagnostic workflow already uses explicit Bash and uploads logs; no diagnostic artifacts were produced in the failed run.
+- [~ C] Physical source move into `Fld1.Database` is complete, but generic `Fld1.Storage` backend reuse is not yet established: `Fld1.Database.csproj` references `Fld1.Storage`, while the database's core storage implementation still needs an audited migration/adapter. Preserve FLD1 file-format compatibility; do not replace the database storage engine with generic key-value storage by assumption.
+- [~ C] Cross-repository host adapter remains in the host integration layer: compose FLD guard/reference snapshot with BIN-SYNC relay gate, startup all-author reconciliation, publication, safe ACK, FLD durable ACK, then RPM3 prune.
+- [~ T] Verify project references and all tests after a runner-backed build; do not mark two-DLL extraction validated merely because the solution lists two runtime source projects.
