@@ -2238,3 +2238,9 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] BIN-SYNC Core has ceiling-aware sender overloads for both Node-owned and Metadata Store-owned publication. The mode bit is captured with the ceilings, preventing a concurrent cutover from mixing sequence domains.
 - [~ T] Exact-head build and both-mode tests are pending; no change to FLD field WAL/Run/Manifest bytes was made.
 - [~ C] Generic ordered byte-KV page/run backend and FLD1 compatibility strategy remain a separate architecture decision under `FLD-STORAGE-CORE-ARCHITECTURE.md` §7. The assembly split alone does not authorize a physical-format migration.
+
+
+### 7.85 Cross-repository host adapter build gate (2026-11-09)
+
+- [x C] BIN-SYNC CI now checks out `fix/crash-consistency-outbox` as a sibling dependency and builds `samples/FldBinSyncHost` against the canonical FLD `Fld1.Database` and `Fld1.Storage` projects.
+- [~ T] The first exact-head build result is pending; this is a compile gate only and does not yet prove the full `FldDatabase`→`IDataProvider` snapshot/local-feed/remote-apply contract.
