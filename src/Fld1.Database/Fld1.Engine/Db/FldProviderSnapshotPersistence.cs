@@ -205,7 +205,7 @@ public sealed partial class FldDatabase
             }
             foreach (ulong runId in manifest.RunIds)
             {
-                if (!HasDurableProviderSnapshotRun(runId))
+                if (!HasDurableProviderSnapshotRun(runId, verifyContent: false))
                     return false;
             }
             if (manifest.OverlayHash is not null)
@@ -260,7 +260,7 @@ public sealed partial class FldDatabase
                 throw new InvalidDataException("Provider snapshot belongs to another FLD namespace.");
             foreach (ulong runId in manifest.RunIds)
             {
-                if (!HasDurableProviderSnapshotRun(runId))
+                if (!HasDurableProviderSnapshotRun(runId, verifyContent: true))
                 {
                     sourceFeedWatermark = 0;
                     return false;
@@ -331,13 +331,16 @@ public sealed partial class FldDatabase
         }
     }
 
-    private bool HasDurableProviderSnapshotRun(ulong runId)
+    private bool HasDurableProviderSnapshotRun(ulong runId, bool verifyContent)
     {
         if (_runBlobStore.TryOpenRead(RunBlobId(runId), out StorageBlobReader? blobReader) &&
             blobReader is not null)
         {
             using (blobReader)
-                blobReader.CopyTo(Stream.Null); // Verify every page and the whole-blob digest without materializing the Run.
+            {
+                if (verifyContent)
+                    blobReader.CopyTo(Stream.Null); // Verify every page and the whole-blob digest without materializing the Run.
+            }
             return true;
         }
         return File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1"));
