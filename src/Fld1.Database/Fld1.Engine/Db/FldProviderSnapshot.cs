@@ -93,44 +93,74 @@ public sealed class FldProviderSnapshot : IDisposable
     }
 
     /// <summary>
-    /// Reads a bounded page. Pages are consumed in increasing NextIndex order;
-    /// retrying the immediately preceding page returns the same immutable result.
+    /// Reads a bounded page at an absolute entry offset. Sequential reads are O(page);
+    /// backward/forward seeks reset or advance the immutable cursor. The immediately
+    /// preceding page is cached so a retry returns byte-identical entries.
     /// </summary>
     public FldProviderSnapshotPage ReadPage(int afterIndex, int limit = 1024)
     {
+        if (afterIndex < 0) throw new ArgumentOutOfRangeException(nameof(afterIndex));
         if (limit <= 0 || limit > 4096) throw new ArgumentOutOfRangeException(nameof(limit));
         lock (_gate)
         {
             EnsureOpen();
             if (afterIndex == _lastPageStart) return _lastPage!;
-            if (afterIndex != _nextIndex)
-                throw new InvalidOperationException("Provider snapshot pages must be read sequentially from the returned NextIndex.");
+            if (afterIndex < _nextIndex)
+                ResetCursor();
 
-            var entries = new List<FldProviderSnapshotEntry>(limit);
-            while (entries.Count < limit)
+            while (_nextIndex < afterIndex)
             {
-                if (_currentFieldIds is null || _fieldIndex >= _currentFieldIds.Length)
-                {
-                    if (!TryLoadNextRecord())
-                        break;
-                    if (_currentFieldIds!.Length == 0)
-                        continue;
-                }
-
-                ushort fieldId = _currentFieldIds![_fieldIndex++];
-                if (TryResolve(_currentRecordId!, fieldId, out FldProviderSnapshotEntry? entry))
-                    entries.Add(entry);
+                if (!TryReadNextEntry(out _))
+                    throw new ArgumentOutOfRangeException(nameof(afterIndex));
             }
 
             int start = _nextIndex;
-            _nextIndex = checked(_nextIndex + entries.Count);
-            bool hasMore = _currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length
+            var entries = new List<FldProviderSnapshotEntry>(limit);
+            while (entries.Count < limit && TryReadNextEntry(out FldProviderSnapshotEntry? entry))
+                entries.Add(entry!);
+
+            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
                 || _recordIndex < _recordIds!.Length;
             var page = new FldProviderSnapshotPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
             _lastPage = page;
             return page;
         }
+    }
+
+    private bool TryReadNextEntry(out FldProviderSnapshotEntry? entry)
+    {
+        EnsureOpen();
+        while (true)
+        {
+            if (_currentFieldIds is null || _fieldIndex >= _currentFieldIds.Length)
+            {
+                if (!TryLoadNextRecord())
+                {
+                    entry = null;
+                    return false;
+                }
+                if (_currentFieldIds!.Length == 0)
+                    continue;
+            }
+
+            ushort fieldId = _currentFieldIds![_fieldIndex++];
+            if (!TryResolve(_currentRecordId!, fieldId, out entry))
+                continue;
+            _nextIndex = checked(_nextIndex + 1);
+            return true;
+        }
+    }
+
+    private void ResetCursor()
+    {
+        _recordIndex = 0;
+        _nextIndex = 0;
+        _currentRecordId = null;
+        _currentFieldIds = null;
+        _fieldIndex = 0;
+        _lastPageStart = -1;
+        _lastPage = null;
     }
 
     public void Dispose()
