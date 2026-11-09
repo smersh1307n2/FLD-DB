@@ -1540,8 +1540,34 @@ public sealed class FldDatabase : IDisposable
     /// </summary>
     public FldDraftHorizon ReadUnpublishedLocalDraftHorizon()
     {
-        using FldReferenceSnapshot snapshot = OpenReferenceSnapshot();
-        return snapshot.UnpublishedLocalDraftHorizon;
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            ulong count = checked((ulong)_dirty.Count);
+            ulong maxWall = 0;
+            uint maxLogical = 0;
+            foreach (MemFieldValue value in _dirty.Values)
+                UpdateMaximumHlc(value.Wall, value.Logical, ref maxWall, ref maxLogical);
+
+            ulong cursor = _outbox.AckedThrough;
+            const int pageSize = 512;
+            while (true)
+            {
+                int visited = _outbox.VisitUnackedBatch(cursor, pageSize, Visit);
+                if (visited < pageSize)
+                    break;
+            }
+            return new FldDraftHorizon(count, maxWall, maxLogical);
+
+            bool Visit(in OutboxEntryView entry)
+            {
+                count = checked(count + 1);
+                UpdateMaximumHlc(entry.Wall, entry.Logical, ref maxWall, ref maxLogical);
+                cursor = entry.OutboxSeq;
+                return true;
+            }
+        }
     }
 
     /// <summary>
