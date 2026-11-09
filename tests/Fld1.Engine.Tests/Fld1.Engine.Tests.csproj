@@ -15,6 +15,6 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Fld1.Engine\Fld1.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Fld1.Database\Fld1.Database.csproj" />
   </ItemGroup>
 </Project>
