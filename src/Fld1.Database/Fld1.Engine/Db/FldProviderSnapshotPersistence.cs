@@ -138,7 +138,17 @@ public sealed partial class FldDatabase
             foreach (ulong runId in manifest.RunIds)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-                byte[] bytes = File.ReadAllBytes(runPath);
+                byte[] bytes;
+                if (_runBlobStore.TryOpenRead(RunBlobId(runId), out StorageBlobReader? blobReader) &&
+                    blobReader is not null)
+                {
+                    using (blobReader)
+                        bytes = blobReader.ReadAllBytes();
+                }
+                else
+                {
+                    bytes = File.ReadAllBytes(runPath);
+                }
                 var reader = new RunReader(bytes);
                 if (!reader.TryValidate(out _) || reader.NamespaceId != _namespaceId)
                     throw new InvalidDataException($"Pinned provider snapshot Run {runId} failed validation.");
@@ -195,7 +205,7 @@ public sealed partial class FldDatabase
             }
             foreach (ulong runId in manifest.RunIds)
             {
-                if (!File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1")))
+                if (!HasDurableProviderSnapshotRun(runId))
                     return false;
             }
             if (manifest.OverlayHash is not null)
@@ -250,7 +260,7 @@ public sealed partial class FldDatabase
                 throw new InvalidDataException("Provider snapshot belongs to another FLD namespace.");
             foreach (ulong runId in manifest.RunIds)
             {
-                if (!File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1")))
+                if (!HasDurableProviderSnapshotRun(runId))
                 {
                     sourceFeedWatermark = 0;
                     return false;
@@ -319,6 +329,18 @@ public sealed partial class FldDatabase
             }
             GcOrphanRuns();
         }
+    }
+
+    private bool HasDurableProviderSnapshotRun(ulong runId)
+    {
+        if (_runBlobStore.TryOpenRead(RunBlobId(runId), out StorageBlobReader? blobReader) &&
+            blobReader is not null)
+        {
+            using (blobReader)
+                blobReader.CopyTo(Stream.Null); // Verify every page and the whole-blob digest without materializing the Run.
+            return true;
+        }
+        return File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1"));
     }
 
     private static byte[][] BuildProviderRecordIdIndex(RunReader[] runs)
