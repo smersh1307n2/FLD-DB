@@ -1554,18 +1554,20 @@ public sealed class FldDatabase : IDisposable
             const int pageSize = 512;
             while (true)
             {
-                List<OutboxEntry> page = _outbox.ReadBatch(cursor, pageSize);
-                foreach (OutboxEntry entry in page)
-                {
-                    count = checked(count + 1);
-                    UpdateMaximumHlc(entry.Wall, entry.Logical, ref maxWall, ref maxLogical);
-                    cursor = entry.OutboxSeq;
-                }
-                if (page.Count < pageSize)
+                int visited = _outbox.VisitUnackedBatch(cursor, pageSize, Visit);
+                if (visited < pageSize)
                     break;
             }
 
             return new FldDraftHorizon(count, maxWall, maxLogical);
+
+            bool Visit(in OutboxEntryView entry)
+            {
+                count = checked(count + 1);
+                UpdateMaximumHlc(entry.Wall, entry.Logical, ref maxWall, ref maxLogical);
+                cursor = entry.OutboxSeq;
+                return true;
+            }
         }
     }
 
@@ -1623,7 +1625,9 @@ public sealed class FldDatabase : IDisposable
             if (_dirty.Values.Any(value => value.ChangeId.AsSpan().SequenceEqual(id)) ||
                 _pendingFlushedCommitSeq > _lastSealedCommitSeq)
                 return true;
-            if (AnyOutboxEntry(entry => entry.ChangeId.AsSpan().SequenceEqual(id)))
+            bool MatchesChangeId(in OutboxEntryView entry)
+                => entry.ChangeId.SequenceEqual(id);
+            if (AnyOutboxEntry(MatchesChangeId))
                 return true;
             return AnyApplyJournal(commit =>
                 commit.Fields.Any(field => field.ChangeId.AsSpan().SequenceEqual(id)) ||
@@ -1650,9 +1654,10 @@ public sealed class FldDatabase : IDisposable
             if (_dirty.Keys.Any(key => key.RecLo == recordLo && key.RecHi == recordHi) ||
                 _pendingFlushedCommitSeq > _lastSealedCommitSeq)
                 return true;
-            if (AnyOutboxEntry(entry =>
-                entry.RecordId.AsSpan().SequenceEqual(record) ||
-                entry.ChangeId.AsSpan().SequenceEqual(tombstone)))
+            bool MatchesRecord(in OutboxEntryView entry)
+                => entry.RecordId.SequenceEqual(record) ||
+                   entry.ChangeId.SequenceEqual(tombstone);
+            if (AnyOutboxEntry(MatchesRecord))
                 return true;
             return AnyApplyJournal(commit =>
                 commit.Fields.Any(field =>
@@ -1664,21 +1669,29 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
-    private bool AnyOutboxEntry(Func<OutboxEntry, bool> predicate)
+    private bool AnyOutboxEntry(OutboxEntryVisitor predicate)
     {
         ulong cursor = _outbox.AckedThrough;
         const int pageSize = 512;
         while (true)
         {
-            List<OutboxEntry> page = _outbox.ReadBatch(cursor, pageSize);
-            foreach (OutboxEntry entry in page)
-            {
-                if (predicate(entry))
-                    return true;
-                cursor = entry.OutboxSeq;
-            }
-            if (page.Count < pageSize)
+            bool found = false;
+            int visited = _outbox.VisitUnackedBatch(cursor, pageSize, Visit);
+            if (found)
+                return true;
+            if (visited < pageSize)
                 return false;
+
+            bool Visit(in OutboxEntryView entry)
+            {
+                cursor = entry.OutboxSeq;
+                if (predicate(in entry))
+                {
+                    found = true;
+                    return false;
+                }
+                return true;
+            }
         }
     }
 
