@@ -464,6 +464,28 @@ public readonly struct RunReader
         }
     }
 
+    /// <summary>
+    /// Reads one RecordId by its canonical run slot index without allocating or
+    /// scanning preceding clusters. Run slots are emitted in canonical RecordId
+    /// order by RunBuilder; callers can use this primitive for bounded k-way
+    /// snapshot cursors across immutable runs.
+    /// </summary>
+    public bool TryReadRecordIdAt(uint index, Span<byte> destination)
+    {
+        if (destination.Length < 16)
+            throw new ArgumentException("RecordId destination must be at least 16 bytes.", nameof(destination));
+        if (IsEmpty || index >= RunHeader.ReadNumClusters(_file.Span))
+            return false;
+
+        ReadOnlySpan<byte> file = _file.Span;
+        ulong slotOffset = RunHeader.ReadSlotOff(file);
+        int slotPosition = checked((int)slotOffset + checked((int)index) * RunConstants.CompactSlotSize);
+        ulong clusterOffset = BinaryPrimitives.ReadUInt64LittleEndian(
+            file.Slice(slotPosition, sizeof(ulong)));
+        file.Slice(checked((int)clusterOffset), 16).CopyTo(destination);
+        return true;
+    }
+
     private static void ScanClusterFields(
         ReadOnlySpan<byte> file, int clusterOff, Action<ushort, ReadOnlySpan<byte>> onField)
     {
