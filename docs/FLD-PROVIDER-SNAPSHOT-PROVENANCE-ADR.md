@@ -62,7 +62,7 @@ A later optimization may replace the run index with a generic Storage page curso
 - [x] Identity-stamp WAL record, replay and idempotency/conflict validation; `FldDatabase.CommitPublishedOrigins` writes identity-only records and never duplicates Outbox payload.
 - [x] Run v2 provenance section writer/reader/verifier and v1 compatibility; v1 remains a legacy identity-zero row.
 - [x] Propagate origin through `MemFieldValue`, remote APPLY, WAL replay, checkpoint, compaction and LWW resolution.
-- [ ] Generation-pinned, paged FLD provider snapshot and snapshot pin/release.
+- [x] Generation-pinned, paged FLD provider snapshot: captures immutable RunReader buffers + overlay generation, uses an O(keys) compact RecordId index and bounded page payload materialization, preserves v2 ChangeId/Origin and v1 identity-zero rows, and releases retained buffers exactly once on handle disposal or database disposal.
 - [ ] Host `IDataProvider` adapter for key resolution, local Outbox feed, published-origin commit, remote apply context and current-state reads.
 - [ ] Exact-head build plus crash/restart, mixed-v1/v2, cutover and identity-retention T-pass.
 
