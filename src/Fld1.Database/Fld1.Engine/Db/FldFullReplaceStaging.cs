@@ -20,6 +20,7 @@ public sealed partial class FldDatabase
     private const uint FullReplaceStageMagic = 0x31524646; // "FFR1"
     private const ushort FullReplaceStageVersion = 1;
     private const int FullReplaceStagePageLimit = 4096;
+    private const int FullReplaceStagePageMaxBytes = 16 * 1024 * 1024;
 
     private sealed record FullReplaceStageRun(
         int StartIndex, int EntryCount, ulong RunId, byte[] MinRecordId, byte[] MaxRecordId);
@@ -111,6 +112,7 @@ public sealed partial class FldDatabase
 
             var builder = new RunBuilder(_namespaceId);
             byte[] lastSortKey = state.LastSortKey.ToArray();
+            int pageBytes = 0;
             ValidateReplacementEntry(entries[0]);
             byte[] firstRecord = entries[0].RecordId;
             byte[] lastRecord = entries[^1].RecordId;
@@ -119,6 +121,9 @@ public sealed partial class FldDatabase
                 FldProviderSnapshotEntry entry = entries[i]
                     ?? throw new ArgumentException("Replacement page contains a null entry.", nameof(entries));
                 ValidateReplacementEntry(entry);
+                pageBytes = checked(pageBytes + entry.Value.Length + 128);
+                if (pageBytes > FullReplaceStagePageMaxBytes)
+                    throw new InvalidDataException("FULL_REPLACE staging page exceeds the bounded 16 MiB payload budget.");
                 byte[] sortKey = FullReplaceSortKey(entry);
                 if (state.NextIndex + i > 0 && lastSortKey.AsSpan().SequenceCompareTo(sortKey) >= 0)
                     throw new InvalidDataException("FULL_REPLACE entries must be strictly ordered and unique.");
@@ -570,7 +575,14 @@ public sealed partial class FldDatabase
         if (offset + (long)baseCount * 8 + 4 > checksumOffset)
             throw new InvalidDataException("FULL_REPLACE stage base-run index is truncated.");
         var baseRuns = new ulong[baseCount];
-        for (int i = 0; i < baseCount; i++) { baseRuns[i] = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8; }
+        ulong previousBaseRun = 0;
+        for (int i = 0; i < baseCount; i++)
+        {
+            baseRuns[i] = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
+            if (baseRuns[i] == 0 || (i != 0 && baseRuns[i] <= previousBaseRun))
+                throw new InvalidDataException("FULL_REPLACE base Run index is not strictly ordered.");
+            previousBaseRun = baseRuns[i];
+        }
         int runCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
         if (runCount < 0 || runCount > 1_000_000 || offset + (long)runCount * 48 != checksumOffset)
             throw new InvalidDataException("FULL_REPLACE stage run index is invalid.");
