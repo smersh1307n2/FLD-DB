@@ -31,6 +31,19 @@ public sealed class MemOverlay
             return _map.TryGetValue(key, out value);
     }
 
+    /// <summary>
+    /// Replace the already-resolved LWW winner after a durable identity-stamp record.
+    /// The caller must hold the database commit guard and provide the current winner;
+    /// this intentionally bypasses HLC comparison because identity stamping does not
+    /// represent a new field mutation.
+    /// </summary>
+    internal void SetResolved(MemFieldKey key, MemFieldValue value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        lock (_lock)
+            _map[key] = value;
+    }
+
     /// <summary>Snapshot for checkpoint (copy references; values immutable after put).</summary>
     public List<KeyValuePair<MemFieldKey, MemFieldValue>> Snapshot()
     {
