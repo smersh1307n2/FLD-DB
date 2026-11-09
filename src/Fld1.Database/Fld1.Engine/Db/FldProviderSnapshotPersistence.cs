@@ -145,6 +145,10 @@ public sealed partial class FldDatabase
                     using (blobReader)
                         bytes = blobReader.ReadAllBytes();
                 }
+                else if (_runBlobStore.ContainsBlob(RunBlobId(runId)))
+                {
+                    throw new InvalidDataException($"Pinned provider snapshot Run {runId} has an incomplete Storage blob.");
+                }
                 else
                 {
                     bytes = File.ReadAllBytes(runPath);
@@ -343,6 +347,8 @@ public sealed partial class FldDatabase
             }
             return true;
         }
+        if (_runBlobStore.ContainsBlob(RunBlobId(runId)))
+            return false; // A pending blob is not a valid snapshot Run; do not hide it behind a mirror.
         return File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1"));
     }
 
