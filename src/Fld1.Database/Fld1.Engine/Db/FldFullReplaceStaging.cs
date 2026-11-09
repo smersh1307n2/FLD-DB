@@ -327,7 +327,11 @@ public sealed partial class FldDatabase
             foreach (var oldRun in oldRuns)
             {
                 if (pinned is null || pinned.Contains(oldRun.runId)) continue;
-                try { if (File.Exists(oldRun.path)) File.Delete(oldRun.path); }
+                try
+                {
+                    _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
+                    if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
+                }
                 catch { /* The manifest is authoritative; orphan collection retries later. */ }
             }
         }
