@@ -24,6 +24,19 @@ namespace Fld1.Engine.Db;
 /// <summary>Conservative count and maximum HLC of unpublished FLD local operations.</summary>
 public readonly record struct FldDraftHorizon(ulong Count, ulong MaxHlcWall, uint MaxHlcLogical);
 
+/// <summary>
+/// Neutral acknowledgement that a specific FLD field operation has been frozen into
+/// an immutable downstream stream. It assigns identity only; it never carries payload.
+/// </summary>
+public sealed class FldPublishedOrigin
+{
+    public required byte[] RecordId { get; init; }
+    public required ushort FieldId { get; init; }
+    public required byte[] ChangeId { get; init; }
+    public required uint OriginAuthorEpoch { get; init; }
+    public required ulong OriginSequence { get; init; }
+}
+
 public sealed class FldDatabase : IDisposable
 {
     // One root-wide lock: manifest, namespace WALs, runs and outboxes share this database owner.
@@ -225,6 +238,18 @@ public sealed class FldDatabase : IDisposable
 
         foreach (var record in records)
         {
+            if (record.Kind == WalConstants.KindIdentityStamp)
+            {
+                if (record.CommitSeq > _lastSealedCommitSeq)
+                {
+                    IReadOnlyList<WalIdentityStamp> stamps = IdentityStampCodec.Decode(record.Payload);
+                    ApplyIdentityStampsUnlocked(stamps);
+                    _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
+                    _manifestDirty = true;
+                }
+                continue;
+            }
+
             if (record.Kind == WalConstants.KindApplyCommit)
             {
                 var apply = ApplyCommitCodec.Decode(record.Payload);
@@ -815,6 +840,141 @@ public sealed class FldDatabase : IDisposable
             EnsureHealthy();
             return TryResolveUnlocked(recordId, fieldId, out resolved);
         }
+    }
+
+    /// <summary>
+    /// Persist immutable origins assigned by the downstream publication layer.
+    /// The operation is identity-only: it does not append another Outbox row,
+    /// alter HLC/value, or create a second pending journal. Repeated exact stamps
+    /// are idempotent; conflicting origins for a still-current ChangeId fail closed.
+    /// </summary>
+    public int CommitPublishedOrigins(IReadOnlyList<FldPublishedOrigin> publishedOrigins)
+    {
+        ArgumentNullException.ThrowIfNull(publishedOrigins);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (publishedOrigins.Count == 0)
+            return 0;
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            var pending = new List<WalIdentityStamp>(Math.Min(publishedOrigins.Count, 1024));
+            var seenFields = new HashSet<(ulong RecordLo, ulong RecordHi, ushort FieldId)>();
+
+            foreach (FldPublishedOrigin item in publishedOrigins)
+            {
+                ArgumentNullException.ThrowIfNull(item);
+                if (item.RecordId is null || item.RecordId.Length != 16)
+                    throw new ArgumentException("Published-origin RecordId must be 16 bytes.", nameof(publishedOrigins));
+                if (item.ChangeId is null || item.ChangeId.Length != 16 || IsZeroId(item.ChangeId))
+                    throw new ArgumentException("Published-origin ChangeId must be nonzero and 16 bytes.", nameof(publishedOrigins));
+                if (item.OriginAuthorEpoch == 0 || item.OriginSequence == 0)
+                    throw new ArgumentException("Published origin epoch and sequence must be nonzero.", nameof(publishedOrigins));
+
+                var fieldKey = (
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(item.RecordId),
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(item.RecordId.AsSpan(8)),
+                    item.FieldId);
+                if (!seenFields.Add(fieldKey))
+                    throw new ArgumentException("Published-origin batch contains a duplicate field key.", nameof(publishedOrigins));
+
+                if (!TryResolveUnlocked(item.RecordId, item.FieldId, out FieldResolver.Resolved current) ||
+                    !current.Found || current.ChangeId is not { Length: 16 } ||
+                    !current.ChangeId.AsSpan().SequenceEqual(item.ChangeId))
+                {
+                    // The operation was superseded. Its immutable outbound identity is
+                    // retained by the publication store; it is no longer current state.
+                    continue;
+                }
+
+                if (current.OriginAuthorEpoch != 0 || current.OriginSequence != 0)
+                {
+                    if (current.OriginAuthorEpoch != item.OriginAuthorEpoch ||
+                        current.OriginSequence != item.OriginSequence)
+                        throw new InvalidDataException("A current ChangeId already has a conflicting immutable OperationOrigin.");
+                    continue;
+                }
+
+                pending.Add(new WalIdentityStamp
+                {
+                    RecordId = item.RecordId.ToArray(),
+                    FieldId = item.FieldId,
+                    ChangeId = item.ChangeId.ToArray(),
+                    OriginAuthorEpoch = item.OriginAuthorEpoch,
+                    OriginSequence = item.OriginSequence
+                });
+            }
+
+            if (pending.Count == 0)
+                return 0;
+
+            int committed = 0;
+            const int maximumPerRecord = WalConstants.MaxMutations;
+            for (int offset = 0; offset < pending.Count; offset += maximumPerRecord)
+            {
+                int count = Math.Min(maximumPerRecord, pending.Count - offset);
+                var page = pending.GetRange(offset, count);
+                byte[] payload = IdentityStampCodec.Encode(page);
+                try
+                {
+                    ulong commitSeq = _wal.Append(WalConstants.KindIdentityStamp, payload);
+                    _wal.Flush();
+                    ApplyIdentityStampsUnlocked(page);
+                    _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, commitSeq);
+                    _manifestDirty = true;
+                    committed += count;
+                }
+                catch
+                {
+                    // A durable stamp may already be present. Reopen replays the record
+                    // idempotently before any further database writes are accepted.
+                    _faulted = true;
+                    throw;
+                }
+            }
+
+            return committed;
+        }
+    }
+
+    private void ApplyIdentityStampsUnlocked(IReadOnlyList<WalIdentityStamp> stamps)
+    {
+        foreach (WalIdentityStamp stamp in stamps)
+        {
+            if (!TryResolveUnlocked(stamp.RecordId, stamp.FieldId, out FieldResolver.Resolved current) ||
+                !current.Found || current.ChangeId is not { Length: 16 } ||
+                !current.ChangeId.AsSpan().SequenceEqual(stamp.ChangeId))
+                continue;
+
+            if (current.OriginAuthorEpoch != 0 || current.OriginSequence != 0)
+            {
+                if (current.OriginAuthorEpoch != stamp.OriginAuthorEpoch ||
+                    current.OriginSequence != stamp.OriginSequence)
+                    throw new InvalidDataException("Identity-stamp WAL conflicts with the current field OperationOrigin.");
+                continue;
+            }
+
+            var value = new MemFieldValue
+            {
+                Value = current.IsTombstone ? Array.Empty<byte>() : current.Value?.ToArray() ?? Array.Empty<byte>(),
+                Wall = current.Wall,
+                Logical = current.Logical,
+                AuthorNodeId = current.AuthorNodeId?.ToArray() ?? throw new InvalidDataException("Current field has no author identity."),
+                KeyEpoch = current.KeyEpoch,
+                IsTombstone = current.IsTombstone,
+                ChangeId = current.ChangeId.ToArray(),
+                OriginAuthorEpoch = stamp.OriginAuthorEpoch,
+                OriginSequence = stamp.OriginSequence
+            };
+            _overlay.SetResolved(new MemFieldKey(stamp.RecordId, stamp.FieldId), value);
+        }
+    }
+
+    private static bool IsZeroId(ReadOnlySpan<byte> value)
+    {
+        byte aggregate = 0;
+        foreach (byte part in value) aggregate |= part;
+        return aggregate == 0;
     }
 
     /// <summary>Mark record dead via lifecycle field 0x0000 = Dead.</summary>
