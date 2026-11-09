@@ -59,13 +59,12 @@ public sealed class StorageBlobStore
     public void PutImmutableBlob(Guid blobId, ReadOnlyMemory<byte> content)
     {
         ValidateBlobId(blobId);
-        int pageCount = GetPageCount(content.Length, _pageSize);
         byte[] digest = SHA256.HashData(content.Span);
-        var metadata = new StorageBlobMetadata((ulong)content.Length, _pageSize, pageCount, digest, IsComplete: false);
         byte[] metadataKey = MetadataKey(blobId);
 
         lock (_shared.Gate)
         {
+            StorageBlobMetadata metadata = default!;
             bool alreadyComplete = false;
             ExecuteBatch(batch =>
             {
@@ -73,26 +72,32 @@ public sealed class StorageBlobStore
                 if (batch.TryGet(metadataKey, out byte[]? existing))
                 {
                     StorageBlobMetadata decoded = DecodeMetadata(existing!);
-                    EnsureSameBlob(decoded, metadata);
+                    EnsureSameBlobContent(decoded, (ulong)content.Length, digest);
+                    metadata = decoded; // Resume using the original durable page geometry.
                     alreadyComplete = decoded.IsComplete;
                 }
                 else
                 {
+                    int pageCount = GetPageCount(content.Length, _pageSize);
+                    metadata = new StorageBlobMetadata(
+                        (ulong)content.Length, _pageSize, pageCount, digest, IsComplete: false);
                     batch.Put(metadataKey, EncodeMetadata(metadata));
                 }
             });
             if (alreadyComplete)
             {
-                VerifyExistingPages(blobId, content);
+                VerifyExistingPages(blobId, content, metadata.PageSize);
                 return;
             }
 
+            int pageCount = metadata.PageCount;
+            int pageSize = metadata.PageSize;
             string directory = BlobDirectory(blobId);
             StorageDirectorySync.CreateDirectoryDurable(directory);
             for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
             {
-                int offset = checked(pageIndex * _pageSize);
-                int length = Math.Min(_pageSize, content.Length - offset);
+                int offset = checked(pageIndex * pageSize);
+                int length = Math.Min(pageSize, content.Length - offset);
                 WritePageAtomically(
                     Path.Combine(directory, PageFileName(pageIndex)),
                     content.Span.Slice(offset, length));
@@ -104,7 +109,7 @@ public sealed class StorageBlobStore
                 if (!batch.TryGet(metadataKey, out byte[]? existing))
                     throw new InvalidDataException("Pending Storage blob metadata disappeared before publication.");
                 StorageBlobMetadata decoded = DecodeMetadata(existing!);
-                EnsureSameBlob(decoded, metadata);
+                EnsureSameBlobContent(decoded, metadata.Length, metadata.Digest);
                 if (!decoded.IsComplete)
                     batch.Put(metadataKey, EncodeMetadata(metadata));
             });
@@ -118,7 +123,6 @@ public sealed class StorageBlobStore
         using StorageSnapshot snapshot = _database.OpenSnapshot();
         if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes)) return false;
         StorageBlobMetadata metadata = DecodeMetadata(bytes!);
-        EnsurePageSize(metadata);
         return true;
     }
 
@@ -139,7 +143,6 @@ public sealed class StorageBlobStore
                     return false;
                 }
                 StorageBlobMetadata metadata = DecodeMetadata(bytes!);
-                EnsurePageSize(metadata);
                 if (!metadata.IsComplete)
                 {
                     reader = null;
@@ -274,13 +277,13 @@ public sealed class StorageBlobStore
         }
     }
 
-    private void VerifyExistingPages(Guid blobId, ReadOnlyMemory<byte> content)
+    private void VerifyExistingPages(Guid blobId, ReadOnlyMemory<byte> content, int pageSize)
     {
         string directory = BlobDirectory(blobId);
-        for (int pageIndex = 0; pageIndex < GetPageCount(content.Length, _pageSize); pageIndex++)
+        for (int pageIndex = 0; pageIndex < GetPageCount(content.Length, pageSize); pageIndex++)
         {
-            int offset = checked(pageIndex * _pageSize);
-            int length = Math.Min(_pageSize, content.Length - offset);
+            int offset = checked(pageIndex * pageSize);
+            int length = Math.Min(pageSize, content.Length - offset);
             byte[] existing;
             try { existing = File.ReadAllBytes(Path.Combine(directory, PageFileName(pageIndex))); }
             catch (FileNotFoundException ex)
@@ -337,19 +340,12 @@ public sealed class StorageBlobStore
         return key;
     }
 
-    private void EnsurePageSize(StorageBlobMetadata metadata)
+    private static void EnsureSameBlobContent(
+        StorageBlobMetadata existing, ulong requestedLength, ReadOnlySpan<byte> requestedDigest)
     {
-        if (metadata.PageSize != _pageSize)
-            throw new InvalidDataException("Storage blob was opened with a different configured page size.");
-    }
-
-    private static void EnsureSameBlob(StorageBlobMetadata existing, StorageBlobMetadata requested)
-    {
-        if (existing.Length != requested.Length ||
-            existing.PageSize != requested.PageSize ||
-            existing.PageCount != requested.PageCount ||
-            !CryptographicOperations.FixedTimeEquals(existing.Digest, requested.Digest))
-            throw new InvalidOperationException("Immutable Storage blob ID was reused for different content or page geometry.");
+        if (existing.Length != requestedLength ||
+            !CryptographicOperations.FixedTimeEquals(existing.Digest, requestedDigest))
+            throw new InvalidOperationException("Immutable Storage blob ID was reused for different content.");
     }
 
     private static int GetPageCount(int length, int pageSize)
