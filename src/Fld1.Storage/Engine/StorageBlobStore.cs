@@ -283,6 +283,8 @@ public sealed class StorageBlobStore
     private void VerifyExistingPages(Guid blobId, ReadOnlyMemory<byte> content, int pageSize)
     {
         string directory = BlobDirectory(blobId);
+        if (!Directory.Exists(directory))
+            throw new InvalidDataException("Published Storage blob page directory is missing.");
         for (int pageIndex = 0; pageIndex < GetPageCount(content.Length, pageSize); pageIndex++)
         {
             int offset = checked(pageIndex * pageSize);
