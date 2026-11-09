@@ -1437,8 +1437,10 @@ public sealed partial class FldDatabase : IDisposable
     {
         while (true)
         {
-            ulong candidate = _nextRunId++;
-            if (candidate == 0) continue;
+            ulong candidate = _nextRunId;
+            if (candidate == 0 || candidate == ulong.MaxValue)
+                throw new InvalidOperationException("Root-global FLD Run ID space is exhausted.");
+            _nextRunId = candidate + 1;
             string path = Path.Combine(_dbDir, "runs", $"{candidate}.fld1");
             if (!File.Exists(path) && !_runBlobStore.ContainsBlob(RunBlobId(candidate)))
                 return candidate;
