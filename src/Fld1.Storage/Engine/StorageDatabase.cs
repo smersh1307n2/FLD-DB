@@ -160,9 +160,12 @@ public sealed class StorageDatabase : IDisposable
         lock (_gate)
         {
             EnsureUsable();
-            var copy = new SortedDictionary<StorageKey, byte[]>(StorageKeyComparer.Instance);
-            foreach (var pair in _values)
-                copy.Add(pair.Key, pair.Value.ToArray());
+            // SortedList builds one compact sorted index from the live dictionary.
+            // Stored value arrays are immutable after publication: Commit copies
+            // caller-owned buffers before assigning them and later commits replace
+            // references rather than mutating arrays, so snapshot payload bytes can
+            // be shared safely instead of cloned.
+            var copy = new SortedList<StorageKey, byte[]>(_values, StorageKeyComparer.Instance);
             return new StorageSnapshot(copy, _lastCommitSeq);
         }
     }
@@ -382,10 +385,10 @@ public sealed class StorageWriteBatch : IDisposable
 /// <summary>Immutable, stable point-in-time view of a Storage partition.</summary>
 public sealed class StorageSnapshot : IDisposable
 {
-    private SortedDictionary<StorageDatabase.StorageKey, byte[]>? _values;
+    private SortedList<StorageDatabase.StorageKey, byte[]>? _values;
     public ulong CommitSeq { get; }
 
-    internal StorageSnapshot(SortedDictionary<StorageDatabase.StorageKey, byte[]> values, ulong commitSeq)
+    internal StorageSnapshot(SortedList<StorageDatabase.StorageKey, byte[]> values, ulong commitSeq)
     {
         _values = values;
         CommitSeq = commitSeq;
@@ -406,21 +409,101 @@ public sealed class StorageSnapshot : IDisposable
 
     public IReadOnlyList<StorageEntry> ScanPrefix(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> afterKey, int limit)
     {
-        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
-        var values = GetValues();
-        var result = new List<StorageEntry>(Math.Min(limit, values.Count));
-        foreach (var pair in values)
-        {
-            if (!pair.Key.Span.StartsWith(prefix)) continue;
-            if (!afterKey.IsEmpty && pair.Key.Span.SequenceCompareTo(afterKey) <= 0) continue;
-            result.Add(new StorageEntry(pair.Key.Span.ToArray(), pair.Value.ToArray()));
-            if (result.Count == limit) break;
-        }
-
-        return result;
+        using PrefixCursor cursor = OpenPrefixCursor(prefix, afterKey);
+        return cursor.ReadPage(limit);
     }
 
-    private SortedDictionary<StorageDatabase.StorageKey, byte[]> GetValues()
+    /// <summary>Creates a forward-only, bounded-memory cursor over one sorted key prefix.</summary>
+    public PrefixCursor OpenPrefixCursor(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> afterKey = default)
+    {
+        return new PrefixCursor(this, prefix.ToArray(), afterKey.ToArray());
+    }
+
+    public sealed class PrefixCursor : IDisposable
+    {
+        private readonly StorageSnapshot _owner;
+        private readonly byte[] _prefix;
+        private readonly byte[] _afterKey;
+        private int _index;
+        private bool _finished;
+        private bool _disposed;
+
+        internal PrefixCursor(StorageSnapshot owner, byte[] prefix, byte[] afterKey)
+        {
+            _owner = owner;
+            _prefix = prefix;
+            _afterKey = afterKey;
+            SortedList<StorageDatabase.StorageKey, byte[]> values = owner.GetValues();
+            ReadOnlySpan<byte> startKey = afterKey.Length != 0 &&
+                afterKey.AsSpan().SequenceCompareTo(prefix) > 0
+                    ? afterKey
+                    : prefix;
+            _index = LowerBound(values, startKey);
+        }
+
+        private static int LowerBound(
+            SortedList<StorageDatabase.StorageKey, byte[]> values, ReadOnlySpan<byte> key)
+        {
+            int low = 0;
+            int high = values.Count;
+            while (low < high)
+            {
+                int middle = low + ((high - low) >> 1);
+                if (values.Keys[middle].Span.SequenceCompareTo(key) < 0)
+                    low = middle + 1;
+                else
+                    high = middle;
+            }
+            return low;
+        }
+
+        public IReadOnlyList<StorageEntry> ReadPage(int limit)
+        {
+            if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
+            if (_finished) return Array.Empty<StorageEntry>();
+
+            var result = new List<StorageEntry>(Math.Min(limit, Math.Max(0, values.Count - _index)));
+            while (_index < values.Count && result.Count < limit)
+            {
+                StorageDatabase.StorageKey key = values.Keys[_index];
+                byte[] value = values.Values[_index];
+                _index++;
+                ReadOnlySpan<byte> keyBytes = key.Span;
+                int prefixOrder = CompareToPrefix(keyBytes, _prefix);
+                if (prefixOrder < 0) continue;
+                if (prefixOrder > 0)
+                {
+                    _finished = true;
+                    break;
+                }
+                if (_afterKey.Length != 0 && keyBytes.SequenceCompareTo(_afterKey) <= 0)
+                    continue;
+
+                result.Add(new StorageEntry(keyBytes.ToArray(), value.ToArray()));
+            }
+            if (_index >= values.Count)
+                _finished = true;
+            return result;
+        }
+
+        public void Dispose()
+        {
+            _disposed = true;
+            _finished = true;
+        }
+
+        private static int CompareToPrefix(ReadOnlySpan<byte> key, ReadOnlySpan<byte> prefix)
+        {
+            int common = Math.Min(key.Length, prefix.Length);
+            int order = key[..common].SequenceCompareTo(prefix[..common]);
+            if (order != 0) return order;
+            return key.Length < prefix.Length ? -1 : 0;
+        }
+    }
+
+    private SortedList<StorageDatabase.StorageKey, byte[]> GetValues()
         => _values ?? throw new ObjectDisposedException(nameof(StorageSnapshot));
 
     public void Dispose() => _values = null;
