@@ -1881,3 +1881,8 @@ BIN-SYNC `feature/fld-external-storage` now contains `BinSync.Storage.StorageRel
 - Durable prune is explicitly after FLD `AcknowledgeRelayBatches` succeeds; the public sample demonstrates restart and partial JournalSeq-group ACK boundaries.
 
 This closes only the reusable BIN-SYNC mapping-store primitive. It does **not** implement the FLD synchronized-database adapter, outbound publication gate, ChangeId resolver call, FLD commit-guard composition or concrete `IApplicationGcReferenceScanner`. The sequencing in §7.20 remains controlling: do not add a direct Node↔FldDatabase bridge or integration NuGet project until the neutral semantic/Data Provider boundary, BIN-SYNC persistence refactor and approved two-public-DLL Storage/Database extraction are complete. No FLD project dependency or public assembly boundary is changed by this primitive.
+
+
+### 7.46 Recovery checkpoint branch (2026-11-09)
+
+Created `backup/pre-binsync-provenance-map-2026-11-09` at `a962371ec293708f61f02453f9bc7c441eafa015` before further cross-repository integration work. Earlier FLD backup branches remain unchanged.
