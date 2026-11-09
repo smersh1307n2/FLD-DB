@@ -2103,3 +2103,11 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] `FldDatabase.ReadUnacknowledgedRelayAuthors()` now builds its author→maximum-unacknowledged-JournalSeq set once from ApplyJournal, incrementally adds authors after each durable remote APPLY, and removes an author when a durable ACK covers its last unacknowledged JournalSeq.
 - [x C] The cache is process-local/rebuildable; it adds no persistent author-index rows and is reconstructed after reopen from the existing ApplyJournal/ACK sidecar. This avoids rescanning the full journal on every remote batch.
 - [~ T] Test reopen rebuild, apply append, partial ACK retention, final ACK removal, ACK then new batch re-add, and unsealed-WAL recovery before author enumeration.
+
+### 7.76 All-author relay ACK and bounded discovery cache (2026-11-09)
+
+- [x C] FLD pending relay-author discovery is now a rebuildable process-local cache: it is populated from the ApplyJournal once, updated after durable remote APPLY, and pruned only when the durable per-author ACK covers the last pending relay JournalSeq. No duplicate persistent index is written.
+- [x C] BIN-SYNC `StorageRelayPublicationGate` unions FLD-discovered authors with RPM3 cursor authors itself under the composed commit guard; the host only supplies the FLD author callback.
+- [x C] BIN-SYNC `AcknowledgeAllAsync` applies safe ACK per author in order: compute per-author downstream-safe sequence, invoke idempotent FLD `AcknowledgeRelayBatches`, then prune RPM3. Partial failure can be retried using remaining map cursors.
+- [~ T] Verify author cache across restart, partial ACK, new apply after ACK, FLD-ACK-before-map-prune crash, multi-author partial failure and retry.
+- [~ C] Host still must provide the real callbacks and use one shared coordinator/gate for the namespace; no BIN-SYNC dependency is added to FLD.
