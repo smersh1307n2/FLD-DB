@@ -2067,3 +2067,11 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] BIN-SYNC now exposes `StorageRelayPublicationGate.For(coordinator)` backed by a `ConditionalWeakTable`; the constructor is private, so all host components using the supported factory share the same async publication/ACK gate for one coordinator namespace.
 - [~ C] The host must keep one `StorageSyncCoordinator` instance per Node/provider/namespace and must not bypass the gate with direct sender calls. This is an application composition rule, not something FLD can enforce without taking a BIN-SYNC dependency.
 - [~ T] Concurrency, cancellation and failure-release behavior remain T-pass tests.
+
+### 7.71 RPM3 resolver follows the active BIN-SYNC publication owner (2026-11-09)
+
+- [x C] BIN-SYNC relay mapping now resolves ChangeIds through Node Outbox before metadata-owned publication cutover, and through `StorageMetadataStore.TryResolveRelaySequences` after cutover. This is required because the cutover intentionally drains/fences Node Outbox while the durable Metadata Store assigns the relay author-stream sequence.
+- [x C] Safe relay ACK translation now reads `Node.GetSafeOutboxAckedThrough` before cutover and `StorageMetadataStore.GetSafePeerStreamCompactionCursor` after cutover. The already committed RPM3 safe watermark remains a monotonic lower bound across peer retirement/rejoin/baseline transitions.
+- [x C] The Metadata Store resolver reads existing immutable relay rows by ChangeId and returns their sequence; it creates no second ChangeId ledger or payload copy. Missing/compacted rows fail closed.
+- [~ T] Verify both modes, cutover, retained/missing relay rows, peer baseline rollover and map reopen/recovery. No exact-head CI yet for the new implementation.
+- [~ C] Host integration still must select and keep the matching coordinator/provider publication mode stable, and serialize all receive/send/ACK paths through the shared gate.
