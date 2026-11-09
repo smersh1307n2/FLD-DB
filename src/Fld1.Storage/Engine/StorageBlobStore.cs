@@ -88,7 +88,7 @@ public sealed class StorageBlobStore
             }
 
             string directory = BlobDirectory(blobId);
-            Directory.CreateDirectory(directory);
+            StorageDirectorySync.CreateDirectoryDurable(directory);
             for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
             {
                 int offset = checked(pageIndex * _pageSize);
@@ -189,7 +189,7 @@ public sealed class StorageBlobStore
                 if (Directory.Exists(directory))
                 {
                     Directory.Delete(directory, recursive: true);
-                    TryFsyncDirectory(Path.GetDirectoryName(directory)!);
+                    StorageDirectorySync.Flush(Path.GetDirectoryName(directory)!);
                 }
             }
             catch
@@ -269,7 +269,7 @@ public sealed class StorageBlobStore
                     // Retry on the next maintenance pass.
                 }
             }
-            if (deleted != 0) TryFsyncDirectory(_blobDirectory);
+            if (deleted != 0) StorageDirectorySync.Flush(_blobDirectory);
             return deleted;
         }
     }
@@ -423,24 +423,7 @@ public sealed class StorageBlobStore
             stream.Flush(flushToDisk: true);
         }
         File.Move(temporary, path, overwrite: true);
-        TryFsyncDirectory(directory);
-        TryFsyncDirectory(Path.GetDirectoryName(directory)!);
-    }
-
-    private static void TryFsyncDirectory(string directory)
-    {
-        try
-        {
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            {
-                using var stream = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                stream.Flush(flushToDisk: true);
-            }
-        }
-        catch
-        {
-            // Directory handles are not flushable on every supported filesystem.
-        }
+        StorageDirectorySync.Flush(directory);
     }
 
     private sealed class SharedState
