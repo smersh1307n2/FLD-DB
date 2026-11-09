@@ -273,7 +273,9 @@ public sealed class FldDatabase : IDisposable
                         AuthorNodeId = field.AuthorNodeId,
                         KeyEpoch = field.KeyEpoch,
                         IsTombstone = field.OpKind == 2,
-                        ChangeId = field.ChangeId
+                        ChangeId = field.ChangeId,
+                        OriginAuthorEpoch = field.OriginAuthorEpoch,
+                        OriginSequence = field.OriginSequence
                     });
                 }
 
@@ -326,7 +328,9 @@ public sealed class FldDatabase : IDisposable
                         AuthorNodeId = field.AuthorNodeId,
                         KeyEpoch = field.KeyEpoch,
                         IsTombstone = field.OpKind == 2,
-                        ChangeId = changeId
+                        ChangeId = changeId,
+                        OriginAuthorEpoch = field.OriginAuthorEpoch,
+                        OriginSequence = field.OriginSequence
                     });
                     _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
                     _manifestDirty = true;
@@ -506,6 +510,8 @@ public sealed class FldDatabase : IDisposable
                     Logical = kv.Value.Logical,
                     AuthorNodeId = kv.Value.AuthorNodeId,
                     ChangeId = kv.Value.ChangeId,
+                    OriginAuthorEpoch = kv.Value.OriginAuthorEpoch,
+                    OriginSequence = kv.Value.OriginSequence,
                     Value = kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value
                 });
             }
@@ -1149,7 +1155,9 @@ public sealed class FldDatabase : IDisposable
                     AuthorNodeId = write.AuthorNodeId.ToArray(),
                     KeyEpoch = write.KeyEpoch,
                     IsTombstone = write.IsTombstone,
-                    ChangeId = changeId
+                    ChangeId = changeId,
+                    OriginAuthorEpoch = write.OriginAuthorEpoch,
+                    OriginSequence = write.OriginSequence
                 });
 
                 applied++;
@@ -1216,6 +1224,8 @@ public sealed class FldDatabase : IDisposable
                     Logical = write.Logical,
                     AuthorNodeId = write.AuthorNodeId,
                     ChangeId = write.ChangeId,
+                    OriginAuthorEpoch = write.OriginAuthorEpoch,
+                    OriginSequence = write.OriginSequence,
                     Value = write.IsTombstone ? Array.Empty<byte>() : write.Value
                 });
 
@@ -1307,7 +1317,9 @@ public sealed class FldDatabase : IDisposable
                         AuthorNodeId = write.AuthorNodeId,
                         KeyEpoch = write.KeyEpoch,
                         IsTombstone = write.IsTombstone,
-                        ChangeId = write.ChangeId
+                        ChangeId = write.ChangeId,
+                        OriginAuthorEpoch = write.OriginAuthorEpoch,
+                        OriginSequence = write.OriginSequence
                     });
                 }
             }
