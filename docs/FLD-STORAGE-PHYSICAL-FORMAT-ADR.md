@@ -12,7 +12,7 @@ Do not replace FLD1 Run v1/v2 with a new field-keyed Storage KV schema in this p
 
 The generic Storage layer owns:
 - opaque immutable pages/blobs addressed by caller-supplied stable IDs;
-- bounded page writes and ordered page reads;
+- bounded page writes and ordered page reads, with page payloads in immutable files and only the bounded catalog/publication metadata in StorageDatabase/WAL;
 - per-blob length/page-count/digest metadata and atomic publication marker;
 - generic WAL durability, snapshot/checkpoint and storage-native CommitSeq;
 - snapshot pin lifetime and explicit bounded deletion/orphan-page collection.
@@ -39,15 +39,16 @@ A Run is an opaque blob to Storage. Storage must never parse its FLD1 header, cl
 - A blob is invisible to readers until all pages are durably committed and a complete metadata record (length, page size/count, SHA-256) is atomically published.
 - Repeated Put with the same ID and identical content is idempotent. Reuse of an ID with different length/digest/page bytes fails closed.
 - An interrupted pending blob is resumable with the same ID/content; it is never returned by OpenRead until complete.
-- A reader owns a stable Storage snapshot and validates page count, exact final-page length and whole-blob SHA-256 when streamed.
-- Delete removes the publication marker and pages atomically within the bounded operation limit; old readers retain their prior Storage snapshot. Orphan page collection never deletes pages referenced by a pending or complete blob record.
+- A reader owns a stable Storage catalog snapshot plus an in-process page-directory pin and validates page count, exact final-page length and whole-blob SHA-256 when streamed.
+- Delete first commits removal of the publication marker, then reclaims page files. Readers already opened keep their page-directory pin; a pinned blob cannot be deleted. If physical cleanup is interrupted after catalog deletion, bounded orphan-directory collection retries it. The logical visibility change is atomic; physical page reclamation is deliberately separate.
+- On Linux/macOS, page-file rename and newly created directory entries are flushed through the shared native `StorageDirectorySync`; an fsync error before blob completion fails closed. Windows directory-entry durability is not claimed. StorageDatabase WAL still supplies the durable catalog commit sequence.
 - Storage APIs remain byte/Guid based and contain no FLD or BIN-SYNC types.
 
 ## Migration sequence
 
-1. Add and independently validate the generic Storage immutable-blob/page API in `Fld1.Storage`.
+1. Add and independently validate the generic Storage immutable-blob/page API in `Fld1.Storage`. The first implementation stores large immutable page payloads as fsynced files and keeps only the compact blob catalog in StorageDatabase/WAL, avoiding a large in-memory KV index.
 2. Add the FLD Database adapter that maps namespace + RunId to opaque blob IDs; retain legacy `runs/{RunId}.fld1` reads as fallback.
-3. New Run writes publish blob pages before manifest update. During the compatibility period, the exact same FLD1 Run bytes are also materialized at `runs/{RunId}.fld1`; the manifest remains the single FLD visibility switch, and old FLD1 binaries can still read the mirror. New code prefers the generic blob and falls back to the legacy file only when no blob record exists. Existing legacy Run files are imported lazily or during compaction; no in-place rewrite of a live manifest. Removing the compatibility mirror requires a separate explicit manifest/storage-format version transition and benchmark.
+3. New Run writes publish blob pages before manifest update. Checkpoint, compaction and FULL_REPLACE staging use the same root-global Run ID allocator; it checks both legacy Run files and the blob catalog so uncommitted staged IDs cannot be reused after restart. During the compatibility period, the exact same FLD1 Run bytes are also materialized at `runs/{RunId}.fld1`; the manifest remains the single FLD visibility switch, and old FLD1 binaries can still read the mirror. New code prefers the generic blob and falls back to the legacy file only when no blob record exists. Existing legacy Run files are imported lazily or during compaction; no in-place rewrite of a live manifest. Removing the compatibility mirror requires a separate explicit manifest/storage-format version transition and benchmark.
 4. Extend orphan collection to union active manifest Run IDs, durable provider snapshot Run pins and incomplete staging generations before deleting either legacy files or Storage blobs.
 5. After Run storage is migrated and proven, separately evaluate moving FLD WAL records to generic Storage WAL as opaque Database-owned commit payloads. Do not combine that migration with the Run/blob cutover.
 6. Benchmark write amplification, point/range reads, checkpoint time, peak memory and on-disk size against the current legacy Run files. Do not claim an optimization unless the full workload improves.
