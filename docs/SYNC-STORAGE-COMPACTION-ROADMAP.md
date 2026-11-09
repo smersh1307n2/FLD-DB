@@ -2004,3 +2004,9 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] Tests/benchmarks and `Fld.Db.slnx` now target the two runtime projects. README and this roadmap have been corrected to describe physical ownership rather than linked sources.
 - [~ T] Current branch HEAD `e4a8cfcabea489b0f337839a759de654002f696d` still has failed Ubuntu/macOS/Windows CI. The attempted log-artifact instrumentation also produced no retrievable artifacts; do not infer the cause.
 - [~ C] Important distinction: this closes the physical project-consolidation step, not the full Storage engine extraction. `Fld1.Database` still contains the field-aware legacy WAL/Run/Manifest path and `FldDatabase` is not yet backed by `StorageDatabase`. The generic Storage API/backend migration and physical-format compatibility plan remain open.
+
+### 7.62 Recovery point after physical consolidation (2026-11-09)
+
+- [x C] Created `backup/post-two-dll-consolidation-2026-11-09` at `7105cdcd0c6e709681389b18adc066f589744d59` before continuing with the generic Storage backend migration.
+- [x C] The earlier pre-work checkpoint `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4d5e` remains intact.
+- [~ T] The active branch still has red cross-platform CI; no new backend migration should be merged without restoring actionable diagnostics and a passing baseline.
