@@ -62,6 +62,8 @@ public sealed partial class FldDatabase
             if (File.Exists(path))
             {
                 FullReplaceStageState existing = ReadFullReplaceStage(path);
+                if (existing.NamespaceId != _namespaceId)
+                    throw new InvalidDataException("FULL_REPLACE stage namespace does not match its path.");
                 if (existing.IsAborting)
                     throw new InvalidOperationException("FULL_REPLACE generation is being aborted and cannot be resumed.");
                 if (existing.Generation != generation ||
