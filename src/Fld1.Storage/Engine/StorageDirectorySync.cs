@@ -7,7 +7,7 @@ namespace Fld1.Storage.Engine;
 /// Flushes directory-entry updates on Unix. FileStream does not expose a portable
 /// directory handle, so use the native open/fsync/close sequence explicitly.
 /// </summary>
-internal static class StorageDirectorySync
+public static class StorageDirectorySync
 {
     private const int LinuxODirectory = 0x10000;
     private const int MacOsODirectory = 0x00100000;
@@ -30,7 +30,7 @@ internal static class StorageDirectorySync
     [DllImport("libSystem.B.dylib", EntryPoint = "close", SetLastError = true)]
     private static extern int MacOsClose(int fileDescriptor);
 
-    internal static void CreateDirectoryDurable(string path)
+    public static void CreateDirectoryDurable(string path)
     {
         string fullPath = Path.GetFullPath(path);
         var missing = new Stack<string>();
@@ -54,7 +54,7 @@ internal static class StorageDirectorySync
         }
     }
 
-    internal static void Flush(string directory)
+    public static void Flush(string directory)
     {
         if (OperatingSystem.IsWindows())
             return; // Windows directory-entry durability is not claimed by this engine.
