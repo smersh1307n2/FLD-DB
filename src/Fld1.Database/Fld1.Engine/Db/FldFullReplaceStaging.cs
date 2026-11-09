@@ -115,9 +115,8 @@ public sealed partial class FldDatabase
             var builder = new RunBuilder(_namespaceId);
             byte[] lastSortKey = state.LastSortKey.ToArray();
             int pageBytes = 0;
-            ValidateReplacementEntry(entries[0]);
-            byte[] firstRecord = entries[0].RecordId;
-            byte[] lastRecord = entries[^1].RecordId;
+            ValidateReplacementEntry(entries[0]
+                ?? throw new ArgumentException("Replacement page contains a null entry.", nameof(entries)));
             for (int i = 0; i < entries.Count; i++)
             {
                 FldProviderSnapshotEntry entry = entries[i]
@@ -145,6 +144,8 @@ public sealed partial class FldDatabase
 
             if (state.Runs.Length >= 1_000_000)
                 throw new InvalidOperationException("FULL_REPLACE staged Run index exceeds its bounded capacity.");
+            byte[] firstRecord = entries[0].RecordId;
+            byte[] lastRecord = entries[^1].RecordId;
             byte[] runBytes = builder.Build();
             var reader = new RunReader(runBytes);
             if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
