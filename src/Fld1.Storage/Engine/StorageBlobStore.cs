@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -7,8 +6,9 @@ using Fld1.Storage.Wal.Format;
 namespace Fld1.Storage.Engine;
 
 /// <summary>
-/// Generic immutable blob store over a StorageDatabase. Blobs are opaque to Storage;
-/// each blob is published only after all bounded pages are durable.
+/// Generic immutable page/blob store. StorageDatabase owns the small blob catalog
+/// and its WAL; opaque page bytes are stored as durable immutable files so the
+/// in-memory KV index never grows with the total blob payload size.
 /// </summary>
 public sealed class StorageBlobStore
 {
@@ -18,51 +18,43 @@ public sealed class StorageBlobStore
     private const int BlobIdSize = 16;
     private const int MaxBlobPages = 65_535;
     private const int MaxPageSize = 4 * 1024 * 1024;
-    private const int MaxPagesPerBatch = 8;
     private const int MaxConflictRetries = 16;
 
-    private static readonly ConditionalWeakTable<StorageDatabase, ConcurrentDictionary<string, object>> Gates = new();
+    private static readonly ConditionalWeakTable<StorageDatabase, ConcurrentDictionary<string, SharedState>> SharedStates = new();
 
     private readonly StorageDatabase _database;
     private readonly byte[] _prefix;
     private readonly byte[] _metadataPrefix;
-    private readonly byte[] _pagePrefix;
-    private readonly object _gate;
+    private readonly string _blobDirectory;
+    private readonly SharedState _shared;
     private readonly int _pageSize;
-    private readonly int _pagesPerBatch;
 
     public int PageSize => _pageSize;
 
     public StorageBlobStore(
         StorageDatabase database,
         ReadOnlySpan<byte> keyPrefix,
-        int pageSize = 1024 * 1024,
-        int pagesPerBatch = 8)
+        int pageSize = 1024 * 1024)
     {
         _database = database ?? throw new ArgumentNullException(nameof(database));
         if (keyPrefix.IsEmpty || keyPrefix.Length > 64)
             throw new ArgumentOutOfRangeException(nameof(keyPrefix), "Blob key prefix must contain 1..64 bytes.");
         if (pageSize is < 4096 or > MaxPageSize)
             throw new ArgumentOutOfRangeException(nameof(pageSize), $"Blob page size must be 4 KiB..{MaxPageSize} bytes.");
-        if (pagesPerBatch is < 1 or > MaxPagesPerBatch ||
-            (long)pageSize * pagesPerBatch > 8L * 1024 * 1024)
-            throw new ArgumentOutOfRangeException(nameof(pagesPerBatch), "Blob page batch must fit within the bounded 8 MiB write budget.");
 
         _prefix = keyPrefix.ToArray();
         _metadataPrefix = Append(_prefix, 0);
-        _pagePrefix = Append(_prefix, 1);
         _pageSize = pageSize;
-        _pagesPerBatch = pagesPerBatch;
-        string gateKey = Convert.ToHexString(_prefix);
-        var perDatabaseGates = Gates.GetValue(
-            database, static _ => new ConcurrentDictionary<string, object>(StringComparer.Ordinal));
-        _gate = perDatabaseGates.GetOrAdd(gateKey, static _ => new object());
+        _blobDirectory = Path.Combine(database.DirectoryPath, "blobs", Convert.ToHexString(_prefix));
+        var perDatabase = SharedStates.GetValue(
+            database, static _ => new ConcurrentDictionary<string, SharedState>(StringComparer.Ordinal));
+        _shared = perDatabase.GetOrAdd(Convert.ToHexString(_prefix), static _ => new SharedState());
     }
 
     /// <summary>
-    /// Writes or resumes an immutable blob. Reusing an ID for different content is
-    /// rejected. A pending metadata record makes interrupted page writes resumable
-    /// and prevents orphan collection from deleting pages while Put is in progress.
+    /// Writes or resumes an immutable blob. A pending catalog row is committed first;
+    /// page files are then atomically published one at a time; the complete marker is
+    /// committed last. Reusing an ID for different bytes fails closed.
     /// </summary>
     public void PutImmutableBlob(Guid blobId, ReadOnlyMemory<byte> content)
     {
@@ -72,7 +64,7 @@ public sealed class StorageBlobStore
         var metadata = new StorageBlobMetadata((ulong)content.Length, _pageSize, pageCount, digest, IsComplete: false);
         byte[] metadataKey = MetadataKey(blobId);
 
-        lock (_gate)
+        lock (_shared.Gate)
         {
             bool alreadyComplete = false;
             ExecuteBatch(batch =>
@@ -91,29 +83,15 @@ public sealed class StorageBlobStore
             });
             if (alreadyComplete) return;
 
-            for (int firstPage = 0; firstPage < pageCount; firstPage += _pagesPerBatch)
+            string directory = BlobDirectory(blobId);
+            Directory.CreateDirectory(directory);
+            for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
             {
-                int batchStart = firstPage;
-                int batchEnd = Math.Min(pageCount, batchStart + _pagesPerBatch);
-                ExecuteBatch(batch =>
-                {
-                    for (int pageIndex = batchStart; pageIndex < batchEnd; pageIndex++)
-                    {
-                        int offset = checked(pageIndex * _pageSize);
-                        int length = Math.Min(_pageSize, content.Length - offset);
-                        ReadOnlySpan<byte> page = content.Span.Slice(offset, length);
-                        byte[] pageKey = PageKey(blobId, pageIndex);
-                        if (batch.TryGet(pageKey, out byte[]? existing))
-                        {
-                            if (!existing!.AsSpan().SequenceEqual(page))
-                                throw new InvalidDataException("Immutable Storage blob page conflicts with previously written bytes.");
-                        }
-                        else
-                        {
-                            batch.Put(pageKey, page);
-                        }
-                    }
-                });
+                int offset = checked(pageIndex * _pageSize);
+                int length = Math.Min(_pageSize, content.Length - offset);
+                WritePageAtomically(
+                    Path.Combine(directory, PageFileName(pageIndex)),
+                    content.Span.Slice(offset, length));
             }
 
             metadata = metadata with { IsComplete = true };
@@ -129,38 +107,7 @@ public sealed class StorageBlobStore
         }
     }
 
-    /// <summary>Opens a stable snapshot reader only for a fully published blob.</summary>
-    public bool TryOpenRead(Guid blobId, out StorageBlobReader? reader)
-    {
-        ValidateBlobId(blobId);
-        StorageSnapshot snapshot = _database.OpenSnapshot();
-        try
-        {
-            if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes))
-            {
-                reader = null;
-                snapshot.Dispose();
-                return false;
-            }
-            StorageBlobMetadata metadata = DecodeMetadata(bytes!);
-            EnsurePageSize(metadata);
-            if (!metadata.IsComplete)
-            {
-                reader = null;
-                snapshot.Dispose();
-                return false;
-            }
-            reader = new StorageBlobReader(snapshot, _prefix, blobId, metadata);
-            return true;
-        }
-        catch
-        {
-            snapshot.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Returns true for either a pending or fully published blob record.</summary>
+    /// <summary>Returns true for either a pending or fully published blob catalog row.</summary>
     public bool ContainsBlob(Guid blobId)
     {
         ValidateBlobId(blobId);
@@ -171,16 +118,91 @@ public sealed class StorageBlobStore
         return true;
     }
 
+    /// <summary>Opens a stable snapshot reader only for a fully published blob.</summary>
+    public bool TryOpenRead(Guid blobId, out StorageBlobReader? reader)
+    {
+        ValidateBlobId(blobId);
+        lock (_shared.Gate)
+        {
+            StorageSnapshot snapshot = _database.OpenSnapshot();
+            try
+            {
+                if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes))
+                {
+                    reader = null;
+                    snapshot.Dispose();
+                    return false;
+                }
+                StorageBlobMetadata metadata = DecodeMetadata(bytes!);
+                EnsurePageSize(metadata);
+                if (!metadata.IsComplete)
+                {
+                    reader = null;
+                    snapshot.Dispose();
+                    return false;
+                }
+                string directory = BlobDirectory(blobId);
+                if (!Directory.Exists(directory))
+                    throw new InvalidDataException("Published Storage blob page directory is missing.");
+                _shared.Pins.TryGetValue(blobId, out int pins);
+                _shared.Pins[blobId] = checked(pins + 1);
+                reader = new StorageBlobReader(
+                    snapshot, directory, blobId, metadata, ReleasePin);
+                return true;
+            }
+            catch
+            {
+                snapshot.Dispose();
+                throw;
+            }
+        }
+    }
+
     /// <summary>
-    /// Deletes at most maxBlobs blob generations not present in the caller's complete
-    /// live set. Pending generations are included, so interrupted unreferenced puts
-    /// can be reclaimed during exclusive startup maintenance.
+    /// Removes the catalog row first, then its page directory. Existing readers pin
+    /// their page files until disposal; if file deletion is interrupted, startup
+    /// orphan collection removes the now-unreferenced directory.
+    /// </summary>
+    public bool DeleteBlob(Guid blobId)
+    {
+        ValidateBlobId(blobId);
+        lock (_shared.Gate)
+        {
+            if (_shared.Pins.TryGetValue(blobId, out int pins) && pins != 0)
+                return false;
+            using StorageSnapshot snapshot = _database.OpenSnapshot();
+            if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes))
+                return false;
+            _ = DecodeMetadata(bytes!);
+
+            ExecuteBatch(batch => batch.Delete(MetadataKey(blobId)));
+            try
+            {
+                string directory = BlobDirectory(blobId);
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, recursive: true);
+                    TryFsyncDirectory(Path.GetDirectoryName(directory)!);
+                }
+            }
+            catch
+            {
+                // The catalog row is already gone. Startup orphan collection retries.
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Deletes at most maxBlobs catalog generations not present in the caller's
+    /// complete live set. Pending generations are included, allowing interrupted
+    /// unreferenced puts to be reclaimed during exclusive startup maintenance.
     /// </summary>
     public int PruneUnreferencedBlobs(IReadOnlySet<Guid> liveBlobIds, int maxBlobs = 128)
     {
         ArgumentNullException.ThrowIfNull(liveBlobIds);
         if (maxBlobs is < 1 or > 4096) throw new ArgumentOutOfRangeException(nameof(maxBlobs));
-        lock (_gate)
+        lock (_shared.Gate)
         {
             var candidates = new List<Guid>(Math.Min(maxBlobs, 128));
             using (StorageSnapshot snapshot = _database.OpenSnapshot())
@@ -194,7 +216,8 @@ public sealed class StorageBlobStore
                     if (blobId == Guid.Empty)
                         throw new InvalidDataException("Storage blob metadata key contains an empty blob ID.");
                     _ = DecodeMetadata(entry.Value.ToArray());
-                    if (!liveBlobIds.Contains(blobId))
+                    if (!liveBlobIds.Contains(blobId) &&
+                        (!_shared.Pins.TryGetValue(blobId, out int pins) || pins == 0))
                         candidates.Add(blobId);
                 }
             }
@@ -206,59 +229,52 @@ public sealed class StorageBlobStore
     }
 
     /// <summary>
-    /// Atomically removes a blob's publication record and all its pages. Readers
-    /// opened before this commit retain their immutable Storage snapshot.
+    /// Deletes at most maxBlobDirectories page directories that have no catalog row.
+    /// Pending and complete blobs are protected. Call during exclusive startup or
+    /// maintenance, after the authoritative liveness set has been reconstructed.
     /// </summary>
-    public bool DeleteBlob(Guid blobId)
+    public int PruneOrphanBlobs(int maxBlobDirectories = 4096)
     {
-        ValidateBlobId(blobId);
-        lock (_gate)
+        if (maxBlobDirectories is < 1 or > 16_384)
+            throw new ArgumentOutOfRangeException(nameof(maxBlobDirectories));
+        lock (_shared.Gate)
         {
+            if (!Directory.Exists(_blobDirectory)) return 0;
             using StorageSnapshot snapshot = _database.OpenSnapshot();
-            if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes))
-                return false;
-            StorageBlobMetadata metadata = DecodeMetadata(bytes!);
-            EnsurePageSize(metadata);
-
-            ExecuteBatch(batch =>
+            int deleted = 0;
+            foreach (string directory in Directory.EnumerateDirectories(_blobDirectory))
             {
-                batch.Delete(MetadataKey(blobId));
-                for (int pageIndex = 0; pageIndex < metadata.PageCount; pageIndex++)
-                    batch.Delete(PageKey(blobId, pageIndex));
-            });
-            return true;
+                if (deleted == maxBlobDirectories) break;
+                string name = Path.GetFileName(directory);
+                if (!Guid.TryParseExact(name, "N", out Guid blobId) || blobId == Guid.Empty)
+                    throw new InvalidDataException("Storage blob directory name is invalid.");
+                if (snapshot.TryGet(MetadataKey(blobId), out _))
+                    continue;
+                if (_shared.Pins.TryGetValue(blobId, out int pins) && pins != 0)
+                    continue;
+                try
+                {
+                    Directory.Delete(directory, recursive: true);
+                    deleted++;
+                }
+                catch
+                {
+                    // Retry on the next maintenance pass.
+                }
+            }
+            if (deleted != 0) TryFsyncDirectory(_blobDirectory);
+            return deleted;
         }
     }
 
-    /// <summary>
-    /// Deletes at most maxPages page keys whose blob metadata is absent. Pending
-    /// and complete blobs are protected. Call during exclusive startup/maintenance.
-    /// </summary>
-    public int PruneOrphanPages(int maxPages = 4096)
+    private void ReleasePin(Guid blobId)
     {
-        if (maxPages is < 1 or > 16_384) throw new ArgumentOutOfRangeException(nameof(maxPages));
-        lock (_gate)
+        lock (_shared.Gate)
         {
-            using StorageSnapshot snapshot = _database.OpenSnapshot();
-            using StorageSnapshot.PrefixCursor cursor = snapshot.OpenPrefixCursor(_pagePrefix);
-            var orphanKeys = new List<byte[]>(Math.Min(maxPages, 4096));
-            while (orphanKeys.Count < maxPages && cursor.TryReadNext(out StorageEntryView entry))
-            {
-                if (entry.Key.Length != _pagePrefix.Length + BlobIdSize + sizeof(uint))
-                    throw new InvalidDataException("Storage blob page key has an invalid length.");
-                Guid blobId = new(entry.Key.Slice(_pagePrefix.Length, BlobIdSize));
-                if (blobId == Guid.Empty)
-                    throw new InvalidDataException("Storage blob page key contains an empty blob ID.");
-                if (!snapshot.TryGet(MetadataKey(blobId), out _))
-                    orphanKeys.Add(entry.Key.ToArray());
-            }
-            if (orphanKeys.Count == 0) return 0;
-            ExecuteBatch(batch =>
-            {
-                foreach (byte[] key in orphanKeys)
-                    batch.Delete(key);
-            });
-            return orphanKeys.Count;
+            if (!_shared.Pins.TryGetValue(blobId, out int pins) || pins <= 0)
+                throw new InvalidOperationException("Storage blob reader pin underflow.");
+            if (pins == 1) _shared.Pins.Remove(blobId);
+            else _shared.Pins[blobId] = pins - 1;
         }
     }
 
@@ -279,23 +295,20 @@ public sealed class StorageBlobStore
                 lastConflict = conflict;
             }
         }
-        throw lastConflict ?? new InvalidOperationException("Storage blob write retry limit exhausted.");
+        throw lastConflict ?? new InvalidOperationException("Storage blob catalog retry limit exhausted.");
     }
+
+    private string BlobDirectory(Guid blobId)
+        => Path.Combine(_blobDirectory, blobId.ToString("N"));
+
+    private static string PageFileName(int pageIndex)
+        => pageIndex.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".page";
 
     private byte[] MetadataKey(Guid blobId)
     {
         byte[] key = new byte[_metadataPrefix.Length + BlobIdSize];
         _metadataPrefix.CopyTo(key, 0);
         blobId.ToByteArray().CopyTo(key, _metadataPrefix.Length);
-        return key;
-    }
-
-    private byte[] PageKey(Guid blobId, int pageIndex)
-    {
-        byte[] key = new byte[_pagePrefix.Length + BlobIdSize + sizeof(uint)];
-        _pagePrefix.CopyTo(key, 0);
-        blobId.ToByteArray().CopyTo(key, _pagePrefix.Length);
-        BinaryPrimitives.WriteUInt32BigEndian(key.AsSpan(_pagePrefix.Length + BlobIdSize), checked((uint)pageIndex));
         return key;
     }
 
@@ -325,12 +338,12 @@ public sealed class StorageBlobStore
     private static byte[] EncodeMetadata(StorageBlobMetadata metadata)
     {
         byte[] bytes = new byte[MetadataSize];
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes, MetadataMagic);
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), MetadataVersion);
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6), metadata.IsComplete ? (ushort)1 : (ushort)0);
-        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(8), metadata.Length);
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(16), metadata.PageSize);
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(20), metadata.PageCount);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, MetadataMagic);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), MetadataVersion);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6), metadata.IsComplete ? (ushort)1 : (ushort)0);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(8), metadata.Length);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(16), metadata.PageSize);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(20), metadata.PageCount);
         metadata.Digest.CopyTo(bytes, 24);
         return bytes;
     }
@@ -338,13 +351,13 @@ public sealed class StorageBlobStore
     private static StorageBlobMetadata DecodeMetadata(byte[] bytes)
     {
         if (bytes.Length != MetadataSize ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes) != MetadataMagic ||
-            BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4)) != MetadataVersion)
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) != MetadataMagic ||
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4)) != MetadataVersion)
             throw new InvalidDataException("Storage blob metadata magic/version/length is invalid.");
-        ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(6));
-        ulong length = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8));
-        int pageSize = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(16));
-        int pageCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(20));
+        ushort flags = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(6));
+        ulong length = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8));
+        int pageSize = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(16));
+        int pageCount = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(20));
         byte[] digest = bytes.AsSpan(24, 32).ToArray();
         if (flags > 1 || pageSize is < 4096 or > MaxPageSize ||
             pageCount is < 0 or > MaxBlobPages ||
@@ -366,6 +379,51 @@ public sealed class StorageBlobStore
         return key;
     }
 
+    private static void WritePageAtomically(string path, ReadOnlySpan<byte> page)
+    {
+        string directory = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(directory);
+        if (File.Exists(path))
+        {
+            if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(page))
+                throw new InvalidDataException("Immutable Storage blob page conflicts with previously written bytes.");
+            return;
+        }
+        string temporary = path + ".tmp";
+        using (var stream = new FileStream(
+            temporary, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 64 * 1024, FileOptions.WriteThrough))
+        {
+            stream.Write(page);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temporary, path, overwrite: true);
+        TryFsyncDirectory(directory);
+        TryFsyncDirectory(Path.GetDirectoryName(directory)!);
+    }
+
+    private static void TryFsyncDirectory(string directory)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                using var stream = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                stream.Flush(flushToDisk: true);
+            }
+        }
+        catch
+        {
+            // Directory handles are not flushable on every supported filesystem.
+        }
+    }
+
+    private sealed class SharedState
+    {
+        public object Gate { get; } = new();
+        public Dictionary<Guid, int> Pins { get; } = new();
+    }
+
     internal sealed record StorageBlobMetadata(
         ulong Length, int PageSize, int PageCount, byte[] Digest, bool IsComplete);
 }
@@ -373,9 +431,10 @@ public sealed class StorageBlobStore
 /// <summary>Stable snapshot reader for an immutable Storage blob.</summary>
 public sealed class StorageBlobReader : IDisposable
 {
-    private readonly byte[] _prefix;
+    private readonly string _directory;
     private readonly Guid _blobId;
     private readonly StorageBlobStore.StorageBlobMetadata _metadata;
+    private readonly Action<Guid> _releasePin;
     private StorageSnapshot? _snapshot;
 
     public Guid BlobId => _blobId;
@@ -386,28 +445,30 @@ public sealed class StorageBlobReader : IDisposable
 
     internal StorageBlobReader(
         StorageSnapshot snapshot,
-        byte[] prefix,
+        string directory,
         Guid blobId,
-        StorageBlobStore.StorageBlobMetadata metadata)
+        StorageBlobStore.StorageBlobMetadata metadata,
+        Action<Guid> releasePin)
     {
         _snapshot = snapshot;
-        _prefix = prefix.ToArray();
+        _directory = directory;
         _blobId = blobId;
         _metadata = metadata;
+        _releasePin = releasePin;
     }
 
     public byte[] ReadPage(int pageIndex)
     {
-        StorageSnapshot snapshot = GetSnapshot();
+        _ = GetSnapshot();
         if ((uint)pageIndex >= (uint)_metadata.PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
-        byte[] key = PageKey(pageIndex);
-        if (!snapshot.TryGet(key, out byte[]? page))
-            throw new InvalidDataException($"Storage blob page {pageIndex} is missing.");
+        string path = Path.Combine(
+            _directory, pageIndex.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".page");
+        byte[] page = File.ReadAllBytes(path);
         int expectedLength = (int)Math.Min(
             (ulong)_metadata.PageSize,
             _metadata.Length - (ulong)pageIndex * (ulong)_metadata.PageSize);
-        if (page!.Length != expectedLength)
+        if (page.Length != expectedLength)
             throw new InvalidDataException($"Storage blob page {pageIndex} has an invalid length.");
         return page;
     }
@@ -422,8 +483,7 @@ public sealed class StorageBlobReader : IDisposable
             hash.AppendData(page);
             destination.Write(page);
         }
-        byte[] actual = hash.GetHashAndReset();
-        if (!CryptographicOperations.FixedTimeEquals(actual, _metadata.Digest))
+        if (!CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
             throw new InvalidDataException("Storage blob content digest mismatch.");
     }
 
@@ -447,20 +507,14 @@ public sealed class StorageBlobReader : IDisposable
         return result;
     }
 
-    private byte[] PageKey(int pageIndex)
-    {
-        byte[] key = new byte[_prefix.Length + 1 + 16 + sizeof(uint)];
-        _prefix.CopyTo(key, 0);
-        key[_prefix.Length] = 1;
-        _blobId.ToByteArray().CopyTo(key, _prefix.Length + 1);
-        BinaryPrimitives.WriteUInt32BigEndian(key.AsSpan(_prefix.Length + 17), checked((uint)pageIndex));
-        return key;
-    }
-
     private StorageSnapshot GetSnapshot()
         => _snapshot ?? throw new ObjectDisposedException(nameof(StorageBlobReader));
 
     public void Dispose()
-        => Interlocked.Exchange(ref _snapshot, null)?.Dispose();
+    {
+        StorageSnapshot? snapshot = Interlocked.Exchange(ref _snapshot, null);
+        if (snapshot is null) return;
+        snapshot.Dispose();
+        _releasePin(_blobId);
+    }
 }
-
