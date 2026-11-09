@@ -16,11 +16,19 @@ public static class FieldResolver
         public readonly uint Logical;
         public readonly byte[]? AuthorNodeId;
         public readonly byte[]? Value;
+        public readonly byte[]? ChangeId;
+        public readonly uint OriginAuthorEpoch;
+        public readonly ulong OriginSequence;
 
-        public Resolved(bool found, bool tomb, ushort keyEpoch, ulong wall, uint logical, byte[]? author, byte[]? value)
+        public Resolved(
+            bool found, bool tomb, ushort keyEpoch, ulong wall, uint logical,
+            byte[]? author, byte[]? value, byte[]? changeId = null,
+            uint originAuthorEpoch = 0, ulong originSequence = 0)
         {
             Found = found; IsTombstone = tomb; KeyEpoch = keyEpoch;
             Wall = wall; Logical = logical; AuthorNodeId = author; Value = value;
+            ChangeId = changeId; OriginAuthorEpoch = originAuthorEpoch;
+            OriginSequence = originSequence;
         }
 
         public static Resolved Miss => default;
