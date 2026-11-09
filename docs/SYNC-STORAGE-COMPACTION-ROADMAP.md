@@ -2096,7 +2096,7 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] BIN-SYNC now exposes `StorageRelayProvenanceMap.ReadAuthors(namespaceId)` to enumerate durable RPM3 cursor authors, including the FLD-ACK-before-map-prune crash window.
 - [x C] `StorageRelayPublicationGate.ApplyAndPublishAllAsync` and `RecoverAndPublishAllAsync` now discover the author union after durable APPLY / during startup, drain every page for every author to the source high watermark, and only then run the namespace-wide sender callback. A single-author scan can no longer accidentally authorize a sender that chooses another author stream.
 - [~ T] Test author discovery after reopen, map-only author recovery after FLD ACK crash, multiple authors with >4,096 operations, empty author pages, and no sender callback until every author is fully mapped.
-- [~ C] Host must supply `readRelayAuthors` as `fld.ReadUnacknowledgedRelayAuthors()` ∪ `map.ReadAuthors(namespaceId)`, convert 16-byte identities canonically, and route all sender paths through the shared gate.
+- [~ C] Host supplies `fld.ReadUnacknowledgedRelayAuthors()` as `readRelayAuthors`; the BIN-SYNC gate itself unions this with `map.ReadAuthors(namespaceId)`, including map-only authors after an FLD-ACK-before-prune crash. Host still converts 16-byte identities canonically and routes all sender paths through the shared gate.
 
 ### 7.75 Cache pending relay-author discovery without a durable duplicate index (2026-11-09)
 
