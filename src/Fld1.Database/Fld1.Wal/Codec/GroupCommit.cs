@@ -15,6 +15,10 @@ public sealed class WalFieldMutation
     public required byte[] AuthorNodeId { get; init; } // 16
     /// <summary>Stable BIN-SYNC ChangeId; empty only when decoding legacy WAL body v1.</summary>
     public byte[] ChangeId { get; init; } = Array.Empty<byte>();
+    /// <summary>Immutable origin author epoch; zero only for legacy/unpublished field state.</summary>
+    public uint OriginAuthorEpoch { get; init; }
+    /// <summary>Immutable origin sequence; zero only before publication or for legacy state.</summary>
+    public ulong OriginSequence { get; init; }
     public required byte[] Value { get; init; }
 }
 
@@ -70,7 +74,7 @@ public static class GroupCommitCodec
         WriteU32(ms, (uint)p.Mutations.Count);
         WriteU32(ms, (uint)p.Results.Count);
         WriteU32(ms, (uint)p.Provenance.Count);
-        WriteU32(ms, 2); // v2 adds stable ChangeId[16] to every field mutation
+        WriteU32(ms, 3); // v3 adds immutable OperationOrigin to every field mutation
 
         Span<byte> zeroChangeId = stackalloc byte[16];
         zeroChangeId.Clear();
@@ -97,6 +101,8 @@ public static class GroupCommitCodec
                 ms.Write(f.AuthorNodeId);
                 if (f.ChangeId.Length is not (0 or 16))
                     throw new ArgumentException("ChangeId must be empty or 16 bytes");
+                if ((f.OriginAuthorEpoch == 0) != (f.OriginSequence == 0))
+                    throw new ArgumentException("OriginAuthorEpoch and OriginSequence must be both zero or both nonzero.");
                 if (f.ChangeId.Length == 16)
                     ms.Write(f.ChangeId);
                 else
@@ -104,6 +110,8 @@ public static class GroupCommitCodec
                     // Recovery deterministically derives the stable ID for a zero marker.
                     ms.Write(zeroChangeId);
                 }
+                WriteU32(ms, f.OriginAuthorEpoch);
+                WriteU64(ms, f.OriginSequence);
                 WriteU32(ms, (uint)f.Value.Length);
                 ms.Write(f.Value);
             }
@@ -144,7 +152,7 @@ public static class GroupCommitCodec
         uint resCount = ReadU32(payload, ref pos);
         uint provCount = ReadU32(payload, ref pos);
         uint bodyVer = ReadU32(payload, ref pos);
-        if (bodyVer is not (1 or 2))
+        if (bodyVer is not (1 or 2 or 3))
             throw new InvalidDataException($"unsupported GROUP_COMMIT body ver={bodyVer}");
         if (mutCount > WalConstants.MaxMutations || resCount > WalConstants.MaxResults
             || provCount > WalConstants.MaxProvenance)
@@ -172,6 +180,10 @@ public static class GroupCommitCodec
                 var changeId = bodyVer >= 2
                     ? ReadBytes(payload, ref pos, 16)
                     : Array.Empty<byte>();
+                uint originAuthorEpoch = bodyVer >= 3 ? ReadU32(payload, ref pos) : 0;
+                ulong originSequence = bodyVer >= 3 ? ReadU64(payload, ref pos) : 0;
+                if ((originAuthorEpoch == 0) != (originSequence == 0))
+                    throw new InvalidDataException("GROUP_COMMIT origin epoch/sequence must be both zero or both nonzero.");
                 uint valLen = ReadU32(payload, ref pos);
                 if (valLen > WalConstants.MaxValLen) throw new InvalidDataException("ValLen");
                 var val = ReadBytes(payload, ref pos, (int)valLen);
@@ -179,7 +191,9 @@ public static class GroupCommitCodec
                 {
                     RecordId = rid, FieldId = fid, OpKind = op,
                     KeyEpoch = keyEpoch, Wall = wall, Logical = logical,
-                    AuthorNodeId = author, ChangeId = changeId, Value = val
+                    AuthorNodeId = author, ChangeId = changeId,
+                    OriginAuthorEpoch = originAuthorEpoch, OriginSequence = originSequence,
+                    Value = val
                 });
             }
             mutations.Add(new WalMutation
