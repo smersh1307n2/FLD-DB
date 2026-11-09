@@ -1938,19 +1938,19 @@ Required extraction work before creating the public `Fld1.Database.dll`:
 5. Make `Fld1.Database` reference only `Fld1.Storage` plus BCL/required packages; audit all public signatures so Storage exposes no FLD/BIN-SYNC types.
 6. Re-home tests into Storage-only and Database integration suites; verify Storage-only consumers can build/run without loading Database. Only then add the BIN-SYNC adapter assembly outside both FLD DLLs.
 
-**Status:** [~ C] source audit and migration sequence documented; extraction code is not started. The existing FLD `.NET CI` passing on the current branch does not validate the two-DLL target or a BIN-SYNC adapter. Keep the old project graph intact until the physical-format seam and dependency map are approved; do not simulate completion with a third `Common` DLL.
+**Status:** [x C] source audit/migration order documented; step 4 (one physical `Fld1.Database` project) is now implemented in §7.54/§7.60. [~ C] The physical-format choice details, generic WAL/file-generation extraction, Core type classification, actual `StorageDatabase` backend reuse, public API audit, test-suite re-homing and independent package proof remain open. The old FLD1 format must not be silently replaced; no third `Common` DLL or linked-source shortcut is allowed.
 ### 7.51 Architecture document status corrected to distinguish target from implementation (2026-11-09)
 
 Updated `FLD-STORAGE-CORE-ARCHITECTURE.md` §2.1 to state explicitly that the two-DLL design is normative target architecture, not the current build graph. There is no `Fld1.Database.csproj`; `FldDatabase` still uses the Engine/Run/Manifest/WAL/Core projects and does not use `Fld1.Storage` as its physical backend. This prevents future roadmap readers from mistaking the architectural decision for completed extraction.
 
-The physical compatibility gate remains mandatory: preserve the frozen FLD1 Run/Manifest/WAL format unless a separate versioned format decision authorizes a change. No third Common DLL and no linked-source compilation shortcut.
+The physical compatibility gate remains mandatory: preserve the frozen FLD1 Run/Manifest/WAL format unless a separate versioned format decision authorizes a change. This historical status was superseded by the physical project move in §7.54/§7.60; generic Storage backend reuse remains incomplete. No third Common DLL and no linked-source compilation shortcut.
 ### 7.52 Recovery checkpoint after two-DLL architecture audit (2026-11-09)
 
 Created `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4d5e`, preserving the current FLD branch including the source graph audit and architecture-document correction. The latest code-equivalent CI remains green at `d49f710c1e2992f753278836d521157813d8b503`; changes after that point are documentation-only.
 ### 7.53 RPM3 adapter page bound is whole FLD journal group (2026-11-09)
 
-Updated the cross-repository integration contract to read one `RelayJournalBatch` per page and reject a group with more than 4,096 relay operations before allocating the transient `(JournalSeq, ChangeId)` array. A JournalSeq group is atomic in the RPM3 mapping: it must not be split across independent mapping/cursor commits. The 4,096 limit is currently an adapter bound; it is not yet enforced by FLD remote-apply ingress. If larger single journal groups must be supported, design an explicit continuation protocol that keeps the scan cursor behind the incomplete group and preserves atomic publication/ACK semantics.
-### 7.50 Two-runtime-assembly extraction — implementation scaffold (2026-11-09)
+Updated the cross-repository integration contract to read one `RelayJournalBatch` per page and reject a group with more than 4,096 relay operations before allocating the transient `(JournalSeq, ChangeId)` array. A JournalSeq group is atomic in the RPM3 mapping: it must not be split across independent mapping/cursor commits. The 4,096 limit was initially only an adapter bound. It is now enforced by `RemoteBatchCommit` and by aggregate `ReadRelayBatchPage` operation count in §7.57/§7.58. The latter preserves whole JournalSeq boundaries and resumes before an unconsumed batch.
+### 7.54 Two-runtime-assembly physical project consolidation (2026-11-09)
 
 - [x C] Added `src/Fld1.Database/Fld1.Database.csproj` and physically moved all 40 Core, Manifest, Run, WAL and Engine source files into it. It references the independent generic `Fld1.Storage.dll`; no linked-source Compile items are used.
 - [x C] Changed `Fld.Db.slnx` runtime surface to the two approved source projects: `Fld1.Storage` and `Fld1.Database`. Component projects remain in the tree as historical source/project boundaries but are no longer solution runtime outputs.
@@ -1958,39 +1958,39 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ T] The physical move and project graph are committed, but exact-head three-OS CI remains red and its diagnostic artifacts have not been returned by the connector. Treat the two-DLL structure as source-complete but build-unverified.
 - [~ C] Remaining extraction: resolve CI/build issues, ensure publish/package output contains exactly the two runtime DLLs, and complete the generic Storage/legacy FLD WAL+Run reuse strategy. `Fld1.Database` still uses its FLD-specific WAL/Run/Manifest path; the separate generic `Fld1.Storage` engine is not yet the physical backend for `FldDatabase`.
 
-### 7.51 Exact-head build state after two-assembly scaffold (2026-11-09)
+### 7.55 Exact-head build state after two-assembly consolidation (2026-11-09)
 
 - [x C] Branch HEAD before this note: `f971bbe2653415efb0bcb5468ec66bfa658dac2b`; the scaffold commits `Fld1.Database.csproj`, routes Core/Engine/Manifest/Run/WAL tests and benchmarks through it, and reduces the solution's runtime source projects to `Fld1.Database` + `Fld1.Storage`.
 - [~ T] The previous exact-head workflow on `4f248e0edee5506d74f63ee5913ed3de193231f5` failed on Ubuntu, macOS and Windows. GitHub's job-log endpoint currently returns BlobNotFound, so the root cause is not yet verified. Do not attribute those failures to the new extraction without reading the new-head logs.
 - [~ T] The new consolidated project has not yet completed a build/test run. Validate linked source globs, package graph, generated assembly metadata, all test projects and both benchmark projects before treating the two-DLL extraction as done.
 - [~ C] Remaining: finish consumer/public API migration, make exactly two runtime assemblies the supported package output, retire or explicitly mark old component csproj entry points as internal-only, update docs and integration adapters. Keep FLD semantics independent of BIN-SYNC protocol types.
 
-### 7.52 Consolidated assembly exact-head CI result (2026-11-09)
+### 7.56 Consolidated assembly exact-head CI result (2026-11-09)
 
 - [x C] The README now describes the two-runtime-assembly solution accurately and marks the consolidation as committed but not yet validated.
 - [~ T] Exact HEAD `a0ea90b9490cc1d93eafd048008327a5bcb4a54f` produced two failed PR CI runs (three OS jobs each). Check-run annotations exist (1–2 per job), but the connected log/annotation endpoints returned unavailable data; root cause is not confirmed. Do not assume this is a source compile failure or blame a specific project file without diagnostics.
 - [~ T] The current branch has advanced to `ec28803a9eb0ef26a8c3313be5ed75e97f18d104` with the roadmap note; then `a0ea90b9490cc1d93eafd048008327a5bcb4a54f` is the last commit with visible check-run diagnostics. Exact current-head status must be checked again after the next source/CI run.
 - [~ C] Before further package/entry-point cleanup, obtain actionable build diagnostics for the consolidated project. The two-DLL structure is a scaffold, not accepted completion until Ubuntu/macOS/Windows pass.
 
-### 7.53 Enforce the cross-layer remote apply operation bound (2026-11-09)
+### 7.57 Enforce the cross-layer remote apply operation bound (2026-11-09)
 
 - [x C] `RemoteBatchCommit` now enforces `MaximumOperationsPerBatch = 4096` in its shared write-copy boundary, before allocating copied arrays. Both `Writes` and `RelayWrites` are independently bounded; relay subset validation remains unchanged.
 - [x C] This makes the FLD durable ingress honor the same 4,096-operation bound used by the BIN-SYNC relay adapter instead of accepting an unbounded caller-supplied `IReadOnlyList`.
 - [~ T] Add exact boundary tests for 4,096 accepted and 4,097 rejected for both Writes and RelayWrites, including an oversized lazy/custom IReadOnlyList to prove rejection precedes element access/copy.
 
-### 7.54 Bound FLD relay read pages by total operations, not only batch count (2026-11-09)
+### 7.58 Bound FLD relay read pages by total operations, not only batch count (2026-11-09)
 
 - [x C] `ReadRelayBatchPage` now caps the aggregate matching relay operations at `RemoteBatchCommit.MaximumOperationsPerBatch` (4,096), while preserving complete JournalSeq batch boundaries.
 - [x C] When the next whole journal batch would exceed the page operation budget, the cursor is deliberately left before that batch and the page returns immediately. The caller can resume from the returned cursor without splitting a JournalSeq or skipping data.
 - [x C] Nonmatching and already-acknowledged journal rows may still advance the scan cursor; only an included complete relay batch advances beyond its own JournalSeq.
 - [~ T] Add a test with multiple source batches whose aggregate exceeds 4,096 and prove the second page starts at the unconsumed batch, with no gap/duplicate and no split.
 
-### 7.55 CI diagnostics retained for the two-DLL migration (2026-11-09)
+### 7.59 CI diagnostics retained for the two-DLL migration (2026-11-09)
 
 - [x C] FLD CI now tees restore/build/test output into per-OS log files and uploads them even when a job fails. This addresses the current connector limitation where job-log retrieval returns BlobNotFound and lets the migration be debugged from artifacts without guessing.
 - [~ T] Wait for the new exact-head run and inspect the diagnostic artifacts; do not continue changing the project graph blind while all three OS jobs are red.
 
-### 7.56 Physical Database source consolidation — no linked-source shortcut (2026-11-09)
+### 7.60 Physical Database source consolidation — no linked-source shortcut (2026-11-09)
 
 - [x C] Replaced the linked-source scaffold with a physical move of all 40 Core/Engine/Manifest/Run/WAL source files into `src/Fld1.Database/{Core,Engine,Manifest,Run,Wal}/...`, preserving namespaces and internal folder structure.
 - [x C] Removed the five old component `.csproj` entry points; the solution and all tests/benchmarks already target `Fld1.Database` plus `Fld1.Storage`. No Core/Engine/Manifest/Run/WAL runtime DLLs are built from the solution.
@@ -1998,7 +1998,7 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ T] Exact-head restore/build/test remains red/unverified; validate project references, package output and all three OS CI jobs after this physical move.
 - [~ C] Finish public package layout and architecture-doc/API migration; confirm Storage-only consumers can load `Fld1.Storage.dll` without loading `Fld1.Database.dll`.
 
-### 7.57 Corrected extraction status: physical source move vs generic engine reuse (2026-11-09)
+### 7.61 Corrected extraction status: physical source move vs generic engine reuse (2026-11-09)
 
 - [x C] The prior linked-source scaffold was superseded by commit `d63a8c49a889c28838305ce15aa4ca5e0b189201`: all 40 source files were moved into `src/Fld1.Database`; five component project files were removed; the project now uses default compile discovery over physically owned files.
 - [x C] Tests/benchmarks and `Fld.Db.slnx` now target the two runtime projects. README and this roadmap have been corrected to describe physical ownership rather than linked sources.
