@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Optimize>true</Optimize>
+    <Deterministic>true</Deterministic>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <RootNamespace>Fld1</RootNamespace>
+    <AssemblyName>Fld1.Database</AssemblyName>
+    <Version>0.1.0-alpha</Version>
+    <Description>FLD Database overlay and engine. Core, Manifest, Run and WAL sources are linked into this single runtime assembly; generic byte storage is the separate Fld1.Storage assembly.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Fld1.Core/**/*.cs" Exclude="../Fld1.Core/bin/**;../Fld1.Core/obj/**" />
+    <Compile Include="../Fld1.Manifest/**/*.cs" Exclude="../Fld1.Manifest/bin/**;../Fld1.Manifest/obj/**" />
+    <Compile Include="../Fld1.Run/**/*.cs" Exclude="../Fld1.Run/bin/**;../Fld1.Run/obj/**" />
+    <Compile Include="../Fld1.Wal/**/*.cs" Exclude="../Fld1.Wal/bin/**;../Fld1.Wal/obj/**" />
+    <Compile Include="../Fld1.Engine/**/*.cs" Exclude="../Fld1.Engine/bin/**;../Fld1.Engine/obj/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Blake3.Managed" Version="1.10.0" />
+    <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
+    <ProjectReference Include="../Fld1.Storage/Fld1.Storage.csproj" />
+  </ItemGroup>
+</Project>
