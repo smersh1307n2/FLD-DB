@@ -15,6 +15,7 @@ public sealed class StorageDatabase : IDisposable
     private const int MaxKeyLength = 1024 * 1024;
     private readonly object _gate = new();
     private readonly Dictionary<StorageKey, byte[]> _values = new();
+    private SortedList<StorageKey, byte[]>? _snapshotIndex;
     private readonly WalManager _wal;
     private readonly string _directory;
     private readonly Action<StorageFaultPoint>? _faultInjector;
@@ -174,13 +175,13 @@ public sealed class StorageDatabase : IDisposable
         lock (_gate)
         {
             EnsureUsable();
-            // SortedList builds one compact sorted index from the live dictionary.
-            // Stored value arrays are immutable after publication: Commit copies
-            // caller-owned buffers before assigning them and later commits replace
-            // references rather than mutating arrays, so snapshot payload bytes can
-            // be shared safely instead of cloned.
-            var copy = new SortedList<StorageKey, byte[]>(_values, StorageKeyComparer.Instance);
-            return new StorageSnapshot(copy, _lastCommitSeq);
+            // Cache the immutable sorted index for this commit epoch. Repeated
+            // snapshots share it in O(1); a successful commit invalidates the cache.
+            // Stored value arrays are immutable after publication, so old snapshots
+            // safely retain their prior index while later commits replace live values.
+            _snapshotIndex ??= new SortedList<StorageKey, byte[]>(
+                _values, StorageKeyComparer.Instance);
+            return new StorageSnapshot(_snapshotIndex, _lastCommitSeq);
         }
     }
 
@@ -211,6 +212,7 @@ public sealed class StorageDatabase : IDisposable
                 }
 
                 _lastCommitSeq = commitSeq;
+                _snapshotIndex = null;
                 return commitSeq;
             }
             catch
