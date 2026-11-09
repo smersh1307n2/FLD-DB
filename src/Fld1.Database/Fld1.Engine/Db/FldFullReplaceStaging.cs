@@ -391,18 +391,7 @@ public sealed partial class FldDatabase
         return horizon.Count != 0 || GetOutboxHighWatermark() != GetOutboxWatermark();
     }
 
-    private ulong AllocateFullReplaceRunId()
-    {
-        string runsDirectory = Path.Combine(_dbDir, "runs");
-        while (true)
-        {
-            ulong candidate = _nextRunId++;
-            if (candidate == 0) continue;
-            if (!File.Exists(Path.Combine(runsDirectory, $"{candidate}.fld1")) &&
-                !_runBlobStore.ContainsBlob(RunBlobId(candidate)))
-                return candidate;
-        }
-    }
+    private ulong AllocateFullReplaceRunId() => AllocateRunId();
 
     private string FullReplaceStagePath(Guid generation)
         => Path.Combine(_dbDir, "full-replace-staging", $"ns_{_namespaceId}_{generation:N}.bin");
