@@ -2145,3 +2145,12 @@ Overall FLD integration contribution is estimated at **~75–80%**. Next C work:
 - [x C] The guide explicitly preserves dependency direction: FLD runtime has no BIN-SYNC dependency; the application host composes the two assemblies. It documents whole-JournalSeq projection, shared gate, all-author recovery, durable FLD ACK before RPM3 prune, and reference snapshot ownership.
 - [~ C] Neither repository currently contains the user's actual host executable. Therefore the guide is not a substitute for compiling the callback binding in that host; no third FLD runtime assembly is introduced.
 - [~ T] Host-level crash/reopen and concurrency tests remain required before the adapter or GC can be accepted.
+
+
+### 7.74 Reuse canonical relay-author index keys during discovery (2026-11-09)
+
+- [x C] `FldDatabase.ReadUnacknowledgedRelayAuthors` now orders the existing dictionary entries by their canonical hex keys instead of recomputing `Convert.ToHexString` for every author on every discovery call. This removes one temporary string allocation per author while preserving the exact ordinal byte-identity ordering and returned API shape.
+- [~ T] Validate deterministic ordering and returned author identities in the pending T-pass; this is a source-level allocation reduction, not a benchmark claim.
+- [~ O] Include startup/recovery author-discovery allocation and CPU in the representative multi-author measurement.
+
+Code commit: `bf72f0d8c4e82303612f079e3aefa790d6794451`. Exact-head CI remains unverified; no test result is inferred from this change.
