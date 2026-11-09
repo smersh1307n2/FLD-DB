@@ -1352,22 +1352,35 @@ public sealed class FldDatabase : IDisposable
 
             var result = new List<RelayJournalBatch>(Math.Min(limit, 256));
             ulong cursor = afterJournalSeq;
+            int operationCount = 0;
             while (result.Count < limit && cursor < highWatermark)
             {
                 var page = _applyJournal.ReadBatches(cursor, 128);
                 if (page.Count == 0) break;
+                bool operationLimitReached = false;
                 foreach (var item in page)
                 {
-                    cursor = item.JournalSeq;
                     if (_applyJournal.IsRelayAcknowledged(authorFilter, item.JournalSeq))
+                    {
+                        cursor = item.JournalSeq;
                         continue;
+                    }
                     var matching = item.Commit.RelayFields
                         .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
                         .Select(f => new RemoteFieldWrite(
                             f.RecordId, f.FieldId, f.Value, f.Wall, f.Logical,
                             f.AuthorNodeId, f.ChangeId, f.KeyEpoch, f.OpKind == 2))
                         .ToArray();
-                    if (matching.Length == 0) continue;
+                    if (matching.Length == 0)
+                    {
+                        cursor = item.JournalSeq;
+                        continue;
+                    }
+                    if (matching.Length > RemoteBatchCommit.MaximumOperationsPerBatch - operationCount)
+                    {
+                        operationLimitReached = true;
+                        break;
+                    }
 
                     var source = item.Commit;
                     var batchCopy = new RemoteBatchCommit(
@@ -1381,9 +1394,11 @@ public sealed class FldDatabase : IDisposable
                         CommitSeq = item.CommitSeq,
                         Batch = batchCopy
                     });
+                    operationCount += matching.Length;
+                    cursor = item.JournalSeq;
                     if (result.Count == limit) break;
                 }
-                if (page.Count < 128) break;
+                if (operationLimitReached || page.Count < 128) break;
             }
 
             return new RelayBatchPage
