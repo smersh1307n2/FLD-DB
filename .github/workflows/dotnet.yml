@@ -34,14 +34,17 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
+        shell: bash
         run: |
           mkdir -p ci-logs
           dotnet restore Fld.Db.slnx 2>&1 | tee ci-logs/restore.log
 
       - name: Build Release
+        shell: bash
         run: dotnet build Fld.Db.slnx --configuration Release --no-restore 2>&1 | tee ci-logs/build.log
 
       - name: Run tests
+        shell: bash
         run: dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
 
       - name: Upload diagnostic logs
