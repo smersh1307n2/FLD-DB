@@ -38,6 +38,7 @@ public sealed class FldProviderSnapshot : IDisposable
     private RunReader[]? _runs;
     private KeyValuePair<MemFieldKey, MemFieldValue>[]? _overlay;
     private Dictionary<MemFieldKey, MemFieldValue>? _overlayByKey;
+    private Dictionary<(ulong Low, ulong High), ushort[]>? _overlayFieldsByRecord;
     private byte[][]? _recordIds;
     private int _recordIndex;
     private int _nextIndex;
@@ -62,7 +63,21 @@ public sealed class FldProviderSnapshot : IDisposable
         _runs = runs;
         _overlay = overlay;
         _overlayByKey = new Dictionary<MemFieldKey, MemFieldValue>(overlay.Length);
-        foreach (var pair in overlay) _overlayByKey.Add(pair.Key, pair.Value);
+        var overlayFields = new Dictionary<(ulong Low, ulong High), List<ushort>>();
+        foreach (var pair in overlay)
+        {
+            _overlayByKey.Add(pair.Key, pair.Value);
+            var recordKey = (pair.Key.RecLo, pair.Key.RecHi);
+            if (!overlayFields.TryGetValue(recordKey, out List<ushort>? fields))
+                overlayFields.Add(recordKey, fields = new List<ushort>(4));
+            fields.Add(pair.Key.FieldId);
+        }
+        _overlayFieldsByRecord = new Dictionary<(ulong Low, ulong High), ushort[]>(overlayFields.Count);
+        foreach (var pair in overlayFields)
+        {
+            pair.Value.Sort();
+            _overlayFieldsByRecord.Add(pair.Key, pair.Value.ToArray());
+        }
         _recordIds = recordIds;
         _onDispose = onDispose;
     }
@@ -128,6 +143,7 @@ public sealed class FldProviderSnapshot : IDisposable
             _runs = null;
             _overlay = null;
             _overlayByKey = null;
+            _overlayFieldsByRecord = null;
             _recordIds = null;
             _currentRecordId = null;
             _currentFieldIds = null;
@@ -149,12 +165,12 @@ public sealed class FldProviderSnapshot : IDisposable
 
         byte[] recordId = _recordIds[_recordIndex++];
         var fields = new HashSet<ushort>();
-        foreach (var pair in _overlay!)
+        ulong low = BinaryPrimitives.ReadUInt64LittleEndian(recordId);
+        ulong high = BinaryPrimitives.ReadUInt64LittleEndian(recordId.AsSpan(8));
+        if (_overlayFieldsByRecord!.TryGetValue((low, high), out ushort[]? overlayFields))
         {
-            Span<byte> overlayRecordId = stackalloc byte[16];
-            pair.Key.WriteRecordId(overlayRecordId);
-            if (overlayRecordId.SequenceEqual(recordId))
-                fields.Add(pair.Key.FieldId);
+            foreach (ushort fieldId in overlayFields)
+                fields.Add(fieldId);
         }
         foreach (RunReader run in _runs!)
             run.ScanFieldIds(recordId, fields.Add);
