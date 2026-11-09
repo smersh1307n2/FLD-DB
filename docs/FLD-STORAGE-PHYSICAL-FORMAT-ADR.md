@@ -36,7 +36,7 @@ A Run is an opaque blob to Storage. Storage must never parse its FLD1 header, cl
 
 - Blob IDs are stable 128-bit opaque identifiers; FLD derives them deterministically from the root-global monotonic RunId (which is unique across namespaces in one FLD root). The Storage API accepts only the opaque ID and bytes.
 - Default page size is 1 MiB; page size is configurable and persisted per blob. Readers and interrupted-write resume always use the stored page geometry, independent of a later process's configured default. Each page and each Storage catalog write batch must stay below the generic WAL record limit.
-- A blob is invisible to readers until all pages are durably committed and a complete metadata record (length, page size/count, SHA-256) is atomically published.
+- A blob is invisible to readers until every page file is individually flushed, the page directory is flushed once after all page renames, and a complete metadata record (length, page size/count, SHA-256) is atomically published. The pending catalog row remains until the directory flush succeeds, so interrupted writes are resumable without a per-page directory-fsync cost.
 - Repeated Put with the same ID and identical content is idempotent. Reuse of an ID with different length/digest/page bytes fails closed.
 - An interrupted pending blob is resumable with the same ID/content; it is never returned by OpenRead until complete.
 - A reader owns a stable Storage catalog snapshot plus an in-process page-directory pin and validates page count, exact final-page length and whole-blob SHA-256 when streamed.
