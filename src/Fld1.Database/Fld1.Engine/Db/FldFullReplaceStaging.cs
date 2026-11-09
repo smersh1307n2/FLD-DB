@@ -189,15 +189,23 @@ public sealed partial class FldDatabase
             if (state.IsAborting) throw new InvalidOperationException("FULL_REPLACE generation is being aborted.");
             if (afterIndex > state.NextIndex) throw new ArgumentOutOfRangeException(nameof(afterIndex));
             var result = new List<FldProviderSnapshotEntry>(Math.Min(limit, state.NextIndex - afterIndex));
-            foreach (FullReplaceStageRun run in state.Runs)
+            int low = 0;
+            int high = state.Runs.Length;
+            while (low < high)
             {
-                int runEnd = checked(run.StartIndex + run.EntryCount);
-                if (runEnd <= afterIndex || run.StartIndex >= state.NextIndex) continue;
+                int middle = low + ((high - low) >> 1);
+                int runEnd = checked(state.Runs[middle].StartIndex + state.Runs[middle].EntryCount);
+                if (runEnd <= afterIndex) low = middle + 1;
+                else high = middle;
+            }
+            for (int runIndex = low; runIndex < state.Runs.Length && result.Count < limit; runIndex++)
+            {
+                FullReplaceStageRun run = state.Runs[runIndex];
+                if (run.StartIndex >= state.NextIndex) break;
                 IReadOnlyList<FldProviderSnapshotEntry> page = ReadFullReplaceRun(run);
                 int offset = Math.Max(0, afterIndex - run.StartIndex);
                 int count = Math.Min(page.Count - offset, limit - result.Count);
                 for (int i = 0; i < count; i++) result.Add(page[offset + i]);
-                if (result.Count == limit) break;
             }
             int next = checked(afterIndex + result.Count);
             return new FldProviderSnapshotPage(next, next < state.NextIndex, result);
