@@ -9,6 +9,10 @@ namespace Fld1.Storage.Engine;
 /// </summary>
 public static class StorageDirectorySync
 {
+    private static readonly object DirectoryGate = new();
+    // Retain entries whose parent fsync failed so a later retry in this process
+    // cannot mistake an existing-but-not-yet-durable directory for a durable one.
+    private static readonly HashSet<string> PendingDirectoryEntries = new(StringComparer.Ordinal);
     private const int LinuxODirectory = 0x10000;
     private const int MacOsODirectory = 0x00100000;
 
@@ -34,24 +38,31 @@ public static class StorageDirectorySync
     public static void CreateDirectoryDurable(string path)
     {
         string fullPath = Path.GetFullPath(path);
-        var missing = new Stack<string>();
-        string? current = fullPath;
-        while (!string.IsNullOrEmpty(current) && !Directory.Exists(current))
+        lock (DirectoryGate)
         {
-            missing.Push(current);
-            current = Path.GetDirectoryName(current);
-        }
+            var missing = new Stack<string>();
+            string? current = fullPath;
+            while (!string.IsNullOrEmpty(current) && !Directory.Exists(current))
+            {
+                missing.Push(current);
+                current = Path.GetDirectoryName(current);
+            }
 
-        Directory.CreateDirectory(fullPath);
+            foreach (string created in missing)
+                PendingDirectoryEntries.Add(created);
+            Directory.CreateDirectory(fullPath);
 
-        // A mkdir changes the parent directory entry. Flush each parent from
-        // the shallowest newly-created directory to the deepest one.
-        while (missing.Count != 0)
-        {
-            string created = missing.Pop();
-            string? parent = Path.GetDirectoryName(created);
-            if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
+            // Flush parent entries shallowest-first. If any fsync fails, keep
+            // that entry pending so the next call retries it even though the
+            // directory itself now exists in this process.
+            foreach (string created in PendingDirectoryEntries.OrderBy(value => value.Length).ToArray())
+            {
+                string? parent = Path.GetDirectoryName(created);
+                if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
+                    throw new DirectoryNotFoundException($"Parent directory for durable entry '{created}' is missing.");
                 Flush(parent);
+                PendingDirectoryEntries.Remove(created);
+            }
         }
     }
 
