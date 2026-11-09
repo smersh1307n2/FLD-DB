@@ -1853,3 +1853,12 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 - [x] Reworked FLD draft-horizon, ChangeId and RecordId scans to consume borrowed Outbox views in bounded 512-entry pages. Large field values are not copied merely to inspect IDs/HLC; the cursor advances only through visited entries.
 - [x] ApplyJournal reference scans remain bounded in 256-record pages. Any retained receipt/relay payload remains a live reference; any unsealed WAL prefix blocks ChangeId/record/receipt reclamation conservatively.
 - [~] Benchmark allocations and CPU on large Outbox values and 1M-entry histories in the T/O pass. Exact-head CI is pending for this commit.
+
+
+### 7.43 Indexed immutable reference snapshot for host adapters (2026-11-09)
+
+- [x] Added \`FldDatabase.OpenReferenceSnapshot()\` and immutable \`FldReferenceSnapshot\`. One pass indexes ChangeIds, RecordIds and receipt identities from dirty local state, unacknowledged Outbox and retained ApplyJournal fields/relay payloads.
+- [x] The snapshot also carries the unpublished draft horizon (dirty edits + pending Outbox suffix). It uses borrowed Outbox views and bounded 512-entry pages; ApplyJournal is read in bounded 256-record pages.
+- [x] Any unsealed WAL prefix is a conservative global live-reference result for receipt/ChangeId/RecordId queries until checkpoint/seal. A malformed or faulted source throws; no query can accidentally authorize deletion.
+- [x] Restored \`ReadUnpublishedLocalDraftHorizon()\` as a narrow scan that does not unnecessarily build the full ApplyJournal reference index.
+- [~] The BIN-SYNC adapter should open one FLD reference snapshot per \`IApplicationGcReferenceScan\` and reuse it across all candidates. Allocation/throughput benchmarks and exact-head CI remain open.
