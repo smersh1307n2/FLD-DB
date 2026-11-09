@@ -2292,6 +2292,7 @@ public sealed partial class FldDatabase : IDisposable
                 }
                 catch { /* best-effort on dispose */ }
             }
+            DisposeProviderSnapshotsUnderLock();
             _disposed = true;
             try
             {
