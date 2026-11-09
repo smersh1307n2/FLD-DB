@@ -2097,3 +2097,9 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] `StorageRelayPublicationGate.ApplyAndPublishAllAsync` and `RecoverAndPublishAllAsync` now discover the author union after durable APPLY / during startup, drain every page for every author to the source high watermark, and only then run the namespace-wide sender callback. A single-author scan can no longer accidentally authorize a sender that chooses another author stream.
 - [~ T] Test author discovery after reopen, map-only author recovery after FLD ACK crash, multiple authors with >4,096 operations, empty author pages, and no sender callback until every author is fully mapped.
 - [~ C] Host must supply `readRelayAuthors` as `fld.ReadUnacknowledgedRelayAuthors()` ∪ `map.ReadAuthors(namespaceId)`, convert 16-byte identities canonically, and route all sender paths through the shared gate.
+
+### 7.75 Cache pending relay-author discovery without a durable duplicate index (2026-11-09)
+
+- [x C] `FldDatabase.ReadUnacknowledgedRelayAuthors()` now builds its author→maximum-unacknowledged-JournalSeq set once from ApplyJournal, incrementally adds authors after each durable remote APPLY, and removes an author when a durable ACK covers its last unacknowledged JournalSeq.
+- [x C] The cache is process-local/rebuildable; it adds no persistent author-index rows and is reconstructed after reopen from the existing ApplyJournal/ACK sidecar. This avoids rescanning the full journal on every remote batch.
+- [~ T] Test reopen rebuild, apply append, partial ACK retention, final ACK removal, ACK then new batch re-add, and unsealed-WAL recovery before author enumeration.
