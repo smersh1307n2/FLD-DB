@@ -1868,3 +1868,4 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 
 - [x] Draft horizon now remains non-zero while \`PendingFlushedCommitSeq > LastSealedCommitSeq\`, even when all Outbox entries appear ACKed. A crash/reopen before checkpoint may reconstruct compacted Outbox rows from WAL; those rows must not be reinterpreted under a rejoined author epoch.
 - [x] The reference snapshot also returns live for every receipt/ChangeId/RecordId query while WAL is unsealed. The host must checkpoint/seal the source WAL before a zero-draft final-author report or destructive GC proof can proceed.
+- [x] The unsealed-WAL barrier change passed exact-head CI on Ubuntu, Windows and macOS at `0db64f8d8f78f714fb197e0f375a536dcdec47d6`.
