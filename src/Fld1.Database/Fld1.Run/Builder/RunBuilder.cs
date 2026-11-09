@@ -88,6 +88,8 @@ public sealed class RunBuilder
 
         // External value refs collected in (RecordId, FieldId) order during cluster build
         var externalEntries = new List<ExternalEntry>();
+        // Provenance rows follow the same canonical (RecordId, FieldId) order.
+        var provenanceEntries = new List<FieldWrite>();
 
         var clusterBlobs = new List<byte[]>();
         var clusterRecordIds = new List<byte[]>();
@@ -100,6 +102,9 @@ public sealed class RunBuilder
         foreach (var group in byRecord)
         {
             var fields = group.OrderBy(f => f.FieldId).ToList();
+            foreach (FieldWrite field in fields)
+                if (field.ChangeId.Length == 16)
+                    provenanceEntries.Add(field);
             totalFields += (uint)fields.Count;
             var mode = ComputeMode(fields, authorToIntern);
 
@@ -266,14 +271,23 @@ public sealed class RunBuilder
         }
 
         ulong footerOff = valuesOff + valuesLen;
-        // When no external: valuesOff == footerOff already
+        // When no external: valuesOff == footerOff already.
         if (externalEntries.Count == 0)
         {
             footerOff = valuesOff;
             valuesOff = footerOff;
         }
 
-        int fileSize = (int)footerOff + RunConstants.FooterSize;
+        ulong provenanceOff = footerOff;
+        ulong provenanceLen = 0;
+        if (provenanceEntries.Count != 0)
+        {
+            provenanceOff = (footerOff + 7) & ~7UL;
+            provenanceLen = checked((ulong)provenanceEntries.Count * RunConstants.ProvenanceEntrySize);
+            footerOff = checked(provenanceOff + provenanceLen);
+        }
+
+        int fileSize = checked((int)footerOff + RunConstants.FooterSize);
         var file = new byte[fileSize];
         var fs = file.AsSpan();
 
@@ -330,6 +344,21 @@ public sealed class RunBuilder
             // remaining pad already zero
         }
 
+        if (provenanceEntries.Count != 0)
+        {
+            int pos = checked((int)provenanceOff);
+            foreach (FieldWrite entry in provenanceEntries)
+            {
+                entry.RecordId.CopyTo(fs.Slice(pos, 16));
+                BinaryPrimitives.WriteUInt16LittleEndian(fs.Slice(pos + 16, 2), entry.FieldId);
+                // bytes 18..19 are reserved and remain zero.
+                entry.ChangeId.CopyTo(fs.Slice(pos + 20, 16));
+                BinaryPrimitives.WriteUInt32LittleEndian(fs.Slice(pos + 36, 4), entry.OriginAuthorEpoch);
+                BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(pos + 40, 8), entry.OriginSequence);
+                pos += RunConstants.ProvenanceEntrySize;
+            }
+        }
+
         ushort runFlags = 0;
         if (anyExternal) runFlags |= (ushort)RunFlags.HasValues;
         if (anyHlcOverride) runFlags |= (ushort)RunFlags.HasHlcOverrides;
@@ -370,7 +399,14 @@ public sealed class RunBuilder
             aliveFields: aliveFields,
             contributorCount: aliveFields,
             ghostCount: 0,
-            digest);
+            digest,
+            binaryVersion: provenanceEntries.Count == 0
+                ? RunConstants.BinaryVersion
+                : RunConstants.ProvenanceBinaryVersion,
+            provenanceOff,
+            provenanceLen,
+            provenanceCount: (uint)provenanceEntries.Count,
+            provenanceEntrySize: provenanceEntries.Count == 0 ? 0u : RunConstants.ProvenanceEntrySize);
 
         ulong xh = Hashes.XxHash64(fs.Slice(0, (int)footerOff));
         BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)footerOff, 8), xh);
