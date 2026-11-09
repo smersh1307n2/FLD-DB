@@ -1858,7 +1858,13 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 ### 7.43 Indexed immutable reference snapshot for host adapters (2026-11-09)
 
 - [x] Added \`FldDatabase.OpenReferenceSnapshot()\` and immutable \`FldReferenceSnapshot\`. One pass indexes ChangeIds, RecordIds and receipt identities from dirty local state, unacknowledged Outbox and retained ApplyJournal fields/relay payloads.
-- [x] The snapshot also carries the unpublished draft horizon (dirty edits + pending Outbox suffix). It uses borrowed Outbox views and bounded 512-entry pages; ApplyJournal is read in bounded 256-record pages.
+- [x] The snapshot also carries the unpublished draft horizon (dirty edits + pending Outbox suffix). If an unsealed WAL prefix remains, it forces a non-zero conservative horizon because recovery may reconstruct acknowledged/compacted Outbox rows after restart. The scan uses borrowed Outbox views and bounded 512-entry pages; ApplyJournal is read in bounded 256-record pages.
 - [x] Any unsealed WAL prefix is a conservative global live-reference result for receipt/ChangeId/RecordId queries until checkpoint/seal. A malformed or faulted source throws; no query can accidentally authorize deletion.
 - [x] Restored \`ReadUnpublishedLocalDraftHorizon()\` as a narrow scan that does not unnecessarily build the full ApplyJournal reference index.
 - [~] The BIN-SYNC adapter should open one FLD reference snapshot per \`IApplicationGcReferenceScan\` and reuse it across all candidates. Allocation/throughput benchmarks and exact-head CI remain open.
+
+
+### 7.44 Unsealed WAL blocks final-author closure even after Outbox ACK (2026-11-09)
+
+- [x] Draft horizon now remains non-zero while \`PendingFlushedCommitSeq > LastSealedCommitSeq\`, even when all Outbox entries appear ACKed. A crash/reopen before checkpoint may reconstruct compacted Outbox rows from WAL; those rows must not be reinterpreted under a rejoined author epoch.
+- [x] The reference snapshot also returns live for every receipt/ChangeId/RecordId query while WAL is unsealed. The host must checkpoint/seal the source WAL before a zero-draft final-author report or destructive GC proof can proceed.
