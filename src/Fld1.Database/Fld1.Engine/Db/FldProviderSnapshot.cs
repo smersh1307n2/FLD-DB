@@ -27,9 +27,9 @@ public sealed record FldProviderSnapshotPage(
 
 /// <summary>
 /// Immutable, ordered FLD current-state view for BIN-SYNC provider snapshots.
-/// The snapshot retains immutable Run buffers and a point-in-time overlay copy;
-/// only the compact RecordId index is materialized eagerly. Field payloads are
-/// resolved and copied only for the requested page.
+/// The snapshot retains immutable Run buffers referenced by a durable generation
+/// manifest plus a compact snapshot Overlay Run. Only the RecordId index is
+/// materialized eagerly; field payloads are resolved and copied for requested pages.
 /// </summary>
 public sealed class FldProviderSnapshot : IDisposable
 {
@@ -80,7 +80,7 @@ public sealed class FldProviderSnapshot : IDisposable
         _onDispose = onDispose;
     }
 
-    /// <summary>Unique identity of this in-process immutable snapshot generation.</summary>
+    /// <summary>Durable identity of this immutable snapshot generation.</summary>
     public Guid Generation { get; }
 
     /// <summary>FLD local Outbox high watermark captured with the state generation.</summary>
@@ -305,9 +305,9 @@ public sealed partial class FldDatabase
     private readonly Dictionary<Guid, FldProviderSnapshot> _providerSnapshots = new();
 
     /// <summary>
-    /// Opens a stable, ordered snapshot over the current FLD generation. Immutable
-    /// Run buffers are retained by the returned handle; overlay values are captured
-    /// by reference because MemFieldValue instances are immutable after publication.
+    /// Opens a stable, ordered snapshot over the current FLD generation. The durable
+    /// manifest pins source Run IDs and stores the current overlay as a separate Run,
+    /// allowing the same generation to be restored after sender process restart.
     /// </summary>
     public FldProviderSnapshot OpenProviderSnapshot()
         => OpenProviderSnapshotPersisted();
