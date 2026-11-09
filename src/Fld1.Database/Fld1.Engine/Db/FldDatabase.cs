@@ -1271,6 +1271,8 @@ public sealed class FldDatabase : IDisposable
                     Logical = write.Logical,
                     AuthorNodeId = write.AuthorNodeId,
                     ChangeId = write.ChangeId,
+                    OriginAuthorEpoch = write.OriginAuthorEpoch,
+                    OriginSequence = write.OriginSequence,
                     Value = write.IsTombstone ? Array.Empty<byte>() : write.Value
                 });
             }
