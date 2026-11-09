@@ -2054,3 +2054,10 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ C] Host composition remains required: keep every other sender disabled until this method succeeds; provide the real FLD guard/read/high-watermark/ACK callbacks; and use one publication gate instance across remote apply, sends and ACK.
 - [~ T] Startup regression/replacement and crash/replay tests remain open. BIN-SYNC code after the last tested baseline `4382c49bffe1608ebabc4a483771b83242cbc81d` has not yet passed exact-head CI.
 - [~ C] Generic Storage backend reuse and FLD physical-format/public-package audit remain open independently of the relay adapter.
+
+### 7.69 Idempotent retry of signed frontier transport (2026-11-09)
+
+- [x C] BIN-SYNC now exposes `SendAcceptedAppliedOriginFrontierAsync`: after a transport failure, the host can resend the latest durable local OFR2 report without minting a new report sequence or changing signed history.
+- [x C] The method re-verifies the persisted report against the accepted roster and checks that the supplied member seed reproduces its stored signature before the session sends it.
+- [~ C] Host scheduler should use the accepted-report resend path for retries; it must not call `PublishAndSendAppliedOriginFrontierAsync` merely to retry a failed send, because that intentionally creates a new report sequence.
+- [~ T] Lost-send/retry, wrong-key, stale-roster and member-epoch rollover cases remain T-pass coverage.
