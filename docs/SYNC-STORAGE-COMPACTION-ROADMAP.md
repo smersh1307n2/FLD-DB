@@ -1869,3 +1869,15 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 - [x] Draft horizon now remains non-zero while \`PendingFlushedCommitSeq > LastSealedCommitSeq\`, even when all Outbox entries appear ACKed. A crash/reopen before checkpoint may reconstruct compacted Outbox rows from WAL; those rows must not be reinterpreted under a rejoined author epoch.
 - [x] The reference snapshot also returns live for every receipt/ChangeId/RecordId query while WAL is unsealed. The host must checkpoint/seal the source WAL before a zero-draft final-author report or destructive GC proof can proceed.
 - [x] The unsealed-WAL barrier change passed exact-head CI on Ubuntu, Windows and macOS at `0db64f8d8f78f714fb197e0f375a536dcdec47d6`.
+
+
+### 7.45 BIN-SYNC durable provenance-map primitive (2026-11-09)
+
+BIN-SYNC `feature/fld-external-storage` now contains `BinSync.Storage.StorageRelayProvenanceMap`, a neutral Storage-backed primitive for the later synchronized-FLD adapter:
+
+- Per-(scope, local replica, namespace, original author) durable `JournalSeq → ChangeId → OutboxSeq` mapping and scan/ACK cursor.
+- Atomic Storage write batch for mapping rows + scanned cursor + RPM2 mapping-set checksum; restart recomputes the SHA-256/XOR checksum over bounded 1,024-row pages and fails closed on mismatch.
+- OutboxSeq-ordered keys, lower-bound O(log N) safe-ACK translation, same-JournalSeq group retention, and no payload/OriginSequence/per-peer ACK duplication.
+- Durable prune is explicitly after FLD `AcknowledgeRelayBatches` succeeds; the public sample demonstrates restart and partial JournalSeq-group ACK boundaries.
+
+This closes only the reusable BIN-SYNC mapping-store primitive. It does **not** implement the FLD synchronized-database adapter, outbound publication gate, ChangeId resolver call, FLD commit-guard composition or concrete `IApplicationGcReferenceScanner`. The sequencing in §7.20 remains controlling: do not add a direct Node↔FldDatabase bridge or integration NuGet project until the neutral semantic/Data Provider boundary, BIN-SYNC persistence refactor and approved two-public-DLL Storage/Database extraction are complete. No FLD project dependency or public assembly boundary is changed by this primitive.
