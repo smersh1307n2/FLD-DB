@@ -454,12 +454,6 @@ public sealed partial class FldDatabase
                     field.IsTombstone, field.ChangeId.ToArray(), field.OriginAuthorEpoch,
                     field.OriginSequence, false));
             });
-            recordEntries.Sort(static (left, right) =>
-            {
-                if (left.IsRecordTombstone != right.IsRecordTombstone)
-                    return left.IsRecordTombstone ? -1 : 1;
-                return left.FieldId.CompareTo(right.FieldId);
-            });
             result.AddRange(recordEntries);
         }
         if (result.Count != run.EntryCount)
