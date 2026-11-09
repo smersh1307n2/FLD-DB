@@ -32,6 +32,14 @@ public static class IdentityStampCodec
                 fieldId);
     }
 
+    private readonly record struct ChangeKey(ulong Lo, ulong Hi)
+    {
+        public static ChangeKey From(ReadOnlySpan<byte> changeId)
+            => new(
+                BinaryPrimitives.ReadUInt64LittleEndian(changeId),
+                BinaryPrimitives.ReadUInt64LittleEndian(changeId.Slice(8)));
+    }
+
     public static byte[] Encode(IReadOnlyList<WalIdentityStamp> stamps)
     {
         ArgumentNullException.ThrowIfNull(stamps);
@@ -43,12 +51,15 @@ public static class IdentityStampCodec
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), checked((uint)stamps.Count));
 
         var seen = new HashSet<FieldKey>();
+        var seenChangeIds = new HashSet<ChangeKey>();
         int offset = HeaderSize;
         foreach (WalIdentityStamp stamp in stamps)
         {
             Validate(stamp);
             if (!seen.Add(FieldKey.From(stamp.RecordId, stamp.FieldId)))
                 throw new ArgumentException("Identity-stamp batch contains a duplicate field key.", nameof(stamps));
+            if (!seenChangeIds.Add(ChangeKey.From(stamp.ChangeId)))
+                throw new ArgumentException("Identity-stamp batch contains a duplicate ChangeId.", nameof(stamps));
 
             stamp.RecordId.CopyTo(payload.AsSpan(offset, 16));
             BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(offset + 16, 2), stamp.FieldId);
@@ -78,6 +89,7 @@ public static class IdentityStampCodec
 
         var stamps = new WalIdentityStamp[(int)count];
         var seen = new HashSet<FieldKey>();
+        var seenChangeIds = new HashSet<ChangeKey>();
         int offset = HeaderSize;
         for (int i = 0; i < stamps.Length; i++)
         {
@@ -95,6 +107,8 @@ public static class IdentityStampCodec
             ValidateDecoded(stamp);
             if (!seen.Add(FieldKey.From(stamp.RecordId, stamp.FieldId)))
                 throw new InvalidDataException("Identity-stamp payload contains a duplicate field key.");
+            if (!seenChangeIds.Add(ChangeKey.From(stamp.ChangeId)))
+                throw new InvalidDataException("Identity-stamp payload contains a duplicate ChangeId.");
             stamps[i] = stamp;
             offset += EntrySize;
         }
