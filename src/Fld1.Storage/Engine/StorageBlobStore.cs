@@ -102,6 +102,9 @@ public sealed class StorageBlobStore
                     Path.Combine(directory, PageFileName(pageIndex)),
                     content.Span.Slice(offset, length));
             }
+            // Each page file is flushed individually; one directory fsync publishes
+            // the complete pending generation before its catalog completion marker.
+            StorageDirectorySync.Flush(directory);
 
             metadata = metadata with { IsComplete = true };
             ExecuteBatch(batch =>
@@ -406,8 +409,6 @@ public sealed class StorageBlobStore
 
     private static void WritePageAtomically(string path, ReadOnlySpan<byte> page)
     {
-        string directory = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(directory);
         if (File.Exists(path))
         {
             if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(page))
@@ -423,7 +424,6 @@ public sealed class StorageBlobStore
             stream.Flush(flushToDisk: true);
         }
         File.Move(temporary, path, overwrite: true);
-        StorageDirectorySync.Flush(directory);
     }
 
     private sealed class SharedState
