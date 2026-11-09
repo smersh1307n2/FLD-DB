@@ -122,7 +122,7 @@ public sealed class StorageBlobStore
         ValidateBlobId(blobId);
         using StorageSnapshot snapshot = _database.OpenSnapshot();
         if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes)) return false;
-        StorageBlobMetadata metadata = DecodeMetadata(bytes!);
+        _ = DecodeMetadata(bytes!);
         return true;
     }
 
