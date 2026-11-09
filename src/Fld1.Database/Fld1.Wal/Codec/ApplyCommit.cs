@@ -30,7 +30,7 @@ public sealed class WalApplyCommit
 
 public static class ApplyCommitCodec
 {
-    private const uint BodyVersion = 3;
+    private const uint BodyVersion = 4;
     private const int MaxProtocolStateDelta = 4 * 1024 * 1024;
 
     public static byte[] Encode(WalApplyCommit commit)
@@ -115,8 +115,8 @@ public static class ApplyCommitCodec
         List<WalFieldMutation> relayFields;
         if (bodyVersion == 2)
         {
-            fields = ReadFields(payload, ref pos);
-            relayFields = ReadFields(payload, ref pos);
+            fields = ReadFields(payload, ref pos, includeOrigin: false);
+            relayFields = ReadFields(payload, ref pos, includeOrigin: false);
             _ = BuildRelayIndices(fields, relayFields);
         }
         else
@@ -125,7 +125,7 @@ public static class ApplyCommitCodec
             if ((flags & ~1) != 0)
                 throw new InvalidDataException("Unknown APPLY_COMMIT flags.");
             relayOnly = (flags & 1) != 0;
-            fields = ReadFields(payload, ref pos);
+            fields = ReadFields(payload, ref pos, includeOrigin: bodyVersion >= 4);
             EnsureUniqueChangeIds(fields);
             if (relayOnly)
             {
@@ -184,6 +184,8 @@ public static class ApplyCommitCodec
             ValidateId(field.RecordId, nameof(field.RecordId));
             ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
             ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
+            if ((field.OriginAuthorEpoch == 0) != (field.OriginSequence == 0))
+                throw new InvalidDataException("APPLY_COMMIT origin epoch/sequence must be both zero or both nonzero.");
             if (field.OpKind is not (1 or 2) || (field.OpKind == 2 && field.Value.Length != 0))
                 throw new InvalidDataException("Invalid APPLY_COMMIT operation.");
         }
@@ -265,6 +267,8 @@ public static class ApplyCommitCodec
            left.RecordId.AsSpan().SequenceEqual(right.RecordId) &&
            left.AuthorNodeId.AsSpan().SequenceEqual(right.AuthorNodeId) &&
            left.ChangeId.AsSpan().SequenceEqual(right.ChangeId) &&
+           left.OriginAuthorEpoch == right.OriginAuthorEpoch &&
+           left.OriginSequence == right.OriginSequence &&
            left.Value.AsSpan().SequenceEqual(right.Value);
 
     private static void WriteVarUInt32(Stream stream, uint value)
@@ -304,6 +308,8 @@ public static class ApplyCommitCodec
             ValidateId(field.RecordId, nameof(field.RecordId));
             ValidateId(field.AuthorNodeId, nameof(field.AuthorNodeId), nonzero: true);
             ValidateId(field.ChangeId, nameof(field.ChangeId), nonzero: true);
+            if ((field.OriginAuthorEpoch == 0) != (field.OriginSequence == 0))
+                throw new ArgumentException("OriginAuthorEpoch and OriginSequence must be both zero or both nonzero.", nameof(field));
             if (field.OpKind is not (1 or 2))
                 throw new ArgumentOutOfRangeException(nameof(field.OpKind));
             if (field.Value.Length > WalConstants.MaxValLen)
@@ -318,6 +324,8 @@ public static class ApplyCommitCodec
             WriteU32(stream, field.Logical);
             stream.Write(field.AuthorNodeId);
             stream.Write(field.ChangeId);
+            WriteU32(stream, field.OriginAuthorEpoch);
+            WriteU64(stream, field.OriginSequence);
             WriteU32(stream, (uint)field.Value.Length);
             stream.Write(field.Value);
             if (stream.Length > WalConstants.MaxPayloadLen)
@@ -325,7 +333,7 @@ public static class ApplyCommitCodec
         }
     }
 
-    private static List<WalFieldMutation> ReadFields(ReadOnlySpan<byte> payload, ref int pos)
+    private static List<WalFieldMutation> ReadFields(ReadOnlySpan<byte> payload, ref int pos, bool includeOrigin)
     {
         uint count = ReadU32(payload, ref pos);
         if (count > WalConstants.MaxMutations)
@@ -341,6 +349,10 @@ public static class ApplyCommitCodec
             uint logical = ReadU32(payload, ref pos);
             var author = ReadBytes(payload, ref pos, 16);
             var changeId = ReadBytes(payload, ref pos, 16);
+            uint originAuthorEpoch = includeOrigin ? ReadU32(payload, ref pos) : 0;
+            ulong originSequence = includeOrigin ? ReadU64(payload, ref pos) : 0;
+            if ((originAuthorEpoch == 0) != (originSequence == 0))
+                throw new InvalidDataException("APPLY_COMMIT origin epoch/sequence must be both zero or both nonzero.");
             uint valueLength = ReadU32(payload, ref pos);
             if (valueLength > WalConstants.MaxValLen)
                 throw new InvalidDataException("APPLY_COMMIT field value exceeds limit.");
@@ -349,7 +361,9 @@ public static class ApplyCommitCodec
             {
                 RecordId = recordId, FieldId = fieldId, OpKind = opKind,
                 KeyEpoch = keyEpoch, Wall = wall, Logical = logical,
-                AuthorNodeId = author, ChangeId = changeId, Value = value
+                AuthorNodeId = author, ChangeId = changeId,
+                OriginAuthorEpoch = originAuthorEpoch, OriginSequence = originSequence,
+                Value = value
             });
         }
         return fields;
