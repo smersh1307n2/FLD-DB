@@ -2132,3 +2132,9 @@ Estimated completion (engineering assessment, not CI pass percentage):
 - Three-OS build/test acceptance: **~30%**; the latest workflows fail before runner steps (`steps=null`, no artifacts/logs), so no source-level conclusion can be drawn.
 
 Overall FLD integration contribution is estimated at **~75–80%**. Next C work: finish the storage/database contract audit and host binding; next T work must obtain a runner-backed three-OS execution and repair actual compiler/test failures if any. Preserve FLD1 persisted-format compatibility. No physical GC authorization until the composed host scan proves receipts, ChangeId and tombstone horizons.
+
+### 7.79 Audit correction: project reference is not generic backend reuse (2026-11-09)
+
+- [x C] Inspected the consolidated `FldDatabase` public path: it still owns `_overlay`, `_dirty`, `WalManager`, `OutboxLog`, `ApplyJournal`, `AtomicManifestStore`, and Run readers/builders directly. `FldDatabase.cs` does not consume `StorageDatabase` APIs.
+- [x C] `Fld1.Database.csproj` references `Fld1.Storage`, but the reference alone does not prove that the database is backed by the generic Storage engine. The two-project assembly split is real; backend reuse/overlay composition is not yet complete.
+- [~ C] Do not replace FLD WAL/Run/Manifest persistence with `StorageDatabase` without a separate format/recovery ADR and compatibility proof. Preserve FLD1 on-disk bytes, WAL recovery semantics and compaction behavior. The remaining task is to define and implement the intended reusable storage contract without duplicating WAL/Outbox metadata or introducing a third FLD runtime assembly.
