@@ -1906,3 +1906,16 @@ This means the semantic operations and reference-index implementation exist in t
 The BIN-SYNC provenance map was tightened after byte-cost review. RPM3 persists only OutboxSeq in the ordered key and JournalSeq in the value; it does not copy the 16-byte ChangeId already retained by the global BIN-SYNC ChangeId ledger. The synchronized-FLD adapter must still call `Node.TryResolveOutboxSequences` for every (author, ChangeId) before appending the resolved sequence pair. Strictly increasing OutboxSeq plus the global ledger preserve identity uniqueness across restart without a second ChangeId index in the map.
 
 The compact map row is 84 bytes (76-byte key + 8-byte value), down from 100 bytes. The 60-byte RPM3 cursor retains the atomic SHA-256/XOR mapping-set checksum. This is a storage/metadata reduction only; the §7.20 two-DLL and adapter sequencing remains unchanged.
+
+### 7.49 BIN-SYNC coordinator-side RPM3 ChangeId resolver (2026-11-09)
+
+BIN-SYNC `feature/fld-external-storage` now exposes `StorageSyncCoordinator.AppendRelayProvenancePage` as the first concrete resolver/append primitive for the later synchronized-FLD adapter:
+
+- It accepts only transient `(JournalSeq, ChangeId)` source identities and resolves them through `Node.TryResolveOutboxSequences` while the composed coordinator→Node→FLD commit guard is held.
+- It validates the RPM3 map's scope, local-replica and shared `StorageDatabase` binding; rejects zero/decreasing/out-of-cursor JournalSeq values and pages larger than 4,096 operations before resolver allocations.
+- It writes only `(JournalSeq, OutboxSeq)` rows and the scanned JournalSeq cursor atomically. ChangeId remains solely in the global BIN-SYNC identity ledger.
+- Missing/compacted Node Outbox identity returns false without advancing the RPM3 cursor. Empty pages can advance the source scan cursor without allocating resolver arrays.
+
+This is **not** the finished synchronized-FLD adapter. The FLD Database still needs to be extracted into the approved `Fld1.Database.dll` boundary; the host must then read whole `RelayJournalBatch` pages under `FldDatabase.AcquireCommitGuard`, call the coordinator helper before send, translate downstream safe Outbox ACK through RPM3, durably call `AcknowledgeRelayBatches`, and only then prune RPM3 mappings. The concrete `IApplicationGcReferenceScanner` wrapper must similarly hold the FLD guard while using one `FldReferenceSnapshot`.
+
+The current `RelayProvenanceMap` BIN-SYNC sample exercises the low-level RPM3 storage codec with already-resolved sequence pairs. It is not an end-to-end FLD integration sample. No direct Engine→BIN-SYNC dependency or third runtime DLL is permitted.
