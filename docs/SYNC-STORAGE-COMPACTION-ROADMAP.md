@@ -2089,3 +2089,11 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] Created `backup/cpass-2026-11-09-relay-gate-metadata-mode` at `6af05cd007baa3bd246450b986598e54fd9eaa57`, preserving the FLD branch and its cross-repository relay gate contract.
 - [x C] Retained `backup/post-two-dll-consolidation-2026-11-09` and `backup/cpass-2026-11-09-0915`.
 - [~ T] This backup captures the current red/unverified CI state; it is a recovery point, not a green baseline.
+
+### 7.74 Enumerate every pending relay author for namespace-wide startup recovery (2026-11-09)
+
+- [x C] FLD now exposes `FldDatabase.ReadUnacknowledgedRelayAuthors()`. It scans the ApplyJournal under the FLD commit lock, returns the distinct remote author identities with at least one unacknowledged RelayFields operation, and persists no duplicate author index.
+- [x C] BIN-SYNC now exposes `StorageRelayProvenanceMap.ReadAuthors(namespaceId)` to enumerate durable RPM3 cursor authors, including the FLD-ACK-before-map-prune crash window.
+- [x C] `StorageRelayPublicationGate.ApplyAndPublishAllAsync` and `RecoverAndPublishAllAsync` now discover the author union after durable APPLY / during startup, drain every page for every author to the source high watermark, and only then run the namespace-wide sender callback. A single-author scan can no longer accidentally authorize a sender that chooses another author stream.
+- [~ T] Test author discovery after reopen, map-only author recovery after FLD ACK crash, multiple authors with >4,096 operations, empty author pages, and no sender callback until every author is fully mapped.
+- [~ C] Host must supply `readRelayAuthors` as `fld.ReadUnacknowledgedRelayAuthors()` ∪ `map.ReadAuthors(namespaceId)`, convert 16-byte identities canonically, and route all sender paths through the shared gate.
