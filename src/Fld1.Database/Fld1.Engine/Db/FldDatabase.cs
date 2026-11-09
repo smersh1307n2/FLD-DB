@@ -26,7 +26,9 @@ public readonly record struct FldDraftHorizon(ulong Count, ulong MaxHlcWall, uin
 
 public sealed class FldDatabase : IDisposable
 {
+    private const ulong StoragePartitionId = 0;
     private readonly string _dbDir;
+    private readonly Fld1.Storage.Engine.StoragePartitionLease _storageLease;
     private readonly uint _namespaceId;
     private readonly byte[] _localAuthor;
     private readonly HlcClock _clock;
@@ -66,6 +68,7 @@ public sealed class FldDatabase : IDisposable
         WalManager wal,
         OutboxLog outbox,
         ApplyJournal applyJournal,
+        Fld1.Storage.Engine.StoragePartitionLease storageLease,
         AtomicManifestStore manifestStore,
         int autoCheckpointOverlayFields = 0,
         bool truncateSealedWal = true,
@@ -78,6 +81,7 @@ public sealed class FldDatabase : IDisposable
         _wal = wal;
         _outbox = outbox;
         _applyJournal = applyJournal;
+        _storageLease = storageLease ?? throw new ArgumentNullException(nameof(storageLease));
         _manifestStore = manifestStore;
         _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
         _truncateSealedWal = truncateSealedWal;
@@ -101,6 +105,13 @@ public sealed class FldDatabase : IDisposable
         Directory.CreateDirectory(Path.Combine(dbDir, "wal"));
         Directory.CreateDirectory(Path.Combine(dbDir, "runs"));
         Directory.CreateDirectory(Path.Combine(dbDir, "tmp"));
+
+        Fld1.Storage.Engine.StoragePartitionLease? storageLease = null;
+        bool leaseTransferred = false;
+        try
+        {
+        storageLease = Fld1.Storage.Engine.StorageDatabase.AcquirePartitionLease(
+            dbDir, StoragePartitionId);
 
         var manifestStore = new AtomicManifestStore(dbDir);
         var manifest = manifestStore.Load();
@@ -145,7 +156,7 @@ public sealed class FldDatabase : IDisposable
             applyJournal = ApplyJournal.Open(outboxDir, namespaceId);
 
             var db = new FldDatabase(
-                dbDir, namespaceId, author, wal, outbox, applyJournal, manifestStore,
+                dbDir, namespaceId, author, wal, outbox, applyJournal, storageLease, manifestStore,
                 options.AutoCheckpointOverlayFields,
                 options.TruncateSealedWal,
                 options.AutoCompactRunCount);
@@ -159,6 +170,7 @@ public sealed class FldDatabase : IDisposable
                 db._wal.TruncateSealedSegments(db._lastSealedCommitSeq);
                 db._applyJournal.CompactAcknowledgedRelayPayloads(db._lastSealedCommitSeq);
             }
+            leaseTransferred = true;
             return db;
         }
         catch
@@ -168,6 +180,12 @@ public sealed class FldDatabase : IDisposable
             try { outbox?.Dispose(); } catch { /* preserve original open error */ }
             try { wal.Dispose(); } catch { /* preserve original open error */ }
             throw;
+        }
+        }
+        finally
+        {
+            if (!leaseTransferred)
+                storageLease?.Dispose();
         }
     }
 
@@ -1993,9 +2011,28 @@ public sealed class FldDatabase : IDisposable
                 catch { /* best-effort on dispose */ }
             }
             _disposed = true;
-            _applyJournal.Dispose();
-            _outbox.Dispose();
-            _wal.Dispose();
+            try
+            {
+                _applyJournal.Dispose();
+            }
+            finally
+            {
+                try
+                {
+                    _outbox.Dispose();
+                }
+                finally
+                {
+                    try
+                    {
+                        _wal.Dispose();
+                    }
+                    finally
+                    {
+                        _storageLease.Dispose();
+                    }
+                }
+            }
         }
     }
 }
