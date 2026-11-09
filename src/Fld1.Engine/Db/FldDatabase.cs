@@ -1597,6 +1597,8 @@ public sealed class FldDatabase : IDisposable
         lock (_commitLock)
         {
             EnsureHealthy();
+            if (_pendingFlushedCommitSeq > _lastSealedCommitSeq)
+                return true; // An unsealed WAL prefix may still replay an APPLY receipt.
             return AnyApplyJournal(commit =>
                 commit.NamespaceId == namespaceId &&
                 commit.SenderEpoch == transportPeerEpoch &&
