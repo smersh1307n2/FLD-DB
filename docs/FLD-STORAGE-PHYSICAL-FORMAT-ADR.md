@@ -20,10 +20,10 @@ The generic Storage layer owns:
 The Database layer owns:
 - the canonical FLD1 Run v1/v2 byte encoding and verification;
 - RecordId/FieldId/HLC/author/KeyEpoch/ChangeId/Origin and tombstone semantics;
-- the FLD manifest/catalog mapping namespace + RunId to the opaque blob ID;
+- the FLD manifest/catalog mapping each namespace-scoped RunId to an opaque blob ID derived from the root-global RunId;
 - FLD WAL commit payloads, replay, Outbox, ApplyJournal and compaction policy.
 
-A Run is an opaque blob to Storage. Storage must never parse its FLD1 header, cluster, FieldId, HLC, tombstone or provenance section. The existing FLD1 Run bytes remain unchanged inside the blob. The Database manifest remains the logical Run catalog; the blob ID is deterministically derived from namespace and RunId so no field-aware lookup leaks into Storage.
+A Run is an opaque blob to Storage. Storage must never parse its FLD1 header, cluster, FieldId, HLC, tombstone or provenance section. The existing FLD1 Run bytes remain unchanged inside the blob. The Database manifest remains the logical namespace-scoped Run catalog; because RunId allocation is root-global, the opaque blob ID is deterministically derived from RunId alone, so no field-aware lookup leaks into Storage.
 
 ## Why B, not A
 
@@ -47,7 +47,7 @@ A Run is an opaque blob to Storage. Storage must never parse its FLD1 header, cl
 ## Migration sequence
 
 1. Add and independently validate the generic Storage immutable-blob/page API in `Fld1.Storage`. The first implementation stores large immutable page payloads as fsynced files and keeps only the compact blob catalog in StorageDatabase/WAL, avoiding a large in-memory KV index.
-2. Add the FLD Database adapter that maps namespace + RunId to opaque blob IDs; retain legacy `runs/{RunId}.fld1` reads as fallback.
+2. Add the FLD Database adapter that maps each namespace-scoped manifest Run entry to an opaque blob ID derived from the root-global RunId; retain legacy `runs/{RunId}.fld1` reads as fallback.
 3. New Run writes publish blob pages before manifest update. Checkpoint, compaction and FULL_REPLACE staging use the same root-global Run ID allocator; it checks both legacy Run files and the blob catalog so uncommitted staged IDs cannot be reused after restart. During the compatibility period, the exact same FLD1 Run bytes are also materialized at `runs/{RunId}.fld1`; on Linux/macOS the shared native directory-sync helper flushes the mirror rename before the manifest/stage reference can publish, and a sync error fails closed. The manifest remains the single FLD visibility switch, and old FLD1 binaries can still read the mirror. Windows directory-entry durability remains unclaimed. New code prefers the generic blob and falls back to the legacy file only when no blob record exists. Existing legacy Run files are imported lazily or during compaction; no in-place rewrite of a live manifest. Removing the compatibility mirror requires a separate explicit manifest/storage-format version transition and benchmark.
 4. Extend orphan collection to union active manifest Run IDs, durable provider snapshot Run pins and incomplete staging generations before deleting either legacy files or Storage blobs.
 5. After Run storage is migrated and proven, separately evaluate moving FLD WAL records to generic Storage WAL as opaque Database-owned commit payloads. Do not combine that migration with the Run/blob cutover.
