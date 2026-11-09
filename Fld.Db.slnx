@@ -4,12 +4,8 @@
     <Project Path="bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj" />
   </Folder>
   <Folder Name="/src/">
-    <Project Path="src/Fld1.Core/Fld1.Core.csproj" />
-    <Project Path="src/Fld1.Engine/Fld1.Engine.csproj" />
     <Project Path="src/Fld1.Storage/Fld1.Storage.csproj" />
-    <Project Path="src/Fld1.Manifest/Fld1.Manifest.csproj" />
-    <Project Path="src/Fld1.Run/Fld1.Run.csproj" />
-    <Project Path="src/Fld1.Wal/Fld1.Wal.csproj" />
+    <Project Path="src/Fld1.Database/Fld1.Database.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Fld1.Core.Tests/Fld1.Core.Tests.csproj" />
