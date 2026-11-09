@@ -2178,3 +2178,10 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] BIN-SYNC now validates that the RPM3 map belongs to the coordinator's metadata scope, local replica and exact durable StorageDatabase before every gate operation, including startup recovery and outbound-only scheduling.
 - [x C] Recovery checkpoint: `smersh1307n2/BIN-SYNC:backup/cpass-2026-11-09-publication-ceilings-v2` at `0f46e444529b77997ce1ba190838de3c4f4ecb6d`.
 - [~ T] Host callback/API migration and negative map-binding cases remain deferred to the T-pass. No FLD runtime dependency on BIN-SYNC is introduced.
+
+
+### 7.78 BIN-SYNC RPM3 author enumeration allocation reduction (2026-11-09)
+
+- [x C] BIN-SYNC introduced a shared allocation-free `NodeIdCanonicalComparer` and uses it for both relay gate author ordering and RPM3 cursor author enumeration. The FLD runtime is unchanged and remains free of BIN-SYNC references.
+- [x C] BIN-SYNC recovery branch: `backup/cpass-2026-11-09-nodeid-ordering` at `2c7007f059c2da1878c24e64a76dec902f9e8c73`.
+- [~ T] Canonical-order equivalence, RPM3 reopen and malformed/duplicate cursor cases remain untested until T-pass.
