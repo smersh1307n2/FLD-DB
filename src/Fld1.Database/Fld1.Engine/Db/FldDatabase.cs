@@ -1312,6 +1312,56 @@ public sealed class FldDatabase : IDisposable
     }
 
     /// <summary>
+    /// Enumerate original authors with at least one unacknowledged relay operation.
+    /// This is a startup/discovery scan; it returns identities only and persists no
+    /// second author index. Include the RPM3 map's own author list as well when
+    /// recovering, because a crash may occur after this journal ACK but before map prune.
+    /// </summary>
+    public IReadOnlyList<byte[]> ReadUnacknowledgedRelayAuthors()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            var authors = new SortedDictionary<string, byte[]>(StringComparer.Ordinal);
+            ulong cursor = 0;
+            ulong highWatermark = _applyJournal.HighWatermark;
+            while (cursor < highWatermark)
+            {
+                var page = _applyJournal.ReadBatches(cursor, 128);
+                if (page.Count == 0)
+                    throw new InvalidDataException("ApplyJournal ended before its durable relay high watermark.");
+
+                foreach (var item in page)
+                {
+                    cursor = item.JournalSeq;
+                    var batchAuthors = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+                    foreach (WalFieldMutation field in item.Commit.RelayFields)
+                    {
+                        if (field.AuthorNodeId.AsSpan().SequenceEqual(_localAuthor))
+                            continue;
+                        string authorKey = Convert.ToHexString(field.AuthorNodeId);
+                        batchAuthors.TryAdd(authorKey, field.AuthorNodeId);
+                    }
+
+                    foreach (var pair in batchAuthors)
+                    {
+                        if (!_applyJournal.IsRelayAcknowledged(pair.Value, item.JournalSeq))
+                            authors.TryAdd(pair.Key, pair.Value.ToArray());
+                    }
+                }
+
+                if (page.Count < 128)
+                    break;
+            }
+
+            if (cursor < highWatermark)
+                throw new InvalidDataException("ApplyJournal relay-author scan did not reach its durable high watermark.");
+            return authors.Values.Select(author => author.ToArray()).ToArray();
+        }
+    }
+
+    /// <summary>
     /// Read durable relay batches for one original author. JournalSeq is only an
     /// internal paging token; BIN-SYNC owns the author-stream sequence.
     /// </summary>
