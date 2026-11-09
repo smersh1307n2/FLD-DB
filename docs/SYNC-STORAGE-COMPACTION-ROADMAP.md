@@ -1952,11 +1952,11 @@ Created `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4
 Updated the cross-repository integration contract to read one `RelayJournalBatch` per page and reject a group with more than 4,096 relay operations before allocating the transient `(JournalSeq, ChangeId)` array. A JournalSeq group is atomic in the RPM3 mapping: it must not be split across independent mapping/cursor commits. The 4,096 limit is currently an adapter bound; it is not yet enforced by FLD remote-apply ingress. If larger single journal groups must be supported, design an explicit continuation protocol that keeps the scan cursor behind the incomplete group and preserves atomic publication/ACK semantics.
 ### 7.50 Two-runtime-assembly extraction — implementation scaffold (2026-11-09)
 
-- [x C] Added `src/Fld1.Database/Fld1.Database.csproj`, a consolidated runtime assembly that links the Core, Manifest, Run, WAL and Engine source trees into one `Fld1.Database.dll`; it references the independent generic `Fld1.Storage.dll`.
+- [x C] Added `src/Fld1.Database/Fld1.Database.csproj` and physically moved all 40 Core, Manifest, Run, WAL and Engine source files into it. It references the independent generic `Fld1.Storage.dll`; no linked-source Compile items are used.
 - [x C] Changed `Fld.Db.slnx` runtime surface to the two approved source projects: `Fld1.Storage` and `Fld1.Database`. Component projects remain in the tree as historical source/project boundaries but are no longer solution runtime outputs.
 - [x C] Routed Core/Engine/Manifest/Run/WAL test projects and both benchmark projects through the consolidated Database project; Storage tests continue to reference Storage directly.
-- [~ T] No build has yet validated linked-source inclusion, duplicate generated attributes, package graph or test assembly visibility. Treat the extraction as a compile-unverified scaffold, not a completed DLL migration.
-- [~ C] Remaining extraction: resolve any compile errors, ensure publish/package output contains exactly the two runtime DLLs, remove or clearly retire component project entry points, update README/package references and test all supported build entry points.
+- [~ T] The physical move and project graph are committed, but exact-head three-OS CI remains red and its diagnostic artifacts have not been returned by the connector. Treat the two-DLL structure as source-complete but build-unverified.
+- [~ C] Remaining extraction: resolve CI/build issues, ensure publish/package output contains exactly the two runtime DLLs, and complete the generic Storage/legacy FLD WAL+Run reuse strategy. `Fld1.Database` still uses its FLD-specific WAL/Run/Manifest path; the separate generic `Fld1.Storage` engine is not yet the physical backend for `FldDatabase`.
 
 ### 7.51 Exact-head build state after two-assembly scaffold (2026-11-09)
 
@@ -1997,3 +1997,10 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] `Fld1.Database.csproj` now uses normal SDK compile discovery over physically owned source; no linked Compile items. It references only generic `Fld1.Storage` and required hashing packages.
 - [~ T] Exact-head restore/build/test remains red/unverified; validate project references, package output and all three OS CI jobs after this physical move.
 - [~ C] Finish public package layout and architecture-doc/API migration; confirm Storage-only consumers can load `Fld1.Storage.dll` without loading `Fld1.Database.dll`.
+
+### 7.57 Corrected extraction status: physical source move vs generic engine reuse (2026-11-09)
+
+- [x C] The prior linked-source scaffold was superseded by commit `d63a8c49a889c28838305ce15aa4ca5e0b189201`: all 40 source files were moved into `src/Fld1.Database`; five component project files were removed; the project now uses default compile discovery over physically owned files.
+- [x C] Tests/benchmarks and `Fld.Db.slnx` now target the two runtime projects. README and this roadmap have been corrected to describe physical ownership rather than linked sources.
+- [~ T] Current branch HEAD `e4a8cfcabea489b0f337839a759de654002f696d` still has failed Ubuntu/macOS/Windows CI. The attempted log-artifact instrumentation also produced no retrievable artifacts; do not infer the cause.
+- [~ C] Important distinction: this closes the physical project-consolidation step, not the full Storage engine extraction. `Fld1.Database` still contains the field-aware legacy WAL/Run/Manifest path and `FldDatabase` is not yet backed by `StorageDatabase`. The generic Storage API/backend migration and physical-format compatibility plan remain open.
