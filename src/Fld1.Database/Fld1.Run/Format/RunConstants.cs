@@ -5,6 +5,7 @@ public static class RunConstants
 {
     public static ReadOnlySpan<byte> Magic => "FLD1"u8; // 0x46 0x4C 0x44 0x31
     public const ushort BinaryVersion = 1;
+    public const ushort ProvenanceBinaryVersion = 2;
     public const int HeaderSize = 256;
     public const int FooterSize = 8;
     public const int EmptyRunSize = 264; // header + footer, HAS_VALUES=0
@@ -15,6 +16,7 @@ public static class RunConstants
     public const int PgmSegmentSize = 32;
     public const int ValueRefSize = 16;
     public const int InternEntrySize = 16;
+    public const int ProvenanceEntrySize = 48;
     public const uint MaxInlineValueLen = 256;
     public const ushort ExternalValLen = 0xFFFF;
     public const int MaxPayloadArea = 65535;
