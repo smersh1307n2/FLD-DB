@@ -1094,7 +1094,7 @@ public sealed partial class FldDatabase : IDisposable
         if (seqHi == 0)
             seqHi = _lastSealedCommitSeq;
 
-        var oldPaths = _runs.Select(run => run.path).ToList();
+        var oldRuns = _runs.Select(run => (runId: run.runId, path: run.path)).ToList();
         _manifestStore.Update(manifest =>
         {
             var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
@@ -1129,12 +1129,14 @@ public sealed partial class FldDatabase : IDisposable
         _dirty.Clear();
         _lastSealedCommitSeq = seqHi;
 
-        foreach (string oldPath in oldPaths)
+        HashSet<ulong>? pinnedRunIds = GetPinnedProviderSnapshotRunIds();
+        foreach (var oldRun in oldRuns)
         {
             try
             {
-                if (oldPath != path)
-                    File.Delete(oldPath);
+                if (oldRun.path == path || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
+                    continue;
+                File.Delete(oldRun.path);
             }
             catch
             {
