@@ -59,7 +59,7 @@ public static class StorageDirectorySync
             {
                 string? parent = Path.GetDirectoryName(created);
                 if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
-                    throw new DirectoryNotFoundException($"Parent directory for durable entry '{created}' is missing.");
+                    continue; // An unrelated pending path may not have been created yet.
                 Flush(parent);
                 PendingDirectoryEntries.Remove(created);
             }
