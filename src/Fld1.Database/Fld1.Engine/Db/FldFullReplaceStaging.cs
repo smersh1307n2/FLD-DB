@@ -258,7 +258,8 @@ public sealed partial class FldDatabase
 
             ulong[] currentRuns = manifest.Runs.Where(run => run.Ns == _namespaceId)
                 .Select(run => run.RunId).OrderBy(id => id).ToArray();
-            if (!currentRuns.AsSpan().SequenceEqual(state.BaseRunIds) ||
+            if (manifest.Generation < state.BaseManifestGeneration ||
+                !currentRuns.AsSpan().SequenceEqual(state.BaseRunIds) ||
                 _lastSealedCommitSeq != state.BaseLastSealedCommitSeq)
                 throw new InvalidOperationException("FLD active namespace generation changed while FULL_REPLACE was staged.");
 
