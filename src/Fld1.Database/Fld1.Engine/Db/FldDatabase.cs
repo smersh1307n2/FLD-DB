@@ -240,11 +240,13 @@ public sealed partial class FldDatabase : IDisposable
         {
             var path = Path.Combine(_dbDir, "runs", $"{re.RunId}.fld1");
             Guid blobId = RunBlobId(re.RunId);
-            if (_runBlobStore.ContainsBlob(blobId))
+            if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
             {
-                if (!_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) || blobReader is null)
-                    throw new InvalidDataException($"Manifest references an incomplete Storage blob for Run {re.RunId}.");
                 blobReader.Dispose();
+            }
+            else if (_runBlobStore.ContainsBlob(blobId))
+            {
+                throw new InvalidDataException($"Manifest references an incomplete Storage blob for Run {re.RunId}.");
             }
             else if (!File.Exists(path))
             {
@@ -1414,12 +1416,14 @@ public sealed partial class FldDatabase : IDisposable
 
         byte[] bytes;
         Guid blobId = RunBlobId(runId);
-        if (_runBlobStore.ContainsBlob(blobId))
+        if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
         {
-            if (!_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) || blobReader is null)
-                throw new InvalidDataException($"Run {runId} references an incomplete Storage blob.");
             using (blobReader)
                 bytes = blobReader.ReadAllBytes();
+        }
+        else if (_runBlobStore.ContainsBlob(blobId))
+        {
+            throw new InvalidDataException($"Run {runId} references an incomplete Storage blob.");
         }
         else
         {
