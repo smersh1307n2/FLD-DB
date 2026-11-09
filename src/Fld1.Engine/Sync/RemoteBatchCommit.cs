@@ -8,6 +8,8 @@ namespace Fld1.Engine.Sync;
 /// </summary>
 public sealed class RemoteBatchCommit
 {
+    /// <summary>Maximum field operations accepted in one durable remote apply transaction.</summary>
+    public const int MaximumOperationsPerBatch = 4096;
     public byte[] SenderPeer { get; }
     public uint SenderEpoch { get; }
     public ushort NamespaceId { get; }
@@ -108,6 +110,9 @@ public sealed class RemoteBatchCommit
         IReadOnlyList<RemoteFieldWrite>? writes, string name)
     {
         ArgumentNullException.ThrowIfNull(writes, name);
+        if (writes.Count > MaximumOperationsPerBatch)
+            throw new ArgumentOutOfRangeException(name,
+                $"A remote apply batch cannot exceed {MaximumOperationsPerBatch:N0} operations.");
         var copy = new RemoteFieldWrite[writes.Count];
         for (int i = 0; i < writes.Count; i++)
         {
