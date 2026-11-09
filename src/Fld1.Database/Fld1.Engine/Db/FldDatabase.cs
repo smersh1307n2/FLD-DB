@@ -214,10 +214,16 @@ public sealed partial class FldDatabase : IDisposable
         }
         finally
         {
-            if (!runStorageTransferred)
-                runStorage?.Dispose();
-            if (!leaseTransferred)
-                storageLease?.Dispose();
+            try
+            {
+                if (!runStorageTransferred)
+                    runStorage?.Dispose();
+            }
+            finally
+            {
+                if (!leaseTransferred)
+                    storageLease?.Dispose();
+            }
         }
     }
 
