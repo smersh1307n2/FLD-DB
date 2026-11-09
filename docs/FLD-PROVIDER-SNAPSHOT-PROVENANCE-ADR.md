@@ -58,10 +58,10 @@ A later optimization may replace the run index with a generic Storage page curso
 
 ## Required implementation slices
 
-- [ ] WAL body versioning for origin fields with legacy decode.
-- [ ] Identity-stamp WAL record, replay and idempotency/conflict validation.
-- [ ] Run v2 provenance section writer/reader/verifier and v1 compatibility.
-- [ ] Propagate origin through `MemFieldValue`, remote APPLY and checkpoint/compaction.
+- [x] WAL body versioning for origin fields with legacy decode (GROUP_COMMIT v3; APPLY_COMMIT v4; v1/v2 and v2/v3 readers retained).
+- [x] Identity-stamp WAL record, replay and idempotency/conflict validation; `FldDatabase.CommitPublishedOrigins` writes identity-only records and never duplicates Outbox payload.
+- [x] Run v2 provenance section writer/reader/verifier and v1 compatibility; v1 remains a legacy identity-zero row.
+- [x] Propagate origin through `MemFieldValue`, remote APPLY, WAL replay, checkpoint, compaction and LWW resolution.
 - [ ] Generation-pinned, paged FLD provider snapshot and snapshot pin/release.
 - [ ] Host `IDataProvider` adapter for key resolution, local Outbox feed, published-origin commit, remote apply context and current-state reads.
 - [ ] Exact-head build plus crash/restart, mixed-v1/v2, cutover and identity-retention T-pass.
