@@ -58,6 +58,7 @@ public static class StorageDirectorySync
     /// <summary>Flushes directory-entry updates on Linux/macOS; Windows directory durability is not claimed.</summary>
     public static void Flush(string directory)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (OperatingSystem.IsWindows())
             return; // Windows directory-entry durability is not claimed by this engine.
 
