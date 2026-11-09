@@ -30,6 +30,7 @@ public static class StorageDirectorySync
     [DllImport("libSystem.B.dylib", EntryPoint = "close", SetLastError = true)]
     private static extern int MacOsClose(int fileDescriptor);
 
+    /// <summary>Creates a directory and durably flushes newly created parent entries on Unix.</summary>
     public static void CreateDirectoryDurable(string path)
     {
         string fullPath = Path.GetFullPath(path);
@@ -54,6 +55,7 @@ public static class StorageDirectorySync
         }
     }
 
+    /// <summary>Flushes directory-entry updates on Linux/macOS; Windows directory durability is not claimed.</summary>
     public static void Flush(string directory)
     {
         if (OperatingSystem.IsWindows())
