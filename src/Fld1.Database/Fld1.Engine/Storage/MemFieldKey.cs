@@ -41,4 +41,8 @@ public sealed class MemFieldValue
     public required bool IsTombstone { get; init; }
     /// <summary>Stable BIN-SYNC ChangeId preserved across WAL recovery.</summary>
     public byte[] ChangeId { get; init; } = Array.Empty<byte>();
+    /// <summary>Immutable operation origin epoch; zero for a legacy/unpublished row.</summary>
+    public uint OriginAuthorEpoch { get; init; }
+    /// <summary>Immutable operation origin sequence; zero before freeze or for legacy rows.</summary>
+    public ulong OriginSequence { get; init; }
 }
