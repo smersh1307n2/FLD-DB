@@ -2252,3 +2252,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] The concrete receive helper routes accepted batches through `ReceiveBatchBeforeAckAsync` and then the relay publication gate; this preserves full sender/issuer/cursor/digest context in FLD ApplyJournal before the source ACK.
 - [~ C] FLD still does not implement `IDataProvider`: generation-pinned full snapshot, Outbox→provider feed/author epoch, key resolver and `TryReadCurrent` mapping remain open. No third FLD runtime DLL and no FLD→BIN-SYNC dependency are introduced.
 - [~ T] Cross-repository host build and crash/reopen tests are pending; last CI host build skipped private FLD checkout without credential.
+
+
+### 7.88 Metadata Store owns v3 relay payload after provider-authoritative cutover (2026-11-09)
+
+- [x C] BIN-SYNC now has a direct metadata-owned relay path. Its contextual FLD `RemoteBatchCommit` intentionally carries no duplicate `RelayWrites`; the Metadata Store finalizes relay-eligible operations into its single durable relay stream/author sequence.
+- [x C] The host no longer treats FLD `ReadRelayBatchPage`/`AcknowledgeRelayBatches` or RPM3 as the post-cutover relay authority. Per-peer ACK stays in BIN-SYNC Metadata Store; relay payload compacts through the minimum durable peer ACK. The legacy FLD JournalSeq/RPM3 path remains only before provider cutover.
+- [x C] Host startup now recovers PendingApply and freezes the local provider feed under the composed FLD/Node/Storage guard before enabling Metadata Store-owned publication.
+- [~ T] Verify ACK aggregation, restart after ACK-before-compaction, duplicate ChangeId suppression and send retry on exact-head BIN-SYNC + FLD integration builds. No new FLD database disk-format change was made by this slice.
+- [~ C] FLD's generation-pinned provider snapshot, stable current-state identity/origin mapping and the remainder of the `IDataProvider` bridge are still open. Do not reintroduce a second FLD relay-payload journal to close that gap.
