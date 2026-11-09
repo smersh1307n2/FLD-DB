@@ -35,6 +35,11 @@ public static class RunHeader
     public const int OffRootDigest = 0x88;
     public const int OffReservedPad = 0xA8;
     public const int ReservedPadLen = 88;
+    public const int OffProvenanceOff = 0xA8;
+    public const int OffProvenanceLen = 0xB0;
+    public const int OffProvenanceCount = 0xB8;
+    public const int OffProvenanceEntrySize = 0xBC;
+    public const int ProvenanceHeaderBytes = 20;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool CheckMagic(ReadOnlySpan<byte> header)
@@ -55,7 +60,8 @@ public static class RunHeader
             internOff: Size, pgmOff: Size, slotOff: Size, dataOff: Size,
             valuesOff: Size, valuesLen: 0, footerOff: Size,
             numExternal: 0, aliveFields: 0, contributorCount: 0, ghostCount: 0,
-            rootDigest32);
+            rootDigest32,
+            binaryVersion: RunConstants.BinaryVersion);
     }
 
     public static void WriteCore(
@@ -80,14 +86,19 @@ public static class RunHeader
         uint ghostCount,
         ReadOnlySpan<byte> rootDigest32,
         ReadOnlySpan<byte> summaryXor = default,
-        ReadOnlySpan<byte> summarySum = default)
+        ReadOnlySpan<byte> summarySum = default,
+        ushort binaryVersion = RunConstants.BinaryVersion,
+        ulong provenanceOff = 0,
+        ulong provenanceLen = 0,
+        uint provenanceCount = 0,
+        uint provenanceEntrySize = 0)
     {
         if (header.Length < Size) throw new ArgumentException("header buffer too small");
         if (rootDigest32.Length < 32) throw new ArgumentException("rootDigest must be 32 bytes");
         header.Clear();
 
         RunConstants.Magic.CopyTo(header);
-        BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(OffBinaryVersion), RunConstants.BinaryVersion);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(OffBinaryVersion), binaryVersion);
         BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(OffFlags), flags);
         BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffNamespaceId), namespaceId);
         BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffNumClusters), numClusters);
@@ -109,6 +120,18 @@ public static class RunHeader
         if (summaryXor.Length >= 16) summaryXor.Slice(0, 16).CopyTo(header.Slice(OffSummaryXor, 16));
         if (summarySum.Length >= 16) summarySum.Slice(0, 16).CopyTo(header.Slice(OffSummarySum, 16));
         rootDigest32.Slice(0, 32).CopyTo(header.Slice(OffRootDigest, 32));
+        if (binaryVersion == RunConstants.ProvenanceBinaryVersion)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffProvenanceOff), provenanceOff);
+            BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(OffProvenanceLen), provenanceLen);
+            BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffProvenanceCount), provenanceCount);
+            BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(OffProvenanceEntrySize), provenanceEntrySize);
+        }
+        else if (provenanceOff != 0 || provenanceLen != 0 ||
+                 provenanceCount != 0 || provenanceEntrySize != 0)
+        {
+            throw new ArgumentException("Legacy Run header cannot contain provenance metadata.");
+        }
     }
 
     public static ushort ReadBinaryVersion(ReadOnlySpan<byte> h)
@@ -147,4 +170,12 @@ public static class RunHeader
         => h.Slice(OffRootDigest, 32);
     public static ReadOnlySpan<byte> ReservedPad(ReadOnlySpan<byte> h)
         => h.Slice(OffReservedPad, ReservedPadLen);
+    public static ulong ReadProvenanceOff(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffProvenanceOff));
+    public static ulong ReadProvenanceLen(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt64LittleEndian(h.Slice(OffProvenanceLen));
+    public static uint ReadProvenanceCount(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffProvenanceCount));
+    public static uint ReadProvenanceEntrySize(ReadOnlySpan<byte> h)
+        => BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(OffProvenanceEntrySize));
 }
