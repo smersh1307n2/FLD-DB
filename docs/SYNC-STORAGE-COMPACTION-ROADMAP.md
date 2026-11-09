@@ -2194,3 +2194,11 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Provider feed reads use borrowed views; local ACK cleanup is bounded to 4,096 deletes per transaction with the ACK watermark committed atomically with each page. Restart can resume from the last committed ACK page without skipping data.
 - [~ T] Verify FLD/BIN source parity, visitor lifetime, cursor ordering, ACK page crash cuts, and large-feed recovery on all supported OSes.
 - [~ O] Measure peak memory and throughput; snapshot sorted-index construction remains O(number of keys), and no O(page)-total-memory claim is made.
+
+
+### 7.80 Single-entry borrowed Storage cursor and BIN-SYNC provider use (2026-11-09)
+
+- [x C] `StorageSnapshot.PrefixCursor.TryReadNext` returns a borrowed `StorageEntryView` for one entry without allocating a page or copying key/value bytes. `VisitPage` delegates to the same cursor primitive.
+- [x C] FLD authoritative Storage source and BIN-SYNC vendor are byte-identical at blob `a28cd58fbb72a1453a3ffb04a1ab1d5ed43ddaa1`.
+- [x C] BIN-SYNC provider snapshot merge consumes field and record-tombstone streams one row at a time, retaining only the current decoded mutation from each stream.
+- [~ T] Cross-check stream merge order, reset/reopen, disposed cursor and concurrent immutable snapshot behavior; no test run is claimed.
