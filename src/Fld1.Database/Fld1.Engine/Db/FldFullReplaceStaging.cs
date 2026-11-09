@@ -35,7 +35,9 @@ public sealed partial class FldDatabase
         byte[] LastSortKey,
         ulong[] BaseRunIds,
         FullReplaceStageRun[] Runs,
-        bool IsCommitted);
+        bool IsCommitted,
+        bool IsAborting,
+        int AbortRunIndex);
 
     /// <summary>
     /// Begin or idempotently resume a durable FLD provider replacement. The expected
@@ -73,7 +75,7 @@ public sealed partial class FldDatabase
                 generation, manifest.Generation, _lastSealedCommitSeq,
                 sourceFeedWatermark, expectedEntryCount, 0,
                 expectedDigest.ToArray(), new byte[19], baseRuns,
-                Array.Empty<FullReplaceStageRun>(), false);
+                Array.Empty<FullReplaceStageRun>(), false, false, 0);
             WriteFullReplaceStage(path, state);
         }
     }
@@ -96,6 +98,8 @@ public sealed partial class FldDatabase
             string statePath = FullReplaceStagePath(generation);
             if (!File.Exists(statePath)) throw new InvalidOperationException("FULL_REPLACE generation has not been begun.");
             FullReplaceStageState state = ReadFullReplaceStage(statePath);
+            if (state.IsAborting)
+                throw new InvalidOperationException("Aborting FULL_REPLACE generation cannot accept more pages.");
             if (IsFullReplaceStageCommitted(state, _manifestStore.Load()))
                 throw new InvalidOperationException("Committed FULL_REPLACE generation cannot accept more pages.");
             if (startIndex != state.NextIndex)
@@ -163,6 +167,7 @@ public sealed partial class FldDatabase
             string path = FullReplaceStagePath(generation);
             if (!File.Exists(path)) throw new KeyNotFoundException("FULL_REPLACE staging generation does not exist.");
             FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.IsAborting) throw new InvalidOperationException("FULL_REPLACE generation is being aborted.");
             if (afterIndex > state.NextIndex) throw new ArgumentOutOfRangeException(nameof(afterIndex));
             var result = new List<FldProviderSnapshotEntry>(Math.Min(limit, state.NextIndex - afterIndex));
             foreach (FullReplaceStageRun run in state.Runs)
@@ -190,6 +195,7 @@ public sealed partial class FldDatabase
             string path = FullReplaceStagePath(generation);
             if (!File.Exists(path)) { progress = null; return false; }
             FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.IsAborting) throw new InvalidOperationException("Aborting FULL_REPLACE generation cannot be committed.");
             ManifestDocument manifest = _manifestStore.Load();
             bool committed = IsFullReplaceStageCommitted(state, manifest);
             if (committed && !state.IsCommitted)
@@ -300,19 +306,24 @@ public sealed partial class FldDatabase
             FullReplaceStageState state = ReadFullReplaceStage(path);
             if (state.IsCommitted || IsFullReplaceStageCommitted(state, _manifestStore.Load()))
                 throw new InvalidOperationException("Committed FULL_REPLACE generation cannot be aborted.");
-            int count = Math.Min(limit, state.Runs.Length);
-            for (int i = 0; i < count; i++)
+            if (!state.IsAborting)
+            {
+                state = state with { IsAborting = true, AbortRunIndex = 0 };
+                WriteFullReplaceStage(path, state);
+            }
+            int end = Math.Min(state.Runs.Length, checked(state.AbortRunIndex + limit));
+            for (int i = state.AbortRunIndex; i < end; i++)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{state.Runs[i].RunId}.fld1");
                 try { if (File.Exists(runPath)) File.Delete(runPath); }
                 catch { return false; }
             }
-            if (count == state.Runs.Length)
+            if (end == state.Runs.Length)
             {
                 File.Delete(path);
                 return true;
             }
-            WriteFullReplaceStage(path, state with { Runs = state.Runs[count..] });
+            WriteFullReplaceStage(path, state with { AbortRunIndex = end });
             return false;
         }
     }
@@ -471,6 +482,7 @@ public sealed partial class FldDatabase
     private bool IsFullReplaceStageCommitted(FullReplaceStageState state, ManifestDocument manifest)
     {
         if (state.IsCommitted) return true;
+        if (state.IsAborting) return false;
         var active = manifest.Runs.Where(run => run.Ns == _namespaceId)
             .Select(run => run.RunId).ToHashSet();
         return state.Runs.Length != 0 &&
@@ -496,19 +508,21 @@ public sealed partial class FldDatabase
 
     private static byte[] EncodeFullReplaceStage(FullReplaceStageState state)
     {
-        int length = checked(4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 32 + 19 +
+        int length = checked(4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 +
             4 + state.BaseRunIds.Length * 8 + 4 + state.Runs.Length * 48 + 32);
         byte[] bytes = new byte[length];
         int offset = 0;
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), FullReplaceStageMagic); offset += 4;
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), FullReplaceStageVersion); offset += 2;
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), state.IsCommitted ? (ushort)1 : (ushort)0); offset += 2;
+        ushort flags = (ushort)((state.IsCommitted ? 1 : 0) | (state.IsAborting ? 2 : 0));
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), flags); offset += 2;
         state.Generation.TryWriteBytes(bytes.AsSpan(offset, 16)); offset += 16;
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.BaseManifestGeneration); offset += 8;
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.BaseLastSealedCommitSeq); offset += 8;
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.SourceFeedWatermark); offset += 8;
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.ExpectedEntryCount); offset += 4;
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.NextIndex); offset += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.AbortRunIndex); offset += 4;
         state.ExpectedDigest.CopyTo(bytes, offset); offset += 32;
         state.LastSortKey.CopyTo(bytes, offset); offset += 19;
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.BaseRunIds.Length); offset += 4;
@@ -538,17 +552,18 @@ public sealed partial class FldDatabase
         if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset)) != FullReplaceStageMagic) throw new InvalidDataException("FULL_REPLACE stage magic mismatch."); offset += 4;
         if (BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)) != FullReplaceStageVersion) throw new InvalidDataException("FULL_REPLACE stage version mismatch."); offset += 2;
         ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)); offset += 2;
-        if (flags > 1) throw new InvalidDataException("FULL_REPLACE stage flags are invalid.");
+        if ((flags & ~3) != 0) throw new InvalidDataException("FULL_REPLACE stage flags are invalid.");
         Guid generation = new(bytes.AsSpan(offset, 16)); offset += 16;
         ulong baseManifestGeneration = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
         ulong baseSealed = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
         ulong watermark = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
         int expected = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
         int next = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        int abortRunIndex = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
         byte[] digest = bytes.AsSpan(offset, 32).ToArray(); offset += 32;
         byte[] lastSortKey = bytes.AsSpan(offset, 19).ToArray(); offset += 19;
         int baseCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
-        if (generation == Guid.Empty || expected < 0 || next < 0 || next > expected || baseCount < 0 || baseCount > 1_000_000)
+        if (generation == Guid.Empty || expected < 0 || next < 0 || next > expected || abortRunIndex < 0 || baseCount < 0 || baseCount > 1_000_000)
             throw new InvalidDataException("FULL_REPLACE stage scalar fields are invalid.");
         if (offset + (long)baseCount * 8 + 4 > checksumOffset)
             throw new InvalidDataException("FULL_REPLACE stage base-run index is truncated.");
@@ -571,10 +586,10 @@ public sealed partial class FldDatabase
             expectedStart = checked(expectedStart + count);
             runs[i] = new FullReplaceStageRun(start, count, runId, min, max);
         }
-        if (expectedStart != next || digest.Length != 32 || lastSortKey.Length != 19)
+        if (expectedStart != next || abortRunIndex > runCount || digest.Length != 32 || lastSortKey.Length != 19)
             throw new InvalidDataException("FULL_REPLACE stage cursor does not match its page index.");
         return new FullReplaceStageState(
             generation, baseManifestGeneration, baseSealed, watermark, expected, next,
-            digest, lastSortKey, baseRuns, runs, flags == 1);
+            digest, lastSortKey, baseRuns, runs, (flags & 1) != 0, (flags & 2) != 0, abortRunIndex);
     }
 }
