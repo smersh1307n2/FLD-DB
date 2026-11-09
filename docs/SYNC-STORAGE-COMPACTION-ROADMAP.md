@@ -2185,3 +2185,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] BIN-SYNC introduced a shared allocation-free `NodeIdCanonicalComparer` and uses it for both relay gate author ordering and RPM3 cursor author enumeration. The FLD runtime is unchanged and remains free of BIN-SYNC references.
 - [x C] BIN-SYNC recovery branch: `backup/cpass-2026-11-09-nodeid-ordering` at `2c7007f059c2da1878c24e64a76dec902f9e8c73`.
 - [~ T] Canonical-order equivalence, RPM3 reopen and malformed/duplicate cursor cases remain untested until T-pass.
+
+
+### 7.79 Storage source parity and bounded visitor/ACK paths (2026-11-09)
+
+- [x C] FLD's authoritative `src/Fld1.Storage/Engine/StorageDatabase.cs` and BIN-SYNC's `external/Fld1.Storage/Engine/StorageDatabase.cs` now match byte-for-byte (blob `fa31c0e6395ad6bc999bf4a3fee8570b6acef20a`). The source includes immutable-value snapshot sharing, sorted prefix cursors and borrowed `StorageEntryView`/`VisitPage` scans.
+- [x C] BIN-SYNC metadata partition reopen now consumes 512-row pages and builds its persisted-entry index during decode instead of holding an unbounded full-partition row list.
+- [x C] Provider feed reads use borrowed views; local ACK cleanup is bounded to 4,096 deletes per transaction with the ACK watermark committed atomically with each page. Restart can resume from the last committed ACK page without skipping data.
+- [~ T] Verify FLD/BIN source parity, visitor lifetime, cursor ordering, ACK page crash cuts, and large-feed recovery on all supported OSes.
+- [~ O] Measure peak memory and throughput; snapshot sorted-index construction remains O(number of keys), and no O(page)-total-memory claim is made.
