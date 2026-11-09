@@ -1835,3 +1835,13 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 - [ ] Add actual device/fsync/power-loss testing; process-level injected fsync failures do not prove a particular physical device's post-power-loss state.
 - [ ] Refresh BIN-SYNC's `external/Fld1.Storage` snapshot from the exact tested FLD source commit and update its source pin; then rerun BIN-SYNC Core + Storage Integration on all platforms.
 - [ ] Implement the Shared Engine/IPC multi-application access path; single-owner fencing remains the current embedded mode.
+
+
+### 7.41 FLD host-side draft horizon and live-reference primitives (2026-11-09)
+
+- [x] Added \`FldDatabase.AcquireCommitGuard()\` to expose the existing FLD commit monitor as a same-thread disposable lease. The BIN-SYNC host adapter composes this after coordinator/Node gates and before the shared BIN-SYNC Storage gate.
+- [x] Added \`ReadUnpublishedLocalDraftHorizon()\`: counts uncommitted dirty overlay operations plus the unacknowledged Outbox suffix and returns the maximum HLC. A healthy \`FldDatabase\` has already reconciled any WAL→Outbox gap during open/recovery; a faulted database fails closed.
+- [x] Added \`HasPendingReceiptReference()\` over the durable ApplyJournal batch identity (sender peer, sender transport epoch, issuer author epoch, namespace, batch id). Any retained ApplyJournal entry blocks receipt reclamation; an unsealed WAL prefix also blocks conservatively because it may replay an APPLY receipt.
+- [x] Added \`HasPendingChangeIdReference()\` and \`HasPendingRecordReference()\` over dirty local state, unacknowledged Outbox entries and retained ApplyJournal field/relay payloads. Any unsealed WAL prefix blocks conservatively until checkpoint/seal; malformed/faulted state throws rather than authorizing deletion.
+- [~] These are neutral FLD engine primitives only. The thin adapter implementing BIN-SYNC \`IApplicationGcReferenceScanner\` belongs in the integration layer and must forward the partition identity on every call; FLD does not reference BIN-SYNC types.
+- [~] Exact-head CI is running for this code slice. Do not treat these APIs as validated until all FLD test assemblies pass on the exact branch head.
