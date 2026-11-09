@@ -2229,3 +2229,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Created `backup/cpass-2026-11-09-host-adapter-prep` at `cf4c454d539f96766ef66febb3d117c9a7c5965b` before the optional host integration layer.
 - [~ T] Build the cross-repository sample with explicit paths and validate project de-duplication; run normal FLD three-OS CI and test the snapshot-guard release path. No test/build pass is claimed for this C-pass.
 - [~ C] FLD Database remains protocol-neutral; its WAL/Run/Manifest/ApplyJournal format is not migrated to generic Storage. The two FLD runtime DLLs remain exactly `Fld1.Storage.dll` and `Fld1.Database.dll`.
+
+
+### 7.84 BIN-SYNC publication ceilings preserve both sides of the FLD cutover (2026-11-09)
+
+- [x C] The optional BIN-SYNC host adapter now freezes FLD local provider changes before each publication-gate entry point, then captures a complete local+relay author watermark set under the composed FLD/Node/Storage commit guard.
+- [x C] The local ceiling is sourced from Node Outbox before provider-authoritative cutover and from Metadata Store after cutover. RPM3 relay ceilings retain their active OutboxSeq/Metadata-relay sequence authority.
+- [x C] BIN-SYNC Core has ceiling-aware sender overloads for both Node-owned and Metadata Store-owned publication. The mode bit is captured with the ceilings, preventing a concurrent cutover from mixing sequence domains.
+- [~ T] Exact-head build and both-mode tests are pending; no change to FLD field WAL/Run/Manifest bytes was made.
+- [~ C] Generic ordered byte-KV page/run backend and FLD1 compatibility strategy remain a separate architecture decision under `FLD-STORAGE-CORE-ARCHITECTURE.md` §7. The assembly split alone does not authorize a physical-format migration.
