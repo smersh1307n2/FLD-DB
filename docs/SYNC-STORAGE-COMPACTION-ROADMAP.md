@@ -1939,3 +1939,8 @@ Required extraction work before creating the public `Fld1.Database.dll`:
 6. Re-home tests into Storage-only and Database integration suites; verify Storage-only consumers can build/run without loading Database. Only then add the BIN-SYNC adapter assembly outside both FLD DLLs.
 
 **Status:** [~ C] source audit and migration sequence documented; extraction code is not started. The existing FLD `.NET CI` passing on the current branch does not validate the two-DLL target or a BIN-SYNC adapter. Keep the old project graph intact until the physical-format seam and dependency map are approved; do not simulate completion with a third `Common` DLL.
+### 7.51 Architecture document status corrected to distinguish target from implementation (2026-11-09)
+
+Updated `FLD-STORAGE-CORE-ARCHITECTURE.md` §2.1 to state explicitly that the two-DLL design is normative target architecture, not the current build graph. There is no `Fld1.Database.csproj`; `FldDatabase` still uses the Engine/Run/Manifest/WAL/Core projects and does not use `Fld1.Storage` as its physical backend. This prevents future roadmap readers from mistaking the architectural decision for completed extraction.
+
+The physical compatibility gate remains mandatory: preserve the frozen FLD1 Run/Manifest/WAL format unless a separate versioned format decision authorizes a change. No third Common DLL and no linked-source compilation shortcut.
