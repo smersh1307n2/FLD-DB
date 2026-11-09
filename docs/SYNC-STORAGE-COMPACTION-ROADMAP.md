@@ -2244,3 +2244,11 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 
 - [x C] BIN-SYNC CI now checks out `fix/crash-consistency-outbox` as a sibling dependency and builds `samples/FldBinSyncHost` against the canonical FLD `Fld1.Database` and `Fld1.Storage` projects.
 - [~ T] The first exact-head build result is pending; this is a compile gate only and does not yet prove the full `FldDatabase`→`IDataProvider` snapshot/local-feed/remote-apply contract.
+
+
+### 7.87 Host contextual apply store identity and receive-before-ACK composition (2026-11-09)
+
+- [x C] The BIN-SYNC host sample now validates that `FldRemoteBatchApplyStore` and `StorageSyncCoordinator` reference the exact same FLD database/capability object before accepting any calls.
+- [x C] The concrete receive helper routes accepted batches through `ReceiveBatchBeforeAckAsync` and then the relay publication gate; this preserves full sender/issuer/cursor/digest context in FLD ApplyJournal before the source ACK.
+- [~ C] FLD still does not implement `IDataProvider`: generation-pinned full snapshot, Outbox→provider feed/author epoch, key resolver and `TryReadCurrent` mapping remain open. No third FLD runtime DLL and no FLD→BIN-SYNC dependency are introduced.
+- [~ T] Cross-repository host build and crash/reopen tests are pending; last CI host build skipped private FLD checkout without credential.
