@@ -207,6 +207,68 @@ public sealed partial class FldDatabase
         }
     }
 
+    /// <summary>
+    /// Returns the source-feed watermark bound by the durable snapshot manifest.
+    /// This lets protocol adapters prove that sender metadata and the provider token
+    /// describe the same snapshot barrier after process restart.
+    /// </summary>
+    public bool TryGetProviderSnapshotWatermark(Guid generation, out ulong sourceFeedWatermark)
+    {
+        if (generation == Guid.Empty)
+        {
+            sourceFeedWatermark = 0;
+            return false;
+        }
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (_providerSnapshots.TryGetValue(generation, out FldProviderSnapshot? existing))
+            {
+                sourceFeedWatermark = existing.SourceFeedWatermark;
+                return true;
+            }
+
+            string directory = GetProviderSnapshotDirectory(generation);
+            if (!Directory.Exists(directory))
+            {
+                sourceFeedWatermark = 0;
+                return false;
+            }
+            ProviderSnapshotManifest manifest;
+            try { manifest = ReadProviderSnapshotManifest(directory, generation); }
+            catch (FileNotFoundException)
+            {
+                sourceFeedWatermark = 0;
+                return false;
+            }
+            if (manifest.NamespaceId != _namespaceId)
+                throw new InvalidDataException("Provider snapshot belongs to another FLD namespace.");
+            foreach (ulong runId in manifest.RunIds)
+            {
+                if (!File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1")))
+                {
+                    sourceFeedWatermark = 0;
+                    return false;
+                }
+            }
+            if (manifest.OverlayHash is not null)
+            {
+                string overlayPath = Path.Combine(directory, ProviderSnapshotOverlayName);
+                if (!File.Exists(overlayPath))
+                {
+                    sourceFeedWatermark = 0;
+                    return false;
+                }
+                byte[] hash = SHA256.HashData(File.ReadAllBytes(overlayPath));
+                if (!CryptographicOperations.FixedTimeEquals(hash, manifest.OverlayHash))
+                    throw new InvalidDataException("Provider snapshot overlay checksum mismatch.");
+            }
+            sourceFeedWatermark = manifest.SourceFeedWatermark;
+            return true;
+        }
+    }
+
     /// <summary>Releases a source generation and permits its formerly pinned Runs to be collected.</summary>
     public void ReleaseProviderSnapshot(Guid generation)
     {
