@@ -1977,3 +1977,10 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] `RemoteBatchCommit` now enforces `MaximumOperationsPerBatch = 4096` in its shared write-copy boundary, before allocating copied arrays. Both `Writes` and `RelayWrites` are independently bounded; relay subset validation remains unchanged.
 - [x C] This makes the FLD durable ingress honor the same 4,096-operation bound used by the BIN-SYNC relay adapter instead of accepting an unbounded caller-supplied `IReadOnlyList`.
 - [~ T] Add exact boundary tests for 4,096 accepted and 4,097 rejected for both Writes and RelayWrites, including an oversized lazy/custom IReadOnlyList to prove rejection precedes element access/copy.
+
+### 7.54 Bound FLD relay read pages by total operations, not only batch count (2026-11-09)
+
+- [x C] `ReadRelayBatchPage` now caps the aggregate matching relay operations at `RemoteBatchCommit.MaximumOperationsPerBatch` (4,096), while preserving complete JournalSeq batch boundaries.
+- [x C] When the next whole journal batch would exceed the page operation budget, the cursor is deliberately left before that batch and the page returns immediately. The caller can resume from the returned cursor without splitting a JournalSeq or skipping data.
+- [x C] Nonmatching and already-acknowledged journal rows may still advance the scan cursor; only an included complete relay batch advances beyond its own JournalSeq.
+- [~ T] Add a test with multiple source batches whose aggregate exceeds 4,096 and prove the second page starts at the unconsumed batch, with no gap/duplicate and no split.
