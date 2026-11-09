@@ -2138,3 +2138,10 @@ Overall FLD integration contribution is estimated at **~75–80%**. Next C work:
 - [x C] Inspected the consolidated `FldDatabase` public path: it still owns `_overlay`, `_dirty`, `WalManager`, `OutboxLog`, `ApplyJournal`, `AtomicManifestStore`, and Run readers/builders directly. `FldDatabase.cs` does not consume `StorageDatabase` APIs.
 - [x C] `Fld1.Database.csproj` references `Fld1.Storage`, but the reference alone does not prove that the database is backed by the generic Storage engine. The two-project assembly split is real; backend reuse/overlay composition is not yet complete.
 - [~ C] Do not replace FLD WAL/Run/Manifest persistence with `StorageDatabase` without a separate format/recovery ADR and compatibility proof. Preserve FLD1 on-disk bytes, WAL recovery semantics and compaction behavior. The remaining task is to define and implement the intended reusable storage contract without duplicating WAL/Outbox metadata or introducing a third FLD runtime assembly.
+
+### 7.80 Host composition contract now has a concrete cross-repository guide (2026-11-09)
+
+- [x C] BIN-SYNC `feature/fld-external-storage` added `docs/FLD-BINSYNC-HOST-COMPOSITION.md`, binding the real FLD public methods to BIN-SYNC relay gate and GC delegate APIs.
+- [x C] The guide explicitly preserves dependency direction: FLD runtime has no BIN-SYNC dependency; the application host composes the two assemblies. It documents whole-JournalSeq projection, shared gate, all-author recovery, durable FLD ACK before RPM3 prune, and reference snapshot ownership.
+- [~ C] Neither repository currently contains the user's actual host executable. Therefore the guide is not a substitute for compiling the callback binding in that host; no third FLD runtime assembly is introduced.
+- [~ T] Host-level crash/reopen and concurrency tests remain required before the adapter or GC can be accepted.
