@@ -104,6 +104,8 @@ public sealed class RemoteBatchCommit
             && left.IsTombstone == right.IsTombstone
             && left.RecordId.AsSpan().SequenceEqual(right.RecordId)
             && left.AuthorNodeId.AsSpan().SequenceEqual(right.AuthorNodeId)
+            && left.OriginAuthorEpoch == right.OriginAuthorEpoch
+            && left.OriginSequence == right.OriginSequence
             && left.Value.AsSpan().SequenceEqual(right.Value);
 
     private static RemoteFieldWrite[] CopyWrites(
@@ -129,7 +131,9 @@ public sealed class RemoteBatchCommit
                 CopyId(write.AuthorNodeId, nameof(write.AuthorNodeId), nonzero: true),
                 CopyId(write.ChangeId, nameof(write.ChangeId), nonzero: true),
                 write.KeyEpoch,
-                write.IsTombstone);
+                write.IsTombstone,
+                write.OriginAuthorEpoch,
+                write.OriginSequence);
         }
         return copy;
     }
