@@ -1984,3 +1984,8 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] When the next whole journal batch would exceed the page operation budget, the cursor is deliberately left before that batch and the page returns immediately. The caller can resume from the returned cursor without splitting a JournalSeq or skipping data.
 - [x C] Nonmatching and already-acknowledged journal rows may still advance the scan cursor; only an included complete relay batch advances beyond its own JournalSeq.
 - [~ T] Add a test with multiple source batches whose aggregate exceeds 4,096 and prove the second page starts at the unconsumed batch, with no gap/duplicate and no split.
+
+### 7.55 CI diagnostics retained for the two-DLL migration (2026-11-09)
+
+- [x C] FLD CI now tees restore/build/test output into per-OS log files and uploads them even when a job fails. This addresses the current connector limitation where job-log retrieval returns BlobNotFound and lets the migration be debugged from artifacts without guessing.
+- [~ T] Wait for the new exact-head run and inspect the diagnostic artifacts; do not continue changing the project graph blind while all three OS jobs are red.
