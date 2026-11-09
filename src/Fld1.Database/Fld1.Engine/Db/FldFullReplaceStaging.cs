@@ -157,7 +157,7 @@ public sealed partial class FldDatabase
                 throw new InvalidDataException($"FULL_REPLACE staging produced an invalid Run: {verify.Status} {verify.Detail}");
             ulong runId = AllocateFullReplaceRunId();
             string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            WriteRunAtomically(runPath, runBytes);
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
 
             var stagedRun = new FullReplaceStageRun(
                 startIndex, entries.Count, runId, firstRecord.ToArray(), lastRecord.ToArray());
@@ -299,7 +299,12 @@ public sealed partial class FldDatabase
             foreach (FullReplaceStageRun run in state.Runs)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
-                byte[] runBytes = File.ReadAllBytes(runPath);
+                if (!_runBlobStore.TryOpenRead(RunBlobId(run.RunId), out StorageBlobReader? blobReader) ||
+                    blobReader is null)
+                    throw new InvalidDataException($"FULL_REPLACE staged Run {run.RunId} blob is missing or incomplete.");
+                byte[] runBytes;
+                using (blobReader)
+                    runBytes = blobReader.ReadAllBytes();
                 var runReader = new RunReader(runBytes);
                 if (!runReader.TryValidate(out var runVerify) || runReader.NamespaceId != _namespaceId)
                     throw new InvalidDataException($"FULL_REPLACE staged Run failed pre-switch validation: {runVerify.Status} {runVerify.Detail}");
@@ -352,7 +357,11 @@ public sealed partial class FldDatabase
             for (int i = state.AbortRunIndex; i < end; i++)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{state.Runs[i].RunId}.fld1");
-                try { if (File.Exists(runPath)) File.Delete(runPath); }
+                try
+                {
+                    _runBlobStore.DeleteBlob(RunBlobId(state.Runs[i].RunId));
+                    if (File.Exists(runPath)) File.Delete(runPath);
+                }
                 catch { return false; }
             }
             if (end == state.Runs.Length)
@@ -418,9 +427,13 @@ public sealed partial class FldDatabase
 
     private IReadOnlyList<FldProviderSnapshotEntry> ReadFullReplaceRun(FullReplaceStageRun run)
     {
-        string path = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
-        if (!File.Exists(path)) throw new InvalidDataException("FULL_REPLACE staged Run is missing.");
-        var reader = new RunReader(File.ReadAllBytes(path));
+        if (!_runBlobStore.TryOpenRead(RunBlobId(run.RunId), out StorageBlobReader? blobReader) ||
+            blobReader is null)
+            throw new InvalidDataException("FULL_REPLACE staged Run blob is missing or incomplete.");
+        byte[] runBytes;
+        using (blobReader)
+            runBytes = blobReader.ReadAllBytes();
+        var reader = new RunReader(runBytes);
         if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
             throw new InvalidDataException($"FULL_REPLACE staged Run is invalid: {verify.Status} {verify.Detail}");
         var result = new List<FldProviderSnapshotEntry>(run.EntryCount);
