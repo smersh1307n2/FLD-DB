@@ -20,6 +20,9 @@ namespace Fld1.Engine.Db;
 /// Put → mem overlay; Commit → WAL; Checkpoint → run + clear sealed prefix;
 /// Open recovers WAL records after last sealed SeqHi into overlay.
 /// </summary>
+/// <summary>Conservative count and maximum HLC of unpublished FLD local operations.</summary>
+public readonly record struct FldDraftHorizon(ulong Count, ulong MaxHlcWall, uint MaxHlcLogical);
+
 public sealed class FldDatabase : IDisposable
 {
     private readonly string _dbDir;
@@ -1504,6 +1507,75 @@ public sealed class FldDatabase : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         return _outbox.Watermark;
+    }
+
+    /// <summary>
+    /// Acquire the FLD application commit gate. Compose this after BIN-SYNC coordinator
+    /// and Node gates, but before the shared BIN-SYNC Storage transaction gate.
+    /// Dispose on the acquiring thread.
+    /// </summary>
+    public IDisposable AcquireCommitGuard()
+    {
+        Monitor.Enter(_commitLock);
+        return new CommitLease(_commitLock);
+    }
+
+    private sealed class CommitLease : IDisposable
+    {
+        private object? _gate;
+        public CommitLease(object gate) => _gate = gate;
+        public void Dispose()
+        {
+            object? gate = Interlocked.Exchange(ref _gate, null);
+            if (gate is not null) Monitor.Exit(gate);
+        }
+    }
+
+    /// <summary>
+    /// Snapshot the durable local draft horizon while the caller holds AcquireCommitGuard.
+    /// A healthy database has recovered every WAL→Outbox gap before Open returns; local
+    /// uncommitted overlay edits and the unacknowledged Outbox suffix are the only
+    /// unpublished source operations.
+    /// </summary>
+    public FldDraftHorizon ReadUnpublishedLocalDraftHorizon()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            ulong count = checked((ulong)_dirty.Count);
+            ulong maxWall = 0;
+            uint maxLogical = 0;
+            foreach (MemFieldValue value in _dirty.Values)
+                UpdateMaximumHlc(value.Wall, value.Logical, ref maxWall, ref maxLogical);
+
+            ulong cursor = _outbox.AckedThrough;
+            const int pageSize = 512;
+            while (true)
+            {
+                List<OutboxEntry> page = _outbox.ReadBatch(cursor, pageSize);
+                foreach (OutboxEntry entry in page)
+                {
+                    count = checked(count + 1);
+                    UpdateMaximumHlc(entry.Wall, entry.Logical, ref maxWall, ref maxLogical);
+                    cursor = entry.OutboxSeq;
+                }
+                if (page.Count < pageSize)
+                    break;
+            }
+
+            return new FldDraftHorizon(count, maxWall, maxLogical);
+        }
+    }
+
+    private static void UpdateMaximumHlc(
+        ulong wall, uint logical, ref ulong maxWall, ref uint maxLogical)
+    {
+        if (wall > maxWall || (wall == maxWall && logical > maxLogical))
+        {
+            maxWall = wall;
+            maxLogical = logical;
+        }
     }
 
     public void RotateWal()
