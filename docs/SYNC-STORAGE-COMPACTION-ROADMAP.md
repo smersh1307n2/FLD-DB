@@ -2261,3 +2261,13 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Host startup now recovers PendingApply and freezes the local provider feed under the composed FLD/Node/Storage guard before enabling Metadata Store-owned publication.
 - [~ T] Verify ACK aggregation, restart after ACK-before-compaction, duplicate ChangeId suppression and send retry on exact-head BIN-SYNC + FLD integration builds. No new FLD database disk-format change was made by this slice.
 - [~ C] FLD's generation-pinned provider snapshot, stable current-state identity/origin mapping and the remainder of the `IDataProvider` bridge are still open. Do not reintroduce a second FLD relay-payload journal to close that gap.
+
+
+### 7.89 FLD current-state provenance loss and Run v2 implementation decision (2026-11-09)
+
+- [x C] Code audit confirmed that ChangeId survives current overlay and WAL body v2/APPLY_COMMIT body v3 and the local Outbox, but FLD1 Run v1 does not encode it. Checkpoint/compaction therefore loses the current winner's ChangeId/Origin after acknowledged Outbox and sealed WAL/ApplyJournal payloads are reclaimed.
+- [x C] Added `docs/FLD-PROVIDER-SNAPSHOT-PROVENANCE-ADR.md`: backward-readable Run v2 provenance section, new origin-bearing WAL body versions, idempotent identity-stamp WAL record, v1 legacy-materialized semantics, and generation-pinned paged snapshot contract.
+- [~ C] Implement WAL body upgrades and identity-stamp record; then implement Run v2 writer/reader/verifier and thread identity through MemOverlay, RemoteBatchCommit, checkpoint and compaction.
+- [~ C] Implement the paged snapshot pin/release lifecycle and the host IDataProvider bridge. Legacy v1 rows must remain explicitly identity-zero; never synthesize ChangeId or Origin.
+- [~ T] Mixed v1/v2, replay, stamp-before-ACK crash, stale stamp, repeated stamp, compaction pin, cancellation/disposal and post-cutover ChangeId stability tests remain open.
+- [~ O] Benchmark Run v2 provenance section overhead and snapshot page allocation/latency; no disk format is emitted by this ADR until writer/recovery implementation is complete.
