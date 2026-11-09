@@ -2219,3 +2219,13 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] BIN-SYNC's vendored `StorageDatabase.cs` mirrors the exact FLD source (blob `d5fee8be06b9193a294ce4f7c37ba84b5f37da15`).
 - [~ T] Snapshot stability across update/delete/checkpoint/reopen and cache invalidation boundary tests remain pending.
 - [~ O] First snapshot after a commit epoch still builds an O(keys) sorted index; repeated snapshots within the epoch reuse it.
+
+
+### 7.83 Canonical Storage project injection for cross-repository host integration (2026-11-09)
+
+- [x C] `Fld1.Database.csproj` now accepts the `Fld1StorageProject` MSBuild property; its default remains the adjacent canonical `src/Fld1.Storage/Fld1.Storage.csproj`, so normal FLD builds are unchanged.
+- [x C] The optional BIN-SYNC `samples/FldBinSyncHost` sets the same property for both `BinSync.Storage` and `Fld1.Database`, ensuring a single canonical Storage project/assembly in the cross-repository host build.
+- [x C] Corrected the XML documentation ownership for `AcquireReferenceSnapshotGuard` and `OpenReferenceSnapshot`; no runtime behavior or FLD1 disk format changed.
+- [x C] Created `backup/cpass-2026-11-09-host-adapter-prep` at `cf4c454d539f96766ef66febb3d117c9a7c5965b` before the optional host integration layer.
+- [~ T] Build the cross-repository sample with explicit paths and validate project de-duplication; run normal FLD three-OS CI and test the snapshot-guard release path. No test/build pass is claimed for this C-pass.
+- [~ C] FLD Database remains protocol-neutral; its WAL/Run/Manifest/ApplyJournal format is not migrated to generic Storage. The two FLD runtime DLLs remain exactly `Fld1.Storage.dll` and `Fld1.Database.dll`.
