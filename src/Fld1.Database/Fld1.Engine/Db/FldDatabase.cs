@@ -1365,21 +1365,32 @@ public sealed class FldDatabase : IDisposable
                         cursor = item.JournalSeq;
                         continue;
                     }
-                    var matching = item.Commit.RelayFields
-                        .Where(f => f.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
-                        .Select(f => new RemoteFieldWrite(
-                            f.RecordId, f.FieldId, f.Value, f.Wall, f.Logical,
-                            f.AuthorNodeId, f.ChangeId, f.KeyEpoch, f.OpKind == 2))
-                        .ToArray();
-                    if (matching.Length == 0)
+                    int matchingCount = 0;
+                    foreach (WalFieldMutation field in item.Commit.RelayFields)
+                    {
+                        if (field.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
+                            matchingCount++;
+                    }
+                    if (matchingCount == 0)
                     {
                         cursor = item.JournalSeq;
                         continue;
                     }
-                    if (matching.Length > RemoteBatchCommit.MaximumOperationsPerBatch - operationCount)
+                    if (matchingCount > RemoteBatchCommit.MaximumOperationsPerBatch - operationCount)
                     {
                         operationLimitReached = true;
                         break;
+                    }
+
+                    var matching = new RemoteFieldWrite[matchingCount];
+                    int matchingIndex = 0;
+                    foreach (WalFieldMutation field in item.Commit.RelayFields)
+                    {
+                        if (!field.AuthorNodeId.AsSpan().SequenceEqual(authorFilter))
+                            continue;
+                        matching[matchingIndex++] = new RemoteFieldWrite(
+                            field.RecordId, field.FieldId, field.Value, field.Wall, field.Logical,
+                            field.AuthorNodeId, field.ChangeId, field.KeyEpoch, field.OpKind == 2);
                     }
 
                     var source = item.Commit;
