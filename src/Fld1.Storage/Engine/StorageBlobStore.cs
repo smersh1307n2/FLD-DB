@@ -447,6 +447,7 @@ public sealed class StorageBlobReader : IDisposable
     private readonly Guid _blobId;
     private readonly StorageBlobStore.StorageBlobMetadata _metadata;
     private readonly Action<Guid> _releasePin;
+    private readonly object _gate = new();
     private StorageSnapshot? _snapshot;
 
     public Guid BlobId => _blobId;
@@ -471,55 +472,66 @@ public sealed class StorageBlobReader : IDisposable
 
     public byte[] ReadPage(int pageIndex)
     {
-        _ = GetSnapshot();
-        if ((uint)pageIndex >= (uint)_metadata.PageCount)
-            throw new ArgumentOutOfRangeException(nameof(pageIndex));
-        string path = Path.Combine(
-            _directory, pageIndex.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".page");
-        byte[] page = File.ReadAllBytes(path);
-        int expectedLength = (int)Math.Min(
-            (ulong)_metadata.PageSize,
-            _metadata.Length - (ulong)pageIndex * (ulong)_metadata.PageSize);
-        if (page.Length != expectedLength)
-            throw new InvalidDataException($"Storage blob page {pageIndex} has an invalid length.");
-        return page;
+        lock (_gate)
+        {
+            _ = GetSnapshot();
+            if ((uint)pageIndex >= (uint)_metadata.PageCount)
+                throw new ArgumentOutOfRangeException(nameof(pageIndex));
+            string path = Path.Combine(
+                _directory, pageIndex.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".page");
+            byte[] page = File.ReadAllBytes(path);
+            int expectedLength = (int)Math.Min(
+                (ulong)_metadata.PageSize,
+                _metadata.Length - (ulong)pageIndex * (ulong)_metadata.PageSize);
+            if (page.Length != expectedLength)
+                throw new InvalidDataException($"Storage blob page {pageIndex} has an invalid length.");
+            return page;
+        }
     }
 
     public void CopyTo(Stream destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        ulong copied = 0;
-        for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
+        lock (_gate)
         {
-            byte[] page = ReadPage(pageIndex);
-            copied = checked(copied + (ulong)page.Length);
-            hash.AppendData(page);
-            destination.Write(page);
+            _ = GetSnapshot();
+            using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            ulong copied = 0;
+            for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
+            {
+                byte[] page = ReadPage(pageIndex);
+                copied = checked(copied + (ulong)page.Length);
+                hash.AppendData(page);
+                destination.Write(page);
+            }
+            if (copied != _metadata.Length ||
+                !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
+                throw new InvalidDataException("Storage blob content digest mismatch.");
         }
-        if (copied != _metadata.Length ||
-            !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
-            throw new InvalidDataException("Storage blob content digest mismatch.");
     }
 
     public byte[] ReadAllBytes()
     {
-        if (_metadata.Length > int.MaxValue)
-            throw new InvalidOperationException("Storage blob is too large to materialize as one byte array.");
-        byte[] result = new byte[(int)_metadata.Length];
-        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        int offset = 0;
-        for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
+        lock (_gate)
         {
-            byte[] page = ReadPage(pageIndex);
-            page.CopyTo(result, offset);
-            hash.AppendData(page);
-            offset += page.Length;
+            _ = GetSnapshot();
+            if (_metadata.Length > int.MaxValue)
+                throw new InvalidOperationException("Storage blob is too large to materialize as one byte array.");
+            byte[] result = new byte[(int)_metadata.Length];
+            using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            int offset = 0;
+            for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
+            {
+                byte[] page = ReadPage(pageIndex);
+                page.CopyTo(result, offset);
+                hash.AppendData(page);
+                offset += page.Length;
+            }
+            if (offset != result.Length ||
+                !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
+                throw new InvalidDataException("Storage blob length or content digest mismatch.");
+            return result;
         }
-        if (offset != result.Length ||
-            !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
-            throw new InvalidDataException("Storage blob length or content digest mismatch.");
-        return result;
     }
 
     private StorageSnapshot GetSnapshot()
@@ -527,9 +539,13 @@ public sealed class StorageBlobReader : IDisposable
 
     public void Dispose()
     {
-        StorageSnapshot? snapshot = Interlocked.Exchange(ref _snapshot, null);
-        if (snapshot is null) return;
-        try { snapshot.Dispose(); }
-        finally { _releasePin(_blobId); }
+        lock (_gate)
+        {
+            StorageSnapshot? snapshot = _snapshot;
+            if (snapshot is null) return;
+            _snapshot = null;
+            try { snapshot.Dispose(); }
+            finally { _releasePin(_blobId); }
+        }
     }
 }
