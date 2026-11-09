@@ -2120,3 +2120,15 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ C] Physical source move into `Fld1.Database` is complete, but generic `Fld1.Storage` backend reuse is not yet established: `Fld1.Database.csproj` references `Fld1.Storage`, while the database's core storage implementation still needs an audited migration/adapter. Preserve FLD1 file-format compatibility; do not replace the database storage engine with generic key-value storage by assumption.
 - [~ C] Cross-repository host adapter remains in the host integration layer: compose FLD guard/reference snapshot with BIN-SYNC relay gate, startup all-author reconciliation, publication, safe ACK, FLD durable ACK, then RPM3 prune.
 - [~ T] Verify project references and all tests after a runner-backed build; do not mark two-DLL extraction validated merely because the solution lists two runtime source projects.
+
+
+### 7.78 Progress estimate and remaining FLD gates (2026-11-09)
+
+Estimated completion (engineering assessment, not CI pass percentage):
+
+- Physical two-project source split (`Fld1.Database` + `Fld1.Storage`): **~90%** at source/project-layout level; runner-backed build and public/package audit still open.
+- Generic Storage backend/API integration and FLD1 compatibility audit: **~55%**; project reference exists, but the database engine's WAL/Run/Manifest path still needs explicit architecture/conformance review before claiming reuse.
+- FLD relay paging, ACK and reference-snapshot primitives: **~85%**; host composition with BIN-SYNC remains open.
+- Three-OS build/test acceptance: **~30%**; the latest workflows fail before runner steps (`steps=null`, no artifacts/logs), so no source-level conclusion can be drawn.
+
+Overall FLD integration contribution is estimated at **~75–80%**. Next C work: finish the storage/database contract audit and host binding; next T work must obtain a runner-backed three-OS execution and repair actual compiler/test failures if any. Preserve FLD1 persisted-format compatibility. No physical GC authorization until the composed host scan proves receipts, ChangeId and tombstone horizons.
