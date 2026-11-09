@@ -767,7 +767,7 @@ public sealed partial class FldDatabase : IDisposable
             }
 
             byte[] runBytes = builder.Build();
-            ulong runId = _nextRunId++;
+            ulong runId = AllocateRunId();
             string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
             var builtReader = new RunReader(runBytes);
             if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
@@ -1427,6 +1427,22 @@ public sealed partial class FldDatabase : IDisposable
 
         _runs[index] = (runId, path, bytes);
         return bytes;
+    }
+
+    /// <summary>
+    /// Allocates a root-global Run ID without colliding with active, staged or
+    /// crash-left immutable blobs whose IDs are not yet present in the manifest.
+    /// </summary>
+    private ulong AllocateRunId()
+    {
+        while (true)
+        {
+            ulong candidate = _nextRunId++;
+            if (candidate == 0) continue;
+            string path = Path.Combine(_dbDir, "runs", $"{candidate}.fld1");
+            if (!File.Exists(path) && !_runBlobStore.ContainsBlob(RunBlobId(candidate)))
+                return candidate;
+        }
     }
 
     private static Guid RunBlobId(ulong runId)
