@@ -2046,3 +2046,11 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ C] The remaining host work is concrete application wiring: one gate per namespace shared by every receive/send/ACK path; startup reconciliation of FLD journal, RPM3 cursor/mappings and Node Outbox before enabling send; callbacks flattening whole `RelayJournalBatch` groups; reference-snapshot delegate mapping; and failure/retry policy. These callbacks belong to the host integration layer, not either FLD runtime DLL.
 - [~ T] The latest BIN-SYNC code after `4382c49bffe1608ebabc4a483771b83242cbc81d` is not yet CI validated. That baseline compiled on all three OS jobs, but Core had 6 stale-fixture failures, Storage Integration 80 stale provider-contract failures and Fuzz/Lab passed.
 - [~ C] FLD generic Storage backend migration and three-OS CI repair remain separate open items; physical source consolidation into `Fld1.Database` does not mean `FldDatabase` uses `StorageDatabase` yet.
+
+### 7.68 Startup recovery now validates the RPM3 source cursor (2026-11-09)
+
+- [x C] BIN-SYNC added `ValidateRelayProvenanceRecovery` and `RecoverAndPublishPageAsync`. Before a namespace sender is opened, the host supplies `FldDatabase.GetRelayJournalHighWatermark()`; BIN-SYNC verifies that persisted RPM3 scan/ACK JournalSeq cursors do not exceed the durable FLD ApplyJournal high watermark.
+- [x C] The startup path then reads the next complete `ReadRelayBatchPage` page, resolves ChangeIds through the retained Node Outbox, persists the sequence mapping and cursor, and only then invokes the sender callback. A replaced/shortened source journal fails closed.
+- [~ C] Host composition remains required: keep every other sender disabled until this method succeeds; provide the real FLD guard/read/high-watermark/ACK callbacks; and use one publication gate instance across remote apply, sends and ACK.
+- [~ T] Startup regression/replacement and crash/replay tests remain open. BIN-SYNC code after the last tested baseline `4382c49bffe1608ebabc4a483771b83242cbc81d` has not yet passed exact-head CI.
+- [~ C] Generic Storage backend reuse and FLD physical-format/public-package audit remain open independently of the relay adapter.
