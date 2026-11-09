@@ -442,6 +442,62 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+    /// <summary>
+    /// Append a provider-owned local field draft with its stable source identity.
+    /// The author epoch is assigned by the host before the draft enters the feed;
+    /// OriginSequence must remain zero until BIN-SYNC freezes the operation.
+    /// This API is protocol-neutral and persists the supplied ChangeId unchanged.
+    /// </summary>
+    public void PutWithIdentity(
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        ReadOnlySpan<byte> value,
+        ReadOnlySpan<byte> changeId,
+        uint originAuthorEpoch,
+        ulong wall,
+        uint logical,
+        ushort keyEpoch = 0,
+        bool isTombstone = false)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        EnsureHealthy();
+        if (recordId.Length != 16)
+            throw new ArgumentException("RecordId must be 16 bytes.", nameof(recordId));
+        if (changeId.Length != 16)
+            throw new ArgumentException("ChangeId must be 16 bytes.", nameof(changeId));
+        byte aggregate = 0;
+        foreach (byte part in changeId) aggregate |= part;
+        if (aggregate == 0)
+            throw new ArgumentException("ChangeId must be nonzero.", nameof(changeId));
+        if (originAuthorEpoch == 0)
+            throw new ArgumentOutOfRangeException(nameof(originAuthorEpoch));
+        if (wall == 0)
+            throw new ArgumentOutOfRangeException(nameof(wall));
+        if (isTombstone && !value.IsEmpty)
+            throw new ArgumentException("Tombstone payload must be empty.", nameof(value));
+
+        var key = new MemFieldKey(recordId, fieldId);
+        var valueState = new MemFieldValue
+        {
+            Value = isTombstone ? Array.Empty<byte>() : value.ToArray(),
+            Wall = wall,
+            Logical = logical,
+            AuthorNodeId = _localAuthor,
+            KeyEpoch = keyEpoch,
+            IsTombstone = isTombstone,
+            ChangeId = changeId.ToArray(),
+            OriginAuthorEpoch = originAuthorEpoch,
+            OriginSequence = 0
+        };
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            _overlay.Put(key, valueState);
+            _dirty[key] = valueState;
+        }
+    }
+
     /// <summary>Tombstone one field. The delete is durable after Commit.</summary>
     public void Delete(ReadOnlySpan<byte> recordId, ushort fieldId, ushort keyEpoch = 0)
         => Put(recordId, fieldId, ReadOnlySpan<byte>.Empty, keyEpoch, isTombstone: true);
