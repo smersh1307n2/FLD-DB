@@ -26,6 +26,7 @@ public readonly record struct FldDraftHorizon(ulong Count, ulong MaxHlcWall, uin
 
 public sealed class FldDatabase : IDisposable
 {
+    // One root-wide lock: manifest, namespace WALs, runs and outboxes share this database owner.
     private const ulong StoragePartitionId = 0;
     private readonly string _dbDir;
     private readonly Fld1.Storage.Engine.StoragePartitionLease _storageLease;
@@ -110,77 +111,77 @@ public sealed class FldDatabase : IDisposable
         bool leaseTransferred = false;
         try
         {
-        storageLease = Fld1.Storage.Engine.StorageDatabase.AcquirePartitionLease(
-            dbDir, StoragePartitionId);
+            storageLease = Fld1.Storage.Engine.StorageDatabase.AcquirePartitionLease(
+                dbDir, StoragePartitionId);
 
-        var manifestStore = new AtomicManifestStore(dbDir);
-        var manifest = manifestStore.Load();
+            var manifestStore = new AtomicManifestStore(dbDir);
+            var manifest = manifestStore.Load();
 
-        if (!manifest.Namespaces.Contains(namespaceId))
-        {
-            manifest = manifestStore.Update(m => CloneManifest(m, nss: m.Namespaces
-                .Append(namespaceId).Distinct().OrderBy(x => x).ToList()));
-        }
-
-        ulong checkpointedThroughCommitSeq = manifest.Runs
-            .Where(run => run.Ns == namespaceId)
-            .Select(run => run.SeqHi)
-            .DefaultIfEmpty(0UL)
-            .Max();
-
-        string walDir = Path.Combine(dbDir, "wal");
-        string outboxDir = Path.Combine(dbDir, "outbox");
-        string outboxPath = Path.Combine(outboxDir, $"ns_{namespaceId}.obx");
-        bool hasOutboxHistory = File.Exists(outboxPath) && new FileInfo(outboxPath).Length > 16
-                                || File.Exists(outboxPath + ".ack")
-                                || File.Exists(outboxPath + ".state");
-        bool hasWalData = Directory.EnumerateFiles(walDir, $"ns_{namespaceId}.*.log")
-            .Any(path => new FileInfo(path).Length > WalHeader.Size);
-        string applyJournalPath = Path.Combine(outboxDir, $"ns_{namespaceId}.apply");
-        bool hasApplyHistory = (File.Exists(applyJournalPath)
-                                && new FileInfo(applyJournalPath).Length > 16)
-                               || File.Exists(applyJournalPath + ".relayack");
-        bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
-                              || hasWalData
-                              || hasOutboxHistory
-                              || hasApplyHistory;
-        byte[] author = LocalAuthorStore.LoadOrCreate(dbDir, localAuthor, hasDurableData);
-
-        var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
-        OutboxLog? outbox = null;
-        ApplyJournal? applyJournal = null;
-        try
-        {
-            outbox = OutboxLog.Open(
-                outboxDir, namespaceId, checkpointedThroughCommitSeq);
-            applyJournal = ApplyJournal.Open(outboxDir, namespaceId);
-
-            var db = new FldDatabase(
-                dbDir, namespaceId, author, wal, outbox, applyJournal, storageLease, manifestStore,
-                options.AutoCheckpointOverlayFields,
-                options.TruncateSealedWal,
-                options.AutoCompactRunCount);
-
-            db.LoadRunsFromManifest(manifest);
-            db.GcOrphanRuns();
-            db.ReplayWalIntoOverlay(walRecords);
-            db._applyJournal.ValidateRelayAckWatermarks();
-            if (db._truncateSealedWal && db._lastSealedCommitSeq != 0)
+            if (!manifest.Namespaces.Contains(namespaceId))
             {
-                db._wal.TruncateSealedSegments(db._lastSealedCommitSeq);
-                db._applyJournal.CompactAcknowledgedRelayPayloads(db._lastSealedCommitSeq);
+                manifest = manifestStore.Update(m => CloneManifest(m, nss: m.Namespaces
+                    .Append(namespaceId).Distinct().OrderBy(x => x).ToList()));
             }
-            leaseTransferred = true;
-            return db;
-        }
-        catch
-        {
-            // Open must not leak file handles when Manifest/Run/Outbox recovery fails.
-            try { applyJournal?.Dispose(); } catch { /* preserve original open error */ }
-            try { outbox?.Dispose(); } catch { /* preserve original open error */ }
-            try { wal.Dispose(); } catch { /* preserve original open error */ }
-            throw;
-        }
+
+            ulong checkpointedThroughCommitSeq = manifest.Runs
+                .Where(run => run.Ns == namespaceId)
+                .Select(run => run.SeqHi)
+                .DefaultIfEmpty(0UL)
+                .Max();
+
+            string walDir = Path.Combine(dbDir, "wal");
+            string outboxDir = Path.Combine(dbDir, "outbox");
+            string outboxPath = Path.Combine(outboxDir, $"ns_{namespaceId}.obx");
+            bool hasOutboxHistory = File.Exists(outboxPath) && new FileInfo(outboxPath).Length > 16
+                                    || File.Exists(outboxPath + ".ack")
+                                    || File.Exists(outboxPath + ".state");
+            bool hasWalData = Directory.EnumerateFiles(walDir, $"ns_{namespaceId}.*.log")
+                .Any(path => new FileInfo(path).Length > WalHeader.Size);
+            string applyJournalPath = Path.Combine(outboxDir, $"ns_{namespaceId}.apply");
+            bool hasApplyHistory = (File.Exists(applyJournalPath)
+                                    && new FileInfo(applyJournalPath).Length > 16)
+                                   || File.Exists(applyJournalPath + ".relayack");
+            bool hasDurableData = manifest.Runs.Any(run => run.Ns == namespaceId)
+                                  || hasWalData
+                                  || hasOutboxHistory
+                                  || hasApplyHistory;
+            byte[] author = LocalAuthorStore.LoadOrCreate(dbDir, localAuthor, hasDurableData);
+
+            var (wal, walRecords) = WalManager.Open(walDir, namespaceId, options.WalRotateAfterBytes);
+            OutboxLog? outbox = null;
+            ApplyJournal? applyJournal = null;
+            try
+            {
+                outbox = OutboxLog.Open(
+                    outboxDir, namespaceId, checkpointedThroughCommitSeq);
+                applyJournal = ApplyJournal.Open(outboxDir, namespaceId);
+
+                var db = new FldDatabase(
+                    dbDir, namespaceId, author, wal, outbox, applyJournal, storageLease, manifestStore,
+                    options.AutoCheckpointOverlayFields,
+                    options.TruncateSealedWal,
+                    options.AutoCompactRunCount);
+
+                db.LoadRunsFromManifest(manifest);
+                db.GcOrphanRuns();
+                db.ReplayWalIntoOverlay(walRecords);
+                db._applyJournal.ValidateRelayAckWatermarks();
+                if (db._truncateSealedWal && db._lastSealedCommitSeq != 0)
+                {
+                    db._wal.TruncateSealedSegments(db._lastSealedCommitSeq);
+                    db._applyJournal.CompactAcknowledgedRelayPayloads(db._lastSealedCommitSeq);
+                }
+                leaseTransferred = true;
+                return db;
+            }
+            catch
+            {
+                // Open must not leak file handles when Manifest/Run/Outbox recovery fails.
+                try { applyJournal?.Dispose(); } catch { /* preserve original open error */ }
+                try { outbox?.Dispose(); } catch { /* preserve original open error */ }
+                try { wal.Dispose(); } catch { /* preserve original open error */ }
+                throw;
+            }
         }
         finally
         {
