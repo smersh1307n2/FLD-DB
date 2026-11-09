@@ -18,10 +18,16 @@ public readonly struct RunFieldState
     public readonly uint Logical;
     public readonly ReadOnlyMemory<byte> AuthorNodeId;
     public readonly ReadOnlyMemory<byte> Value;
+    public readonly ReadOnlyMemory<byte> ChangeId;
+    public readonly uint OriginAuthorEpoch;
+    public readonly ulong OriginSequence;
 
     public RunFieldState(
         bool found, bool isTombstone, ushort fieldId, ushort keyEpoch,
-        ulong wall, uint logical, ReadOnlyMemory<byte> author, ReadOnlyMemory<byte> value)
+        ulong wall, uint logical, ReadOnlyMemory<byte> author, ReadOnlyMemory<byte> value,
+        ReadOnlyMemory<byte> changeId = default,
+        uint originAuthorEpoch = 0,
+        ulong originSequence = 0)
     {
         Found = found;
         IsTombstone = isTombstone;
@@ -31,6 +37,9 @@ public readonly struct RunFieldState
         Logical = logical;
         AuthorNodeId = author;
         Value = value;
+        ChangeId = changeId;
+        OriginAuthorEpoch = originAuthorEpoch;
+        OriginSequence = originSequence;
     }
 
     public static RunFieldState NotFound => default;
@@ -89,7 +98,57 @@ public readonly struct RunReader
         ulong slotOff = RunHeader.ReadSlotOff(file);
         int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
         ulong dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
-        return TryGetFieldFromCluster(file, (int)dataOffset, fieldId, out state);
+        if (!TryGetFieldFromCluster(file, (int)dataOffset, fieldId, out state))
+            return false;
+
+        if (RunHeader.ReadBinaryVersion(file) != RunConstants.ProvenanceBinaryVersion)
+            return true;
+
+        if (TryFindProvenance(file, recordId, fieldId, out ReadOnlyMemory<byte> changeId,
+                out uint originAuthorEpoch, out ulong originSequence))
+        {
+            state = new RunFieldState(
+                state.Found, state.IsTombstone, state.FieldId, state.KeyEpoch,
+                state.Wall, state.Logical, state.AuthorNodeId, state.Value,
+                changeId, originAuthorEpoch, originSequence);
+        }
+        return true;
+    }
+
+    private bool TryFindProvenance(
+        ReadOnlySpan<byte> file,
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        out ReadOnlyMemory<byte> changeId,
+        out uint originAuthorEpoch,
+        out ulong originSequence)
+    {
+        changeId = ReadOnlyMemory<byte>.Empty;
+        originAuthorEpoch = 0;
+        originSequence = 0;
+        uint count = RunHeader.ReadProvenanceCount(file);
+        ulong tableOff = RunHeader.ReadProvenanceOff(file);
+        int lo = 0;
+        int hi = checked((int)count) - 1;
+        while (lo <= hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            int pos = checked((int)tableOff + mid * RunConstants.ProvenanceEntrySize);
+            ReadOnlySpan<byte> row = file.Slice(pos, RunConstants.ProvenanceEntrySize);
+            int recordOrder = row.Slice(0, 16).SequenceCompareTo(recordId);
+            ushort rowField = BinaryPrimitives.ReadUInt16LittleEndian(row.Slice(16, 2));
+            int compare = recordOrder != 0 ? recordOrder : rowField.CompareTo(fieldId);
+            if (compare == 0)
+            {
+                changeId = _file.Slice(pos + 20, 16);
+                originAuthorEpoch = BinaryPrimitives.ReadUInt32LittleEndian(row.Slice(36, 4));
+                originSequence = BinaryPrimitives.ReadUInt64LittleEndian(row.Slice(40, 8));
+                return true;
+            }
+            if (compare < 0) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        return false;
     }
 
     private static int FindCluster(ReadOnlySpan<byte> file, ReadOnlySpan<byte> recordId)
