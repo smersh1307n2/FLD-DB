@@ -1578,6 +1578,123 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+    /// <summary>
+    /// Check whether a durable FLD APPLY journal entry still retains this incoming
+    /// transport receipt identity. Any retained entry is treated as a live reference,
+    /// including entries whose relay payload is already acknowledged but not compacted.
+    /// </summary>
+    public bool HasPendingReceiptReference(
+        ReadOnlySpan<byte> senderPeer, uint authorEpoch, uint transportPeerEpoch,
+        uint namespaceId, ReadOnlySpan<byte> batchId)
+    {
+        if (senderPeer.Length != 16 || batchId.Length != 16)
+            throw new ArgumentException("Receipt identity values must be 16 bytes.");
+        if (namespaceId != _namespaceId)
+            return false;
+        byte[] sender = senderPeer.ToArray();
+        byte[] batch = batchId.ToArray();
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            return AnyApplyJournal(commit =>
+                commit.NamespaceId == namespaceId &&
+                commit.SenderEpoch == transportPeerEpoch &&
+                commit.IssuerEpoch == authorEpoch &&
+                commit.SenderPeer.AsSpan().SequenceEqual(sender) &&
+                commit.BatchId.AsSpan().SequenceEqual(batch));
+        }
+    }
+
+    /// <summary>
+    /// Check pending FLD source/relay work for a ChangeId. Unsealed WAL is a
+    /// conservative global blocker because it may replay any operation after restart.
+    /// </summary>
+    public bool HasPendingChangeIdReference(ReadOnlySpan<byte> changeId)
+    {
+        if (changeId.Length != 16)
+            throw new ArgumentException("ChangeId must be 16 bytes.", nameof(changeId));
+        byte[] id = changeId.ToArray();
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (_dirty.Values.Any(value => value.ChangeId.AsSpan().SequenceEqual(id)) ||
+                _pendingFlushedCommitSeq > _lastSealedCommitSeq)
+                return true;
+            if (AnyOutboxEntry(entry => entry.ChangeId.AsSpan().SequenceEqual(id)))
+                return true;
+            return AnyApplyJournal(commit =>
+                commit.Fields.Any(field => field.ChangeId.AsSpan().SequenceEqual(id)) ||
+                commit.RelayFields.Any(field => field.ChangeId.AsSpan().SequenceEqual(id)));
+        }
+    }
+
+    /// <summary>
+    /// Check pending FLD source/relay work for a RecordId or tombstone ChangeId.
+    /// Any unsealed WAL prefix blocks conservatively because recovery may replay it.
+    /// </summary>
+    public bool HasPendingRecordReference(
+        ReadOnlySpan<byte> recordId, ReadOnlySpan<byte> tombstoneChangeId)
+    {
+        if (recordId.Length != 16 || tombstoneChangeId.Length != 16)
+            throw new ArgumentException("RecordId and ChangeId must be 16 bytes.");
+        byte[] record = recordId.ToArray();
+        byte[] tombstone = tombstoneChangeId.ToArray();
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (_dirty.Keys.Any(key => key.RecordId.AsSpan().SequenceEqual(record)) ||
+                _pendingFlushedCommitSeq > _lastSealedCommitSeq)
+                return true;
+            if (AnyOutboxEntry(entry =>
+                entry.RecordId.AsSpan().SequenceEqual(record) ||
+                entry.ChangeId.AsSpan().SequenceEqual(tombstone)))
+                return true;
+            return AnyApplyJournal(commit =>
+                commit.Fields.Any(field =>
+                    field.RecordId.AsSpan().SequenceEqual(record) ||
+                    field.ChangeId.AsSpan().SequenceEqual(tombstone)) ||
+                commit.RelayFields.Any(field =>
+                    field.RecordId.AsSpan().SequenceEqual(record) ||
+                    field.ChangeId.AsSpan().SequenceEqual(tombstone)));
+        }
+    }
+
+    private bool AnyOutboxEntry(Func<OutboxEntry, bool> predicate)
+    {
+        ulong cursor = _outbox.AckedThrough;
+        const int pageSize = 512;
+        while (true)
+        {
+            List<OutboxEntry> page = _outbox.ReadBatch(cursor, pageSize);
+            foreach (OutboxEntry entry in page)
+            {
+                if (predicate(entry))
+                    return true;
+                cursor = entry.OutboxSeq;
+            }
+            if (page.Count < pageSize)
+                return false;
+        }
+    }
+
+    private bool AnyApplyJournal(Func<WalApplyCommit, bool> predicate)
+    {
+        ulong cursor = 0;
+        const int pageSize = 256;
+        while (true)
+        {
+            IReadOnlyList<ApplyJournalRecord> page = _applyJournal.ReadBatches(cursor, pageSize);
+            foreach (ApplyJournalRecord record in page)
+            {
+                cursor = record.JournalSeq;
+                if (predicate(record.Commit))
+                    return true;
+            }
+            if (page.Count < pageSize)
+                return false;
+        }
+    }
+
     public void RotateWal()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
