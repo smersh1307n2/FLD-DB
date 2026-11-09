@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Fld1.Core.Hlc;
 using Fld1.Core.Hash;
 using Fld1.Core.Uuid;
@@ -1639,10 +1640,12 @@ public sealed class FldDatabase : IDisposable
             throw new ArgumentException("RecordId and ChangeId must be 16 bytes.");
         byte[] record = recordId.ToArray();
         byte[] tombstone = tombstoneChangeId.ToArray();
+        ulong recordLo = BinaryPrimitives.ReadUInt64LittleEndian(record);
+        ulong recordHi = BinaryPrimitives.ReadUInt64LittleEndian(record.AsSpan(8));
         lock (_commitLock)
         {
             EnsureHealthy();
-            if (_dirty.Keys.Any(key => key.RecordId.AsSpan().SequenceEqual(record)) ||
+            if (_dirty.Keys.Any(key => key.RecLo == recordLo && key.RecHi == recordHi) ||
                 _pendingFlushedCommitSeq > _lastSealedCommitSeq)
                 return true;
             if (AnyOutboxEntry(entry =>
