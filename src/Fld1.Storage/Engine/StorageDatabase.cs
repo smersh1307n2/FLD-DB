@@ -460,12 +460,35 @@ public sealed class StorageSnapshot : IDisposable
         public IReadOnlyList<StorageEntry> ReadPage(int limit)
         {
             if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
-            ObjectDisposedException.ThrowIf(_disposed, this);
             SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
             if (_finished) return Array.Empty<StorageEntry>();
 
             var result = new List<StorageEntry>(Math.Min(limit, Math.Max(0, values.Count - _index)));
-            while (_index < values.Count && result.Count < limit)
+            VisitPage(limit, Add);
+            return result;
+
+            bool Add(in StorageEntryView entry)
+            {
+                result.Add(new StorageEntry(entry.Key.ToArray(), entry.Value.ToArray()));
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Visit a bounded page using borrowed key/value spans. The view is valid only
+        /// during the callback; do not retain it or perform asynchronous work in the visitor.
+        /// Returning false stops after the current entry, which is considered visited.
+        /// </summary>
+        public int VisitPage(int limit, StorageEntryVisitor visitor)
+        {
+            if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
+            ArgumentNullException.ThrowIfNull(visitor);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
+            if (_finished) return 0;
+
+            int visited = 0;
+            while (_index < values.Count && visited < limit)
             {
                 StorageDatabase.StorageKey key = values.Keys[_index];
                 byte[] value = values.Values[_index];
@@ -481,11 +504,14 @@ public sealed class StorageSnapshot : IDisposable
                 if (_afterKey.Length != 0 && keyBytes.SequenceCompareTo(_afterKey) <= 0)
                     continue;
 
-                result.Add(new StorageEntry(keyBytes.ToArray(), value.ToArray()));
+                var entry = new StorageEntryView(keyBytes, value);
+                visited++;
+                if (!visitor(in entry))
+                    break;
             }
             if (_index >= values.Count)
                 _finished = true;
-            return result;
+            return visited;
         }
 
         public void Dispose()
@@ -510,6 +536,22 @@ public sealed class StorageSnapshot : IDisposable
 }
 
 public sealed record StorageEntry(byte[] Key, byte[] Value);
+
+/// <summary>Borrowed, read-only view of one key/value entry in a Storage snapshot.</summary>
+public readonly ref struct StorageEntryView
+{
+    public ReadOnlySpan<byte> Key { get; }
+    public ReadOnlySpan<byte> Value { get; }
+
+    internal StorageEntryView(ReadOnlySpan<byte> key, ReadOnlySpan<byte> value)
+    {
+        Key = key;
+        Value = value;
+    }
+}
+
+/// <summary>Visitor for bounded snapshot prefix scans; the view must not escape the callback.</summary>
+public delegate bool StorageEntryVisitor(in StorageEntryView entry);
 
 /// <summary>Optimistic transaction conflict: the database changed after the batch began.</summary>
 public sealed class StorageConflictException : InvalidOperationException
