@@ -2341,6 +2341,7 @@ public sealed partial class FldDatabase : IDisposable
     {
         string tempPath = path + ".tmp";
         string directory = Path.GetDirectoryName(path)!;
+        StorageDirectorySync.CreateDirectoryDurable(directory);
 
         using (var fs = new FileStream(
             tempPath, FileMode.Create, FileAccess.Write, FileShare.None,
@@ -2351,23 +2352,9 @@ public sealed partial class FldDatabase : IDisposable
         }
 
         File.Move(tempPath, path, overwrite: true);
-        TryFsyncDirectory(directory);
-    }
-
-    private static void TryFsyncDirectory(string directory)
-    {
-        try
-        {
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            {
-                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                fs.Flush(flushToDisk: true);
-            }
-        }
-        catch
-        {
-            // Best-effort; directory handles are not flushable on every supported filesystem.
-        }
+        // The compatibility mirror must be durable before the FLD manifest or
+        // FULL_REPLACE stage cursor can publish a reference to it.
+        StorageDirectorySync.Flush(directory);
     }
 
     public void Dispose()
