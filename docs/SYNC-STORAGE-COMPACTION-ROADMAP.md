@@ -1886,3 +1886,16 @@ This closes only the reusable BIN-SYNC mapping-store primitive. It does **not** 
 ### 7.46 Recovery checkpoint branch (2026-11-09)
 
 Created `backup/pre-binsync-provenance-map-2026-11-09` at `a962371ec293708f61f02453f9bc7c441eafa015` before further cross-repository integration work. Earlier FLD backup branches remain unchanged.
+
+
+### 7.47 Current FLD relay/reference API surface confirmed (2026-11-09)
+
+The current pre-extraction `Fld1.Engine.Db.FldDatabase` already exposes the core semantic operations needed by the later neutral adapter:
+
+- `ReadRelayBatchPage(ReadOnlySpan<byte> authorNodeId, ulong afterJournalSeq, int limit)` returns whole ApplyJournal batches for one original author and a global `ScannedThroughJournalSeq`, including gaps with no matching author.
+- `AcknowledgeRelayBatches(ReadOnlySpan<byte> authorNodeId, ulong safeThroughJournalSeq)` persists the per-author source ACK.
+- `AcquireCommitGuard()` supplies the thread-affine application commit lease.
+- `ReadUnpublishedLocalDraftHorizon()` reports dirty overlay + unacknowledged Outbox + conservative unsealed-WAL barrier.
+- `OpenReferenceSnapshot()` builds one immutable index of ChangeId, RecordId and receipt references. `FldReferenceSnapshot` exposes `UnpublishedLocalDraftHorizon`, `HasChangeIdReference`, `HasRecordReference` and `HasReceiptReference`.
+
+This means the semantic operations and reference-index implementation exist in the current Engine project; they are not yet extracted behind the approved neutral/two-DLL public boundary. The BIN-SYNC adapter can be a thin wrapper after that extraction, but must not be added as a direct Engine→BinSync dependency or premature integration package now. The existing roadmap order in §7.20 remains unchanged.
