@@ -238,7 +238,7 @@ public sealed partial class FldDatabase
                 throw new InvalidDataException("FULL_REPLACE commit proof does not match the staged manifest digest.");
             if (state.NextIndex != state.ExpectedEntryCount)
                 throw new InvalidOperationException("FULL_REPLACE snapshot is incomplete.");
-            if (_dirty.Count != 0 || _overlay.Count != 0 ||
+            if (_dirty.Count != 0 || _overlay.Count != 0 || _manifestDirty ||
                 _pendingFlushedCommitSeq != _lastSealedCommitSeq)
                 throw new InvalidOperationException("FLD local writes must be committed and checkpointed before FULL_REPLACE generation switch.");
             if (_databaseHasUnpublishedLocalChanges())
@@ -506,15 +506,22 @@ public sealed partial class FldDatabase
 
     private static void WriteFullReplaceStage(string path, FullReplaceStageState state)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        string directory = Path.GetDirectoryName(path)!;
+        bool directoryExisted = Directory.Exists(directory);
+        Directory.CreateDirectory(directory);
+        if (!directoryExisted)
+            TryFsyncDirectory(Path.GetDirectoryName(directory)!);
         byte[] bytes = EncodeFullReplaceStage(state);
         string temporary = path + ".tmp";
-        using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var stream = new FileStream(
+            temporary, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 4096, FileOptions.WriteThrough))
         {
             stream.Write(bytes);
-            stream.Flush(true);
+            stream.Flush(flushToDisk: true);
         }
         File.Move(temporary, path, true);
+        TryFsyncDirectory(directory);
     }
 
     private static FullReplaceStageState ReadFullReplaceStage(string path)
