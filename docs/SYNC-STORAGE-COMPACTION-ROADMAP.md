@@ -2018,3 +2018,15 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ O] Allocation/throughput benefit is structurally clear for a page that reaches its cap, but no benchmark claim is made until the relay paging benchmark is run on a stable green build.
 - [~ T] Add boundary/resume tests for a page that is nearly full and a following group that does not fit; verify cursor remains before that group.
 - [~ T] Exact current HEAD `4c1393a08f51b9bab751d870a2a5282e155c6c7d` has failed PR/push CI on Ubuntu, macOS and Windows. The connector still does not return job logs/artifacts for this private-repo run; no root cause is asserted. This code change is therefore build/test unverified.
+
+
+### 7.64 Recovery point after bounded relay-page projection (2026-11-09)
+
+- [x C] Created `backup/after-relay-page-bounds-2026-11-09` at `98cf8dbf7f696b63e960a379be12fd77ef817dea` before proceeding to the next cross-store integration slice.
+- [x C] Retained earlier recovery points `backup/cpass-2026-11-09-0915` and `backup/post-two-dll-consolidation-2026-11-09`.
+- [~ T] Current CI remains red on all three OS jobs, with diagnostic artifacts unavailable; keep the new relay paging changes provisional until exact-head validation.
+
+### 7.65 Make diagnostic CI shell portable across Windows and Unix (2026-11-09)
+
+- [x C] Set explicit `shell: bash` on restore/build/test diagnostic steps. The prior `mkdir -p`/`tee` instrumentation implicitly used PowerShell on Windows and was not portable; this could fail before producing logs.
+- [~ T] The new three-OS run on `71dfbf2b1238d5cfd78d84755cc366c04b1a0c2d` still concluded failure, but GitHub's job API returned `logs_url: null`, `steps: null`, and no artifacts for all three jobs. This indicates no retrievable runner diagnostics, not a verified source/compiler failure. Keep the build status unverified and stop changing code based on guesses.
