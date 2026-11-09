@@ -15,7 +15,7 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Fld1.Wal\Fld1.Wal.csproj" />
-    <ProjectReference Include="..\..\src\Fld1.Core\Fld1.Core.csproj" />
+    <ProjectReference Include="..\..\src\Fld1.Database\Fld1.Database.csproj" />
+    <ProjectReference Include="..\..\src\Fld1.Database\Fld1.Database.csproj" />
   </ItemGroup>
 </Project>
