@@ -2075,3 +2075,11 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] The Metadata Store resolver reads existing immutable relay rows by ChangeId and returns their sequence; it creates no second ChangeId ledger or payload copy. Missing/compacted rows fail closed.
 - [~ T] Verify both modes, cutover, retained/missing relay rows, peer baseline rollover and map reopen/recovery. No exact-head CI yet for the new implementation.
 - [~ C] Host integration still must select and keep the matching coordinator/provider publication mode stable, and serialize all receive/send/ACK paths through the shared gate.
+
+### 7.72 Drain all FLD relay pages before downstream publication (2026-11-09)
+
+- [x C] BIN-SYNC publication gate now drains all FLD relay pages through the durable `GetRelayJournalHighWatermark()` before allowing any sender callback. It loops across the 4,096-operation aggregate page cap and commits each page's sequence mappings/cursor before proceeding.
+- [x C] The read callback receives the prior RPM3 cursor and returns the page's scanned cursor plus source high watermark from the same FLD commit-guarded read. Non-progress with source history remaining, cursor regression or cursor beyond source high fails closed.
+- [x C] The gate starts closed on process startup and remains closed after unresolved ChangeId, uncertain APPLY outcome, or recovery validation failure. Only successful full `RecoverAndPublishAsync` reconciliation opens outbound scheduling.
+- [~ T] Multi-page resume, no-unmapped-send, failure/recovery, empty-author pages and operation-cap boundaries remain T-pass requirements.
+- [~ C] Host must use one gate for all remote apply and sender paths, provide the cursor-aware page callback and avoid direct session sends outside the gate.
