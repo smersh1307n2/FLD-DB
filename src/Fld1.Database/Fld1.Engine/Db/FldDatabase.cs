@@ -1008,9 +1008,13 @@ public sealed class FldDatabase : IDisposable
     {
         resolved = FieldResolver.Resolved.Miss;
         bool have = false;
-        ulong bestWall = 0; uint bestLog = 0;
+        ulong bestWall = 0;
+        uint bestLog = 0;
         byte[]? bestAuthor = null;
         byte[]? bestValue = null;
+        byte[]? bestChangeId = null;
+        uint bestOriginAuthorEpoch = 0;
+        ulong bestOriginSequence = 0;
         bool bestTomb = false;
         ushort bestEpoch = 0;
 
@@ -1018,28 +1022,48 @@ public sealed class FldDatabase : IDisposable
         if (_overlay.TryGet(key, out var mem) && mem is not null)
         {
             have = true;
-            bestWall = mem.Wall; bestLog = mem.Logical;
-            bestAuthor = mem.AuthorNodeId; bestValue = mem.Value;
-            bestTomb = mem.IsTombstone; bestEpoch = mem.KeyEpoch;
+            bestWall = mem.Wall;
+            bestLog = mem.Logical;
+            bestAuthor = mem.AuthorNodeId;
+            bestValue = mem.Value;
+            bestTomb = mem.IsTombstone;
+            bestEpoch = mem.KeyEpoch;
+            bestChangeId = mem.ChangeId;
+            bestOriginAuthorEpoch = mem.OriginAuthorEpoch;
+            bestOriginSequence = mem.OriginSequence;
         }
 
         for (int i = 0; i < _runs.Count; i++)
         {
             var bytes = EnsureRunCached(i);
-            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var st) || !st.Found)
+            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var state) || !state.Found)
                 continue;
-            var author = st.AuthorNodeId.ToArray();
-            if (!have || FieldResolver.IsNewer(st.Wall, st.Logical, author, bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
+
+            byte[] author = state.AuthorNodeId.ToArray();
+            if (!have || FieldResolver.IsNewer(
+                    state.Wall, state.Logical, author,
+                    bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
             {
                 have = true;
-                bestWall = st.Wall; bestLog = st.Logical;
+                bestWall = state.Wall;
+                bestLog = state.Logical;
                 bestAuthor = author;
-                bestValue = st.IsTombstone ? Array.Empty<byte>() : st.Value.ToArray();
-                bestTomb = st.IsTombstone; bestEpoch = st.KeyEpoch;
+                bestValue = state.IsTombstone ? Array.Empty<byte>() : state.Value.ToArray();
+                bestTomb = state.IsTombstone;
+                bestEpoch = state.KeyEpoch;
+                bestChangeId = state.ChangeId.IsEmpty ? Array.Empty<byte>() : state.ChangeId.ToArray();
+                bestOriginAuthorEpoch = state.OriginAuthorEpoch;
+                bestOriginSequence = state.OriginSequence;
             }
         }
-        if (!have) return false;
-        resolved = new FieldResolver.Resolved(true, bestTomb, bestEpoch, bestWall, bestLog, bestAuthor, bestValue);
+
+        if (!have)
+            return false;
+
+        resolved = new FieldResolver.Resolved(
+            true, bestTomb, bestEpoch, bestWall, bestLog,
+            bestAuthor, bestValue, bestChangeId,
+            bestOriginAuthorEpoch, bestOriginSequence);
         return true;
     }
 
