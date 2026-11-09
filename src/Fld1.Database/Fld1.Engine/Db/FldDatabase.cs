@@ -33,6 +33,8 @@ public sealed class FldDatabase : IDisposable
     private readonly MemOverlay _overlay = new();
     private readonly Dictionary<MemFieldKey, MemFieldValue> _dirty = new();
     private ApplyJournal _applyJournal;
+    // Rebuildable in-memory author discovery cache; no duplicate durable author index.
+    private Dictionary<string, (byte[] Author, ulong MaxUnackedJournalSeq)>? _unacknowledgedRelayAuthors;
     private readonly AtomicManifestStore _manifestStore;
     private readonly object _commitLock = new();
     private WalManager _wal;
@@ -1273,6 +1275,7 @@ public sealed class FldDatabase : IDisposable
                 if (!_applyJournal.AppendIfMissing(commitSeq, walPayload))
                     throw new InvalidDataException("Remote batch appeared in apply journal during serialized commit.");
                 _applyJournal.Flush();
+                AddUnacknowledgedRelayAuthorsLocked(walCommit.RelayFields, commitSeq);
 
                 foreach (var pair in winners)
                 {
@@ -1323,41 +1326,75 @@ public sealed class FldDatabase : IDisposable
         lock (_commitLock)
         {
             EnsureHealthy();
-            var authors = new SortedDictionary<string, byte[]>(StringComparer.Ordinal);
-            ulong cursor = 0;
-            ulong highWatermark = _applyJournal.HighWatermark;
-            while (cursor < highWatermark)
+            if (_unacknowledgedRelayAuthors is null)
+                RebuildUnacknowledgedRelayAuthorsLocked();
+
+            return _unacknowledgedRelayAuthors!.Values
+                .OrderBy(item => Convert.ToHexString(item.Author), StringComparer.Ordinal)
+                .Select(item => item.Author.ToArray())
+                .ToArray();
+        }
+    }
+
+    private void RebuildUnacknowledgedRelayAuthorsLocked()
+    {
+        var authors = new Dictionary<string, (byte[] Author, ulong MaxUnackedJournalSeq)>(StringComparer.Ordinal);
+        ulong cursor = 0;
+        ulong highWatermark = _applyJournal.HighWatermark;
+        while (cursor < highWatermark)
+        {
+            var page = _applyJournal.ReadBatches(cursor, 128);
+            if (page.Count == 0)
+                throw new InvalidDataException("ApplyJournal ended before its durable relay high watermark.");
+
+            foreach (var item in page)
             {
-                var page = _applyJournal.ReadBatches(cursor, 128);
-                if (page.Count == 0)
-                    throw new InvalidDataException("ApplyJournal ended before its durable relay high watermark.");
-
-                foreach (var item in page)
+                cursor = item.JournalSeq;
+                var batchAuthors = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+                foreach (WalFieldMutation field in item.Commit.RelayFields)
                 {
-                    cursor = item.JournalSeq;
-                    var batchAuthors = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-                    foreach (WalFieldMutation field in item.Commit.RelayFields)
-                    {
-                        if (field.AuthorNodeId.AsSpan().SequenceEqual(_localAuthor))
-                            continue;
-                        string authorKey = Convert.ToHexString(field.AuthorNodeId);
-                        batchAuthors.TryAdd(authorKey, field.AuthorNodeId);
-                    }
-
-                    foreach (var pair in batchAuthors)
-                    {
-                        if (!_applyJournal.IsRelayAcknowledged(pair.Value, item.JournalSeq))
-                            authors.TryAdd(pair.Key, pair.Value.ToArray());
-                    }
+                    if (field.AuthorNodeId.AsSpan().SequenceEqual(_localAuthor))
+                        continue;
+                    string authorKey = Convert.ToHexString(field.AuthorNodeId);
+                    batchAuthors.TryAdd(authorKey, field.AuthorNodeId);
                 }
 
-                if (page.Count < 128)
-                    break;
+                foreach (var pair in batchAuthors)
+                {
+                    if (_applyJournal.IsRelayAcknowledged(pair.Value, item.JournalSeq))
+                        continue;
+                    if (authors.TryGetValue(pair.Key, out var prior))
+                        authors[pair.Key] = (prior.Author, Math.Max(prior.MaxUnackedJournalSeq, item.JournalSeq));
+                    else
+                        authors.Add(pair.Key, (pair.Value.ToArray(), item.JournalSeq));
+                }
             }
 
-            if (cursor < highWatermark)
-                throw new InvalidDataException("ApplyJournal relay-author scan did not reach its durable high watermark.");
-            return authors.Values.Select(author => author.ToArray()).ToArray();
+            if (page.Count < 128)
+                break;
+        }
+
+        if (cursor < highWatermark)
+            throw new InvalidDataException("ApplyJournal relay-author scan did not reach its durable high watermark.");
+        _unacknowledgedRelayAuthors = authors;
+    }
+
+    private void AddUnacknowledgedRelayAuthorsLocked(
+        IReadOnlyList<WalFieldMutation> relayFields, ulong journalSeq)
+    {
+        if (_unacknowledgedRelayAuthors is null)
+            return;
+
+        foreach (WalFieldMutation field in relayFields)
+        {
+            if (field.AuthorNodeId.AsSpan().SequenceEqual(_localAuthor))
+                continue;
+            string authorKey = Convert.ToHexString(field.AuthorNodeId);
+            if (_unacknowledgedRelayAuthors.TryGetValue(authorKey, out var prior))
+                _unacknowledgedRelayAuthors[authorKey] =
+                    (prior.Author, Math.Max(prior.MaxUnackedJournalSeq, journalSeq));
+            else
+                _unacknowledgedRelayAuthors.Add(authorKey, (field.AuthorNodeId.ToArray(), journalSeq));
         }
     }
 
@@ -1484,6 +1521,13 @@ public sealed class FldDatabase : IDisposable
         {
             EnsureHealthy();
             _applyJournal.AcknowledgeRelayBatches(authorNodeId, safeThroughJournalSeq);
+            if (_unacknowledgedRelayAuthors is { } authors)
+            {
+                string authorKey = Convert.ToHexString(authorNodeId);
+                if (authors.TryGetValue(authorKey, out var pending) &&
+                    safeThroughJournalSeq >= pending.MaxUnackedJournalSeq)
+                    authors.Remove(authorKey);
+            }
         }
     }
 
