@@ -2312,3 +2312,10 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Host composition now validates exact identity across `FldDatabaseDataProvider`, `FldDatabase`, `StorageSyncCoordinator` and `FldRemoteBatchApplyStore`; no FLD→BIN-SYNC runtime dependency was introduced.
 - [~ C] Provider publication-mode cutover and durable author-epoch closure, FULL_REPLACE receiver staging/switch, restart-durable sender snapshot generation and the remaining generic Storage/host scheduler decisions remain open.
 - [~ T] Cross-repository host build, IDataProvider conformance, Outbox lease fencing, page retry/seek, identity stamping and restart/crash tests are deferred to the T-pass. No test/build result is claimed.
+
+
+### 7.94 Provider author-epoch closure over the FLD unpublished horizon (2026-11-09)
+
+- [x C] Optional BIN-SYNC `FldDatabaseDataProvider` implements `IProviderAuthorEpochClosureStore`; it closes an author epoch only under the FLD commit guard when no dirty drafts/replayable WAL horizon and no unacknowledged Outbox rows remain.
+- [x C] Local append and epoch activation serialize with closure using the same FLD→provider lock order. The active epoch value is read from the host's durable BIN-SYNC identity authority; FLD does not duplicate protocol epoch metadata.
+- [~ T] Validate pending draft/outbox refusal, replayable WAL refusal, concurrent append-vs-close, restart, stale epoch rejection and valid reactivation. No build/test result is claimed.
