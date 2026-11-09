@@ -1150,7 +1150,7 @@ public sealed partial class FldDatabase : IDisposable
         return runId;
     }
 
-    /// <summary>Remove run files on disk not referenced by in-memory run list.</summary>
+    /// <summary>Remove run files absent from both the active manifest and durable provider snapshot pins.</summary>
     private void GcOrphanRuns()
     {
         string runsDir = Path.Combine(_dbDir, "runs");
