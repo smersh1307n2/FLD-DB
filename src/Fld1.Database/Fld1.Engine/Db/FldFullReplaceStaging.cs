@@ -639,14 +639,16 @@ public sealed partial class FldDatabase
             ulong runId = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
             byte[] min = bytes.AsSpan(offset, 16).ToArray(); offset += 16;
             byte[] max = bytes.AsSpan(offset, 16).ToArray(); offset += 16;
+            bool emptyMarker = expected == 0 && runCount == 1 && i == 0 && count == 0;
             if (start != expectedStart || count < 0 || count > FullReplaceStagePageLimit ||
-                runId == 0 || !uniqueRunIds.Add(runId) ||
+                (count == 0 && !emptyMarker) || runId == 0 || !uniqueRunIds.Add(runId) ||
                 min.AsSpan().SequenceCompareTo(max) > 0)
                 throw new InvalidDataException("FULL_REPLACE stage page index is not canonical.");
             expectedStart = checked(expectedStart + count);
             runs[i] = new FullReplaceStageRun(start, count, runId, min, max);
         }
-        if (expectedStart != next || abortRunIndex > runCount || digest.Length != 32 || lastSortKey.Length != 19)
+        if (expectedStart != next || abortRunIndex > runCount || digest.Length != 32 || lastSortKey.Length != 19 ||
+            ((flags & 1) != 0 && (next != expected || runCount == 0)))
             throw new InvalidDataException("FULL_REPLACE stage cursor does not match its page index.");
         return new FullReplaceStageState(
             generation, namespaceId, baseManifestGeneration, baseSealed, watermark, expected, next,
