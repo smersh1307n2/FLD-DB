@@ -77,6 +77,7 @@ public sealed class StorageBlobStore
             bool alreadyComplete = false;
             ExecuteBatch(batch =>
             {
+                alreadyComplete = false;
                 if (batch.TryGet(metadataKey, out byte[]? existing))
                 {
                     StorageBlobMetadata decoded = DecodeMetadata(existing!);
