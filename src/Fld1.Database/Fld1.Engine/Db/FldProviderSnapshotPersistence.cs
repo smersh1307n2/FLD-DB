@@ -349,7 +349,16 @@ public sealed partial class FldDatabase
         }
         if (_runBlobStore.ContainsBlob(RunBlobId(runId)))
             return false; // A pending blob is not a valid snapshot Run; do not hide it behind a mirror.
-        return File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1"));
+        string legacyPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+        if (!File.Exists(legacyPath))
+            return false;
+        if (verifyContent)
+        {
+            var legacyReader = new RunReader(File.ReadAllBytes(legacyPath));
+            if (!legacyReader.TryValidate(out _) || legacyReader.NamespaceId != _namespaceId)
+                throw new InvalidDataException($"Pinned provider snapshot legacy Run {runId} failed validation.");
+        }
+        return true;
     }
 
     private static byte[][] BuildProviderRecordIdIndex(RunReader[] runs)
