@@ -9,6 +9,7 @@ using Fld1.Manifest.Format;
 using Fld1.Manifest.IO;
 using Fld1.Run.Builder;
 using Fld1.Run.Reader;
+using Fld1.Storage.Engine;
 using Fld1.Wal.Codec;
 using Fld1.Wal.Format;
 using Fld1.Wal.IO;
