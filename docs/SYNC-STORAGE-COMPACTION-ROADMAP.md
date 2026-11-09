@@ -2061,3 +2061,9 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] The method re-verifies the persisted report against the accepted roster and checks that the supplied member seed reproduces its stored signature before the session sends it.
 - [~ C] Host scheduler should use the accepted-report resend path for retries; it must not call `PublishAndSendAppliedOriginFrontierAsync` merely to retry a failed send, because that intentionally creates a new report sequence.
 - [~ T] Lost-send/retry, wrong-key, stale-roster and member-epoch rollover cases remain T-pass coverage.
+
+### 7.70 Enforce one shared relay gate per BIN-SYNC coordinator (2026-11-09)
+
+- [x C] BIN-SYNC now exposes `StorageRelayPublicationGate.For(coordinator)` backed by a `ConditionalWeakTable`; the constructor is private, so all host components using the supported factory share the same async publication/ACK gate for one coordinator namespace.
+- [~ C] The host must keep one `StorageSyncCoordinator` instance per Node/provider/namespace and must not bypass the gate with direct sender calls. This is an application composition rule, not something FLD can enforce without taking a BIN-SYNC dependency.
+- [~ T] Concurrency, cancellation and failure-release behavior remain T-pass tests.
