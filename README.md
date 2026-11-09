@@ -5,7 +5,7 @@ Embedded field-store with multi-process access via **FLD Shared Engine**.
 Implements [FLD KERNEL SPECIFICATION v1.5.9-DRAFT](docs/FLD-KERNEL-SPEC-v1.5.9.md) and integrates with [BIN-SYNC](https://github.com/smersh1307n2/BIN-SYNC).
 
 
-Storage Core extraction and dependency boundaries are defined in [FLD Storage Core architecture](docs/FLD-STORAGE-CORE-ARCHITECTURE.md). The solution now exposes the approved two-runtime-assembly shape: `Fld1.Storage.dll` (domain-neutral byte engine) and `Fld1.Database.dll` (FLD field database, referencing Storage). The Database project links Core/Run/WAL/Manifest/Engine source into one assembly; the source folders remain for organization. Storage-only consumers must not load the Database assembly. The consolidated project and solution wiring are committed, but exact-head build/test validation is still pending.
+Storage Core extraction and dependency boundaries are defined in [FLD Storage Core architecture](docs/FLD-STORAGE-CORE-ARCHITECTURE.md). The solution now exposes the approved two-runtime-assembly shape: `Fld1.Storage.dll` (domain-neutral byte engine) and `Fld1.Database.dll` (FLD field database, referencing Storage). The Database project physically owns Core/Run/WAL/Manifest/Engine source under `src/Fld1.Database`; no linked-source shortcut or intermediate runtime DLLs remain in the solution. Storage-only consumers must not load the Database assembly. The consolidated project and solution wiring are committed, but exact-head build/test validation is still pending.
 
 Architecture for using FLD-DB as a generic Metadata Store (including the Storage-only role) is described in the [BIN-SYNC Metadata Storage and External Data Provider Architecture](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORAGE-ARCHITECTURE.md). The associated [Metadata Store conformance contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/METADATA-STORE-CONFORMANCE.md) and [Data Provider conformance contract](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/DATA-PROVIDER-CONFORMANCE.md) define their separate semantic boundaries. The [change staging, coalescing and retention policy](https://github.com/smersh1307n2/BIN-SYNC/blob/feature/fld-external-storage/docs/CHANGE-STAGING-AND-RETENTION.md) defines which unpublished local changes may be collapsed and when Outbox entries become immutable.
 
@@ -30,7 +30,7 @@ The cross-repository [sync storage compaction roadmap](docs/SYNC-STORAGE-COMPACT
 |--------|--------|
 | `Fld1.Storage.dll` | Separate generic byte-key/value engine; first runtime assembly |
 | `Fld1.Database.dll` | Second runtime assembly; links Core, Run, WAL, Manifest and Engine source into one deployable database layer |
-| Internal source areas | Core (Uuid7/HLC/Hash), Run (builder/reader), WAL, Manifest and Engine remain separate folders for code organization, not runtime DLL boundaries |
+| Database source areas | Core (Uuid7/HLC/Hash), Run (builder/reader), WAL, Manifest and Engine are physically consolidated under `src/Fld1.Database` while retaining their namespace/folder organization |
 
 ## Simple API
 
