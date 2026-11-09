@@ -487,6 +487,29 @@ public sealed partial class FldDatabase
         StorageDirectorySync.Flush(directory);
     }
 
+    /// <summary>
+    /// Removes only generation directories that never published a final manifest.
+    /// Such directories cannot represent a returned durable snapshot token and
+    /// therefore cannot pin Runs after process recovery.
+    /// </summary>
+    private void PruneIncompleteProviderSnapshotDirectories()
+    {
+        string root = Path.Combine(_dbDir, "snapshots");
+        if (!Directory.Exists(root)) return;
+        bool changed = false;
+        foreach (string directory in Directory.EnumerateDirectories(root))
+        {
+            string name = Path.GetFileName(directory);
+            if (!Guid.TryParseExact(name, "N", out _) ||
+                File.Exists(Path.Combine(directory, ProviderSnapshotManifestName)))
+                continue;
+            Directory.Delete(directory, recursive: true);
+            changed = true;
+        }
+        if (changed)
+            StorageDirectorySync.Flush(root);
+    }
+
     private HashSet<ulong>? GetPinnedProviderSnapshotRunIds()
     {
         var pinned = new HashSet<ulong>();
