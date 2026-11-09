@@ -1971,3 +1971,9 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ T] Exact HEAD `a0ea90b9490cc1d93eafd048008327a5bcb4a54f` produced two failed PR CI runs (three OS jobs each). Check-run annotations exist (1–2 per job), but the connected log/annotation endpoints returned unavailable data; root cause is not confirmed. Do not assume this is a source compile failure or blame a specific project file without diagnostics.
 - [~ T] The current branch has advanced to `ec28803a9eb0ef26a8c3313be5ed75e97f18d104` with the roadmap note; then `a0ea90b9490cc1d93eafd048008327a5bcb4a54f` is the last commit with visible check-run diagnostics. Exact current-head status must be checked again after the next source/CI run.
 - [~ C] Before further package/entry-point cleanup, obtain actionable build diagnostics for the consolidated project. The two-DLL structure is a scaffold, not accepted completion until Ubuntu/macOS/Windows pass.
+
+### 7.53 Enforce the cross-layer remote apply operation bound (2026-11-09)
+
+- [x C] `RemoteBatchCommit` now enforces `MaximumOperationsPerBatch = 4096` in its shared write-copy boundary, before allocating copied arrays. Both `Writes` and `RelayWrites` are independently bounded; relay subset validation remains unchanged.
+- [x C] This makes the FLD durable ingress honor the same 4,096-operation bound used by the BIN-SYNC relay adapter instead of accepting an unbounded caller-supplied `IReadOnlyList`.
+- [~ T] Add exact boundary tests for 4,096 accepted and 4,097 rejected for both Writes and RelayWrites, including an oversized lazy/custom IReadOnlyList to prove rejection precedes element access/copy.
