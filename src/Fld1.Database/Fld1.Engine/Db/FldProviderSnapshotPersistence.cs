@@ -30,7 +30,7 @@ public sealed partial class FldDatabase
             Guid generation = Guid.NewGuid();
             ulong sourceFeedWatermark = _outbox.HighWatermark;
             string snapshotDirectory = GetProviderSnapshotDirectory(generation);
-            Directory.CreateDirectory(snapshotDirectory);
+            StorageDirectorySync.CreateDirectoryDurable(snapshotDirectory);
 
             try
             {
@@ -100,7 +100,10 @@ public sealed partial class FldDatabase
                 try
                 {
                     if (Directory.Exists(snapshotDirectory))
+                    {
                         Directory.Delete(snapshotDirectory, recursive: true);
+                        StorageDirectorySync.Flush(Path.GetDirectoryName(snapshotDirectory)!);
+                    }
                 }
                 catch
                 {
@@ -281,7 +284,10 @@ public sealed partial class FldDatabase
 
             string snapshotDirectory = GetProviderSnapshotDirectory(generation);
             if (Directory.Exists(snapshotDirectory))
+            {
                 Directory.Delete(snapshotDirectory, recursive: true);
+                StorageDirectorySync.Flush(Path.GetDirectoryName(snapshotDirectory)!);
+            }
             GcOrphanRuns();
         }
     }
@@ -308,6 +314,7 @@ public sealed partial class FldDatabase
                 if (_providerSnapshots.Remove(generation, out FldProviderSnapshot? snapshot))
                     snapshot.Dispose();
                 Directory.Delete(directory, recursive: true);
+                StorageDirectorySync.Flush(root);
             }
             GcOrphanRuns();
         }
@@ -419,11 +426,14 @@ public sealed partial class FldDatabase
 
     private static void WriteDurableSnapshotFile(string path, byte[] bytes)
     {
-        using var stream = new FileStream(
+        using (var stream = new FileStream(
             path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-            64 * 1024, FileOptions.WriteThrough);
-        stream.Write(bytes);
-        stream.Flush(flushToDisk: true);
+            64 * 1024, FileOptions.WriteThrough))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        StorageDirectorySync.Flush(Path.GetDirectoryName(path)!);
     }
 
     private static void WriteProviderSnapshotManifest(string directory, byte[] bytes)
@@ -433,6 +443,7 @@ public sealed partial class FldDatabase
         if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
         WriteDurableSnapshotFile(temporaryPath, bytes);
         File.Move(temporaryPath, manifestPath, overwrite: true);
+        StorageDirectorySync.Flush(directory);
     }
 
     private HashSet<ulong>? GetPinnedProviderSnapshotRunIds()
