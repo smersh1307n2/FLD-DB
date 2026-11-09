@@ -1964,3 +1964,10 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [~ T] The previous exact-head workflow on `4f248e0edee5506d74f63ee5913ed3de193231f5` failed on Ubuntu, macOS and Windows. GitHub's job-log endpoint currently returns BlobNotFound, so the root cause is not yet verified. Do not attribute those failures to the new extraction without reading the new-head logs.
 - [~ T] The new consolidated project has not yet completed a build/test run. Validate linked source globs, package graph, generated assembly metadata, all test projects and both benchmark projects before treating the two-DLL extraction as done.
 - [~ C] Remaining: finish consumer/public API migration, make exactly two runtime assemblies the supported package output, retire or explicitly mark old component csproj entry points as internal-only, update docs and integration adapters. Keep FLD semantics independent of BIN-SYNC protocol types.
+
+### 7.52 Consolidated assembly exact-head CI result (2026-11-09)
+
+- [x C] The README now describes the two-runtime-assembly solution accurately and marks the consolidation as committed but not yet validated.
+- [~ T] Exact HEAD `a0ea90b9490cc1d93eafd048008327a5bcb4a54f` produced two failed PR CI runs (three OS jobs each). Check-run annotations exist (1–2 per job), but the connected log/annotation endpoints returned unavailable data; root cause is not confirmed. Do not assume this is a source compile failure or blame a specific project file without diagnostics.
+- [~ T] The current branch has advanced to `ec28803a9eb0ef26a8c3313be5ed75e97f18d104` with the roadmap note; then `a0ea90b9490cc1d93eafd048008327a5bcb4a54f` is the last commit with visible check-run diagnostics. Exact current-head status must be checked again after the next source/CI run.
+- [~ C] Before further package/entry-point cleanup, obtain actionable build diagnostics for the consolidated project. The two-DLL structure is a scaffold, not accepted completion until Ubuntu/macOS/Windows pass.
