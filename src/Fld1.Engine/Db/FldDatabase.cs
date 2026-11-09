@@ -1540,33 +1540,92 @@ public sealed class FldDatabase : IDisposable
     /// </summary>
     public FldDraftHorizon ReadUnpublishedLocalDraftHorizon()
     {
+        using FldReferenceSnapshot snapshot = OpenReferenceSnapshot();
+        return snapshot.UnpublishedLocalDraftHorizon;
+    }
+
+    /// <summary>
+    /// Build one immutable index of host-side ChangeId, RecordId and receipt references.
+    /// Call under the composed application commit lease and reuse the result for all
+    /// candidate checks in that GC pass.
+    /// </summary>
+    public FldReferenceSnapshot OpenReferenceSnapshot()
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
             EnsureHealthy();
-            ulong count = checked((ulong)_dirty.Count);
+            var changeIds = new HashSet<FldId128>();
+            var recordIds = new HashSet<FldId128>();
+            var receipts = new HashSet<FldReceiptReferenceKey>();
+
+            ulong draftCount = checked((ulong)_dirty.Count);
             ulong maxWall = 0;
             uint maxLogical = 0;
-            foreach (MemFieldValue value in _dirty.Values)
-                UpdateMaximumHlc(value.Wall, value.Logical, ref maxWall, ref maxLogical);
+            Span<byte> recordIdBuffer = stackalloc byte[16];
+            foreach (var pair in _dirty)
+            {
+                UpdateMaximumHlc(pair.Value.Wall, pair.Value.Logical, ref maxWall, ref maxLogical);
+                if (pair.Value.ChangeId.Length != 16)
+                    throw new InvalidDataException("Dirty FLD mutation has no canonical ChangeId.");
+                changeIds.Add(FldId128.From(pair.Value.ChangeId));
+                pair.Key.WriteRecordId(recordIdBuffer);
+                recordIds.Add(FldId128.From(recordIdBuffer));
+            }
 
-            ulong cursor = _outbox.AckedThrough;
-            const int pageSize = 512;
+            ulong outboxCursor = _outbox.AckedThrough;
+            const int outboxPageSize = 512;
             while (true)
             {
-                int visited = _outbox.VisitUnackedBatch(cursor, pageSize, Visit);
-                if (visited < pageSize)
+                int visited = _outbox.VisitUnackedBatch(outboxCursor, outboxPageSize, VisitOutbox);
+                if (visited < outboxPageSize)
                     break;
             }
 
-            return new FldDraftHorizon(count, maxWall, maxLogical);
-
-            bool Visit(in OutboxEntryView entry)
+            ulong journalCursor = 0;
+            const int journalPageSize = 256;
+            while (true)
             {
-                count = checked(count + 1);
+                IReadOnlyList<ApplyJournalRecord> page =
+                    _applyJournal.ReadBatches(journalCursor, journalPageSize);
+                foreach (ApplyJournalRecord record in page)
+                {
+                    journalCursor = record.JournalSeq;
+                    WalApplyCommit commit = record.Commit;
+                    if (commit.NamespaceId != _namespaceId)
+                        continue;
+                    receipts.Add(new FldReceiptReferenceKey(
+                        FldId128.From(commit.SenderPeer), commit.SenderEpoch,
+                        commit.IssuerEpoch, commit.NamespaceId, FldId128.From(commit.BatchId)));
+                    AddFields(commit.Fields);
+                    AddFields(commit.RelayFields);
+                }
+                if (page.Count < journalPageSize)
+                    break;
+            }
+
+            return new FldReferenceSnapshot(
+                new FldDraftHorizon(draftCount, maxWall, maxLogical),
+                changeIds, recordIds, receipts,
+                _pendingFlushedCommitSeq > _lastSealedCommitSeq);
+
+            bool VisitOutbox(in OutboxEntryView entry)
+            {
+                draftCount = checked(draftCount + 1);
                 UpdateMaximumHlc(entry.Wall, entry.Logical, ref maxWall, ref maxLogical);
-                cursor = entry.OutboxSeq;
+                outboxCursor = entry.OutboxSeq;
+                changeIds.Add(FldId128.From(entry.ChangeId));
+                recordIds.Add(FldId128.From(entry.RecordId));
                 return true;
+            }
+
+            void AddFields(IReadOnlyList<WalFieldMutation> fields)
+            {
+                foreach (WalFieldMutation field in fields)
+                {
+                    changeIds.Add(FldId128.From(field.ChangeId));
+                    recordIds.Add(FldId128.From(field.RecordId));
+                }
             }
         }
     }
