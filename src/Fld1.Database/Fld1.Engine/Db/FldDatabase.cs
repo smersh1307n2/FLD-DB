@@ -191,6 +191,7 @@ public sealed partial class FldDatabase : IDisposable
 
                 db.LoadRunsFromManifest(manifest);
                 db.RecoverFullReplaceStageCommitMarkers();
+                db.PruneIncompleteProviderSnapshotDirectories();
                 db.GcOrphanRuns();
                 db.ReplayWalIntoOverlay(walRecords);
                 db._applyJournal.ValidateRelayAckWatermarks();
