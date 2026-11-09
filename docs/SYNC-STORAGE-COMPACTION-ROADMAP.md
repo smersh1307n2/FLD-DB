@@ -2283,3 +2283,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [~ C] Generation-pinned paged snapshot still needs run-generation pin/release and bounded current-state pages. The host `IDataProvider` adapter and its local Outbox feed/key resolver/remote apply context are not yet implemented.
 - [~ T] No tests/build have been run for these slices. Required: legacy v1 reopen, mixed v1/v2, WAL v3/v4 old-body decode, stamp/replay crash cuts, stale/duplicate/conflicting stamp, checkpoint/compact identity survival and snapshot pin/release.
 - [~ O] Measure 48-byte provenance overhead, WAL stamp batches, binary search cost and snapshot page allocations after the snapshot API exists.
+
+
+### 7.91 Indexed immutable-run RecordId access for bounded provider snapshots (2026-11-09)
+
+- [x C] Added `RunReader.TryReadRecordIdAt(uint index, Span<byte> destination)`: O(1) slot lookup, no allocation, no scan of preceding clusters, and a caller-owned 16-byte destination.
+- [x C] Confirmed `RunBuilder` emits cluster slots in canonical RecordId order, so the primitive is suitable for a bounded k-way merge across pinned immutable run generations.
+- [~ C] Build the generation-pinned snapshot state over captured immutable run buffers plus a bounded overlay snapshot; merge record IDs/pages without materializing the whole database. Then expose the provider-facing snapshot/feed/current-state contract.
+- [~ T] Add index boundary, canonical order, empty run, destination-size and snapshot-vs-compaction stability tests. No build/test result is claimed for this commit.
+- [~ O] Measure page allocation and multi-run cursor cost after the snapshot API exists.
