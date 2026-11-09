@@ -176,6 +176,7 @@ public sealed partial class FldDatabase : IDisposable
                     options.AutoCompactRunCount);
 
                 db.LoadRunsFromManifest(manifest);
+                db.RecoverFullReplaceStageCommitMarkers();
                 db.GcOrphanRuns();
                 db.ReplayWalIntoOverlay(walRecords);
                 db._applyJournal.ValidateRelayAckWatermarks();
@@ -1164,6 +1165,10 @@ public sealed partial class FldDatabase : IDisposable
         if (snapshotPinnedRunIds is null)
             return; // Fail closed: never delete Runs if a snapshot pin manifest is corrupt.
         liveRunIds.UnionWith(snapshotPinnedRunIds);
+        HashSet<ulong>? stagedRunIds = GetUncommittedFullReplaceRunIds();
+        if (stagedRunIds is null)
+            return; // Corrupt staging metadata cannot authorize deletion of its Run files.
+        liveRunIds.UnionWith(stagedRunIds);
 
         foreach (string file in Directory.EnumerateFiles(runsDir, "*.fld1"))
         {
