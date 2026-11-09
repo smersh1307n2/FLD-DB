@@ -38,6 +38,20 @@ public sealed class StorageDatabase : IDisposable
     public static StorageDatabase Open(string directory, ulong partitionId, long walRotateAfterBytes = 64L * 1024 * 1024)
         => OpenCore(directory, partitionId, walRotateAfterBytes, faultInjector: null);
 
+    /// <summary>
+    /// Acquire the same cross-process single-writer fence used by StorageDatabase.Open
+    /// without opening or creating a generic Storage WAL. Domain databases with an
+    /// existing on-disk format can use this lease while retaining their own WAL codec.
+    /// </summary>
+    public static StoragePartitionLease AcquirePartitionLease(string directory, ulong partitionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        StorageDirectorySync.CreateDirectoryDurable(directory);
+        string walDirectory = Path.Combine(directory, "wal");
+        StorageDirectorySync.CreateDirectoryDurable(walDirectory);
+        return new StoragePartitionLease(WalWriterFence.Acquire(walDirectory, partitionId));
+    }
+
     internal static StorageDatabase OpenForTesting(
         string directory,
         ulong partitionId,
@@ -321,6 +335,21 @@ public sealed class StorageDatabase : IDisposable
         public static StorageKeyComparer Instance { get; } = new();
         public int Compare(StorageKey x, StorageKey y) => x.Span.SequenceCompareTo(y.Span);
     }
+}
+
+/// <summary>
+/// Cross-process single-writer lease for a Storage partition. It may also fence a
+/// domain-specific database that shares the physical directory but keeps its own WAL format.
+/// </summary>
+public sealed class StoragePartitionLease : IDisposable
+{
+    private WalWriterFence? _fence;
+
+    internal StoragePartitionLease(WalWriterFence fence)
+        => _fence = fence ?? throw new ArgumentNullException(nameof(fence));
+
+    public void Dispose()
+        => Interlocked.Exchange(ref _fence, null)?.Dispose();
 }
 
 /// <summary>One atomic set of opaque key/value mutations.</summary>
