@@ -1558,6 +1558,11 @@ public sealed class FldDatabase : IDisposable
                 if (visited < pageSize)
                     break;
             }
+            // Until WAL is sealed, recovery can reconstruct an acknowledged/compacted
+            // Outbox suffix. Keep the horizon non-zero so final-author closure cannot
+            // strand replayable local commits behind a retired epoch.
+            if (_pendingFlushedCommitSeq > _lastSealedCommitSeq && count == 0)
+                count = 1;
             return new FldDraftHorizon(count, maxWall, maxLogical);
 
             bool Visit(in OutboxEntryView entry)
@@ -1630,10 +1635,14 @@ public sealed class FldDatabase : IDisposable
                     break;
             }
 
+            bool unsealedWal = _pendingFlushedCommitSeq > _lastSealedCommitSeq;
+            // Unsealed WAL may replay an acknowledged/compacted Outbox suffix after
+            // restart. It is a conservative draft barrier until checkpoint/seal.
+            if (unsealedWal && draftCount == 0)
+                draftCount = 1;
             return new FldReferenceSnapshot(
                 new FldDraftHorizon(draftCount, maxWall, maxLogical),
-                changeIds, recordIds, receipts,
-                _pendingFlushedCommitSeq > _lastSealedCommitSeq);
+                changeIds, recordIds, receipts, unsealedWal);
 
             bool VisitOutbox(in OutboxEntryView entry)
             {
