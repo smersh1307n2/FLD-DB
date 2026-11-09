@@ -2171,3 +2171,10 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Created FLD-DB `backup/cpass-2026-11-09-publication-ceilings` at `01617ecaa06fef4bd4ec16e913f24ffd449158ae`.
 - [x C] Matching BIN-SYNC backup branch is `backup/cpass-2026-11-09-publication-ceilings` at `701077ed9a13ce476aaa1e679d9c17f16f0ced5f`.
 - [~ T] This is a recovery point for the unvalidated C-pass/API migration state, not a passing test checkpoint.
+
+
+### 7.77 BIN-SYNC map ownership validation before host publication (2026-11-09)
+
+- [x C] BIN-SYNC now validates that the RPM3 map belongs to the coordinator's metadata scope, local replica and exact durable StorageDatabase before every gate operation, including startup recovery and outbound-only scheduling.
+- [x C] Recovery checkpoint: `smersh1307n2/BIN-SYNC:backup/cpass-2026-11-09-publication-ceilings-v2` at `0f46e444529b77997ce1ba190838de3c4f4ecb6d`.
+- [~ T] Host callback/API migration and negative map-binding cases remain deferred to the T-pass. No FLD runtime dependency on BIN-SYNC is introduced.
