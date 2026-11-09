@@ -672,6 +672,23 @@ public sealed class OutboxLog : IDisposable
         }
     }
 
+    /// <summary>
+    /// Read-only borrowed-span enumeration of the unacknowledged suffix. Unlike the
+    /// consumer API this does not acquire or fence an Outbox lease; it cannot mutate
+    /// the log and is intended for host safety scans under the database commit gate.
+    /// </summary>
+    public int VisitUnackedBatch(ulong afterSeq, int limit, OutboxEntryVisitor visitor)
+    {
+        ArgumentNullException.ThrowIfNull(visitor);
+        lock (_lock)
+        {
+            EnsureUsable();
+            if (limit <= 0)
+                return 0;
+            return VisitBatchUnlocked(afterSeq, limit, visitor);
+        }
+    }
+
     private List<OutboxEntry> ReadBatchUnlocked(ulong afterSeq, int limit)
     {
         var result = new List<OutboxEntry>(Math.Min(limit, 64));
