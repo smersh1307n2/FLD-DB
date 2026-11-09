@@ -105,6 +105,7 @@ public sealed partial class FldDatabase
 
             var builder = new RunBuilder(_namespaceId);
             byte[] lastSortKey = state.LastSortKey.ToArray();
+            ValidateReplacementEntry(entries[0]);
             byte[] firstRecord = entries[0].RecordId;
             byte[] lastRecord = entries[^1].RecordId;
             for (int i = 0; i < entries.Count; i++)
@@ -375,7 +376,7 @@ public sealed partial class FldDatabase
         if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
             throw new InvalidDataException($"FULL_REPLACE staged Run is invalid: {verify.Status} {verify.Detail}");
         var result = new List<FldProviderSnapshotEntry>(run.EntryCount);
-        Span<byte> recordId = stackalloc byte[16];
+        byte[] recordId = new byte[16];
         for (uint i = 0; i < reader.NumClusters; i++)
         {
             if (!reader.TryReadRecordIdAt(i, recordId))
@@ -418,10 +419,10 @@ public sealed partial class FldDatabase
         return result;
     }
 
-    private static bool IsFullReplaceStageCommitted(FullReplaceStageState state, ManifestDocument manifest)
+    private bool IsFullReplaceStageCommitted(FullReplaceStageState state, ManifestDocument manifest)
     {
         if (state.IsCommitted) return true;
-        var active = manifest.Runs.Where(run => run.Ns == manifest.Namespaces.FirstOrDefault(ns => ns == run.Ns))
+        var active = manifest.Runs.Where(run => run.Ns == _namespaceId)
             .Select(run => run.RunId).ToHashSet();
         return state.Runs.Length != 0 &&
             state.Runs.All(run => active.Contains(run.RunId)) &&
@@ -447,7 +448,7 @@ public sealed partial class FldDatabase
     private static byte[] EncodeFullReplaceStage(FullReplaceStageState state)
     {
         int length = checked(4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 32 + 19 +
-            4 + state.BaseRunIds.Length * 8 + 4 + state.Runs.Length * 56 + 32);
+            4 + state.BaseRunIds.Length * 8 + 4 + state.Runs.Length * 48 + 32);
         byte[] bytes = new byte[length];
         int offset = 0;
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), FullReplaceStageMagic); offset += 4;
