@@ -43,6 +43,8 @@ public sealed partial class FldDatabase : IDisposable
     private const ulong StoragePartitionId = 0;
     private readonly string _dbDir;
     private readonly Fld1.Storage.Engine.StoragePartitionLease _storageLease;
+    private readonly Fld1.Storage.Engine.StorageDatabase _runStorage;
+    private readonly Fld1.Storage.Engine.StorageBlobStore _runBlobStore;
     private readonly uint _namespaceId;
     private readonly byte[] _localAuthor;
     private readonly HlcClock _clock;
@@ -83,6 +85,8 @@ public sealed partial class FldDatabase : IDisposable
         OutboxLog outbox,
         ApplyJournal applyJournal,
         Fld1.Storage.Engine.StoragePartitionLease storageLease,
+        Fld1.Storage.Engine.StorageDatabase runStorage,
+        Fld1.Storage.Engine.StorageBlobStore runBlobStore,
         AtomicManifestStore manifestStore,
         int autoCheckpointOverlayFields = 0,
         bool truncateSealedWal = true,
@@ -96,6 +100,8 @@ public sealed partial class FldDatabase : IDisposable
         _outbox = outbox;
         _applyJournal = applyJournal;
         _storageLease = storageLease ?? throw new ArgumentNullException(nameof(storageLease));
+        _runStorage = runStorage ?? throw new ArgumentNullException(nameof(runStorage));
+        _runBlobStore = runBlobStore ?? throw new ArgumentNullException(nameof(runBlobStore));
         _manifestStore = manifestStore;
         _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
         _truncateSealedWal = truncateSealedWal;
@@ -121,11 +127,17 @@ public sealed partial class FldDatabase : IDisposable
         Directory.CreateDirectory(Path.Combine(dbDir, "tmp"));
 
         Fld1.Storage.Engine.StoragePartitionLease? storageLease = null;
+        Fld1.Storage.Engine.StorageDatabase? runStorage = null;
         bool leaseTransferred = false;
+        bool runStorageTransferred = false;
         try
         {
             storageLease = Fld1.Storage.Engine.StorageDatabase.AcquirePartitionLease(
                 dbDir, StoragePartitionId);
+            runStorage = Fld1.Storage.Engine.StorageDatabase.Open(
+                Path.Combine(dbDir, "storage-core"), partitionId: 0);
+            var runBlobStore = new Fld1.Storage.Engine.StorageBlobStore(
+                runStorage, "FLDRUNB1"u8);
 
             var manifestStore = new AtomicManifestStore(dbDir);
             var manifest = manifestStore.Load();
@@ -170,7 +182,8 @@ public sealed partial class FldDatabase : IDisposable
                 applyJournal = ApplyJournal.Open(outboxDir, namespaceId);
 
                 var db = new FldDatabase(
-                    dbDir, namespaceId, author, wal, outbox, applyJournal, storageLease, manifestStore,
+                    dbDir, namespaceId, author, wal, outbox, applyJournal, storageLease,
+                    runStorage, runBlobStore, manifestStore,
                     options.AutoCheckpointOverlayFields,
                     options.TruncateSealedWal,
                     options.AutoCompactRunCount);
@@ -186,6 +199,7 @@ public sealed partial class FldDatabase : IDisposable
                     db._applyJournal.CompactAcknowledgedRelayPayloads(db._lastSealedCommitSeq);
                 }
                 leaseTransferred = true;
+                runStorageTransferred = true;
                 return db;
             }
             catch
@@ -199,6 +213,8 @@ public sealed partial class FldDatabase : IDisposable
         }
         finally
         {
+            if (!runStorageTransferred)
+                runStorage?.Dispose();
             if (!leaseTransferred)
                 storageLease?.Dispose();
         }
