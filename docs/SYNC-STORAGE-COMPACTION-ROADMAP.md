@@ -1989,3 +1989,11 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 
 - [x C] FLD CI now tees restore/build/test output into per-OS log files and uploads them even when a job fails. This addresses the current connector limitation where job-log retrieval returns BlobNotFound and lets the migration be debugged from artifacts without guessing.
 - [~ T] Wait for the new exact-head run and inspect the diagnostic artifacts; do not continue changing the project graph blind while all three OS jobs are red.
+
+### 7.56 Physical Database source consolidation — no linked-source shortcut (2026-11-09)
+
+- [x C] Replaced the linked-source scaffold with a physical move of all 40 Core/Engine/Manifest/Run/WAL source files into `src/Fld1.Database/{Core,Engine,Manifest,Run,Wal}/...`, preserving namespaces and internal folder structure.
+- [x C] Removed the five old component `.csproj` entry points; the solution and all tests/benchmarks already target `Fld1.Database` plus `Fld1.Storage`. No Core/Engine/Manifest/Run/WAL runtime DLLs are built from the solution.
+- [x C] `Fld1.Database.csproj` now uses normal SDK compile discovery over physically owned source; no linked Compile items. It references only generic `Fld1.Storage` and required hashing packages.
+- [~ T] Exact-head restore/build/test remains red/unverified; validate project references, package output and all three OS CI jobs after this physical move.
+- [~ C] Finish public package layout and architecture-doc/API migration; confirm Storage-only consumers can load `Fld1.Storage.dll` without loading `Fld1.Database.dll`.
