@@ -160,6 +160,51 @@ public sealed class StorageBlobStore
         }
     }
 
+    /// <summary>Returns true for either a pending or fully published blob record.</summary>
+    public bool ContainsBlob(Guid blobId)
+    {
+        ValidateBlobId(blobId);
+        using StorageSnapshot snapshot = _database.OpenSnapshot();
+        if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes)) return false;
+        StorageBlobMetadata metadata = DecodeMetadata(bytes!);
+        EnsurePageSize(metadata);
+        return true;
+    }
+
+    /// <summary>
+    /// Deletes at most maxBlobs blob generations not present in the caller's complete
+    /// live set. Pending generations are included, so interrupted unreferenced puts
+    /// can be reclaimed during exclusive startup maintenance.
+    /// </summary>
+    public int PruneUnreferencedBlobs(IReadOnlySet<Guid> liveBlobIds, int maxBlobs = 128)
+    {
+        ArgumentNullException.ThrowIfNull(liveBlobIds);
+        if (maxBlobs is < 1 or > 4096) throw new ArgumentOutOfRangeException(nameof(maxBlobs));
+        lock (_gate)
+        {
+            var candidates = new List<Guid>(Math.Min(maxBlobs, 128));
+            using (StorageSnapshot snapshot = _database.OpenSnapshot())
+            using (StorageSnapshot.PrefixCursor cursor = snapshot.OpenPrefixCursor(_metadataPrefix))
+            {
+                while (candidates.Count < maxBlobs && cursor.TryReadNext(out StorageEntryView entry))
+                {
+                    if (entry.Key.Length != _metadataPrefix.Length + BlobIdSize)
+                        throw new InvalidDataException("Storage blob metadata key has an invalid length.");
+                    Guid blobId = new(entry.Key.Slice(_metadataPrefix.Length, BlobIdSize));
+                    if (blobId == Guid.Empty)
+                        throw new InvalidDataException("Storage blob metadata key contains an empty blob ID.");
+                    _ = DecodeMetadata(entry.Value.ToArray());
+                    if (!liveBlobIds.Contains(blobId))
+                        candidates.Add(blobId);
+                }
+            }
+            int deleted = 0;
+            foreach (Guid blobId in candidates)
+                if (DeleteBlob(blobId)) deleted++;
+            return deleted;
+        }
+    }
+
     /// <summary>
     /// Atomically removes a blob's publication record and all its pages. Readers
     /// opened before this commit retain their immutable Storage snapshot.
