@@ -113,7 +113,8 @@ public static class WalRecovery
 
             byte kind = WalEnvelope.ReadKind(env);
             if (kind is not (WalConstants.KindGroupCommit or WalConstants.KindNsCreate
-                or WalConstants.KindSnapshotInstall or WalConstants.KindApplyCommit))
+                or WalConstants.KindSnapshotInstall or WalConstants.KindApplyCommit
+                or WalConstants.KindIdentityStamp))
                 return Fail(WalRecoveryStatus.UnknownKind, $"kind={kind} pos={pos}", pos, records, prevSeq);
 
             uint length = WalEnvelope.ReadLength(env);
