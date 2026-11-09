@@ -1919,3 +1919,23 @@ BIN-SYNC `feature/fld-external-storage` now exposes `StorageSyncCoordinator.Appe
 This is **not** the finished synchronized-FLD adapter. The FLD Database still needs to be extracted into the approved `Fld1.Database.dll` boundary; the host must then read whole `RelayJournalBatch` pages under `FldDatabase.AcquireCommitGuard`, call the coordinator helper before send, translate downstream safe Outbox ACK through RPM3, durably call `AcknowledgeRelayBatches`, and only then prune RPM3 mappings. The concrete `IApplicationGcReferenceScanner` wrapper must similarly hold the FLD guard while using one `FldReferenceSnapshot`.
 
 The current `RelayProvenanceMap` BIN-SYNC sample exercises the low-level RPM3 storage codec with already-resolved sequence pairs. It is not an end-to-end FLD integration sample. No direct Engine→BIN-SYNC dependency or third runtime DLL is permitted.
+### 7.50 Two-DLL extraction source audit: actual project graph and storage-engine seam (2026-11-09)
+
+The current source graph was inspected directly; the two-DLL target is not yet achieved and cannot be closed by renaming assemblies or adding project references:
+
+- `Fld1.Storage` is already an independent project with a domain-neutral byte-key/value `StorageDatabase`, atomic `StorageWriteBatch`, snapshots/prefix scans, and its own generic WAL. Its public API uses opaque byte spans/arrays and storage-native commit sequences.
+- `Fld1.Engine` currently references `Fld1.Core`, `Fld1.Run`, `Fld1.Wal`, and `Fld1.Manifest`; `FldDatabase` directly imports their domain-specific HLC/UUID, RunBuilder/Reader, Manifest and WAL codec/recovery namespaces.
+- `Fld1.Run` is not a generic storage run: it encodes FLD1 RecordId/FieldId/HLC/author/cluster/PGM semantics. `Fld1.Manifest` carries FLD run catalog and commit-result semantics. `Fld1.Wal` currently contains FLD commit payload/recovery paths. These cannot be moved wholesale into `Fld1.Storage`.
+- `Fld1.Core` mixes potentially generic byte/hash helpers with FLD HLC, UUIDv7, IDs and canonical field semantics. It must be classified by type/dependency, not treated as a ready-made shared assembly.
+- There is no `Fld1.Database.csproj` yet. The current `Fld1.Storage` project is not a replacement for `Fld1.Engine` and `FldDatabase` does not currently use `StorageDatabase` as its storage backend.
+
+Required extraction work before creating the public `Fld1.Database.dll`:
+
+1. Freeze the physical compatibility decision: whether FLD1 Run/Manifest/WAL remains the Database-owned file format layered over generic Storage coordination, or whether FLD data is migrated to opaque Storage keys/values. Do not silently replace the FLD1 format.
+2. Split generic WAL framing/flush/recovery and file-generation coordination from FLD-specific commit codecs/replay handlers. Generic Storage must never decode a FLD field mutation.
+3. Classify `Fld1.Core` types; move only genuinely domain-neutral byte/checksum primitives into Storage, and keep HLC/UUID/field identity in Database.
+4. Create one `Fld1.Database` project and physically consolidate Database-owned Engine/Run/Manifest/FLD-WAL sources there; do not use linked source compilation or retain separate public runtime DLLs.
+5. Make `Fld1.Database` reference only `Fld1.Storage` plus BCL/required packages; audit all public signatures so Storage exposes no FLD/BIN-SYNC types.
+6. Re-home tests into Storage-only and Database integration suites; verify Storage-only consumers can build/run without loading Database. Only then add the BIN-SYNC adapter assembly outside both FLD DLLs.
+
+**Status:** [~ C] source audit and migration sequence documented; extraction code is not started. The existing FLD `.NET CI` passing on the current branch does not validate the two-DLL target or a BIN-SYNC adapter. Keep the old project graph intact until the physical-format seam and dependency map are approved; do not simulate completion with a third `Common` DLL.
