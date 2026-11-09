@@ -63,7 +63,7 @@ A later optimization may replace the run index with a generic Storage page curso
 - [x] Run v2 provenance section writer/reader/verifier and v1 compatibility; v1 remains a legacy identity-zero row.
 - [x] Propagate origin through `MemFieldValue`, remote APPLY, WAL replay, checkpoint, compaction and LWW resolution.
 - [x] Generation-pinned, paged FLD provider snapshot: captures immutable RunReader buffers + overlay generation, uses an O(keys) compact RecordId index and bounded page payload materialization, preserves v2 ChangeId/Origin and v1 identity-zero rows, and releases retained buffers exactly once on handle disposal or database disposal.
-- [ ] Host `IDataProvider` adapter for key resolution, local Outbox feed, published-origin commit, remote apply context and current-state reads.
+- [x] Optional host `IDataProvider` adapter for direct RecordId/FieldId resolution, local Outbox feed, published-origin commit and current-state reads; the exact contextual `FldRemoteBatchApplyStore` is composed separately so the full remote receipt context is retained.
 - [ ] Exact-head build plus crash/restart, mixed-v1/v2, cutover and identity-retention T-pass.
 
 This ADR is a C-pass implementation decision, not a claim that any of these code gates have already passed.
