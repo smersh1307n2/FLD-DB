@@ -237,10 +237,10 @@ public sealed class FldProviderSnapshot : IDisposable
             return false;
         }
 
-        bool recordTombstone = fieldId == Fld1.Engine.Sync.FldLifecycle.FieldId &&
+        bool recordTombstone = fieldId == FldLifecycle.FieldId &&
             !bestTombstone &&
             bestValue is not null &&
-            bestValue.AsSpan().SequenceEqual(Fld1.Engine.Sync.FldLifecycle.DeadValue);
+            bestValue.AsSpan().SequenceEqual(FldLifecycle.DeadValue);
         entry = new FldProviderSnapshotEntry(
             recordId.ToArray(),
             fieldId,
