@@ -237,10 +237,20 @@ public sealed class FldProviderSnapshot : IDisposable
             return false;
         }
 
-        bool recordTombstone = fieldId == FldLifecycle.FieldId &&
-            !bestTombstone &&
-            bestValue is not null &&
-            bestValue.AsSpan().SequenceEqual(FldLifecycle.DeadValue);
+        bool recordTombstone = false;
+        if (fieldId == FldLifecycle.FieldId)
+        {
+            if (bestTombstone || bestValue is null)
+                throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
+            if (bestValue.AsSpan().SequenceEqual(FldLifecycle.AliveValue))
+            {
+                entry = null;
+                return false;
+            }
+            if (!bestValue.AsSpan().SequenceEqual(FldLifecycle.DeadValue))
+                throw new InvalidDataException("FLD lifecycle value is neither Alive nor Dead.");
+            recordTombstone = true;
+        }
         entry = new FldProviderSnapshotEntry(
             recordId.ToArray(),
             fieldId,
