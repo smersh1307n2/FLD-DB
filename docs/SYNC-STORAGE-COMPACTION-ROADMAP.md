@@ -2164,3 +2164,10 @@ Code commit: `bf72f0d8c4e82303612f079e3aefa790d6794451`. Exact-head CI remains u
 - [~ T] Verify both Node-Outbox and Metadata-Store-owned publication modes use the same ceiling semantics.
 
 BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60489796218cdd39a84f8cbc93ce4f53be90dfd3`, `97609fb3c91e15aac27ff8d2eccf576381993c1c`; contract commit `87a8b7a0d364f80982696f1b748294bf042424a4`.
+
+
+### 7.76 Recovery checkpoint after publication-ceiling contract (2026-11-09)
+
+- [x C] Created FLD-DB `backup/cpass-2026-11-09-publication-ceilings` at `01617ecaa06fef4bd4ec16e913f24ffd449158ae`.
+- [x C] Matching BIN-SYNC backup branch is `backup/cpass-2026-11-09-publication-ceilings` at `701077ed9a13ce476aaa1e679d9c17f16f0ced5f`.
+- [~ T] This is a recovery point for the unvalidated C-pass/API migration state, not a passing test checkpoint.
