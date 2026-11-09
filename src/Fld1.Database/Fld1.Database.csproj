@@ -13,9 +13,12 @@
     <Version>0.1.0-alpha</Version>
     <Description>FLD Database engine and overlay. Core, Manifest, Run and WAL sources are physically owned by this project; generic byte storage remains the separate Fld1.Storage assembly.</Description>
   </PropertyGroup>
+  <PropertyGroup>
+    <Fld1StorageProject Condition="'$(Fld1StorageProject)' == ''">$(MSBuildThisFileDirectory)../Fld1.Storage/Fld1.Storage.csproj</Fld1StorageProject>
+  </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Blake3.Managed" Version="1.10.0" />
     <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
-    <ProjectReference Include="../Fld1.Storage/Fld1.Storage.csproj" />
+    <ProjectReference Include="$(Fld1StorageProject)" />
   </ItemGroup>
 </Project>
