@@ -2083,3 +2083,9 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] The gate starts closed on process startup and remains closed after unresolved ChangeId, uncertain APPLY outcome, or recovery validation failure. Only successful full `RecoverAndPublishAsync` reconciliation opens outbound scheduling.
 - [~ T] Multi-page resume, no-unmapped-send, failure/recovery, empty-author pages and operation-cap boundaries remain T-pass requirements.
 - [~ C] Host must use one gate for all remote apply and sender paths, provide the cursor-aware page callback and avoid direct session sends outside the gate.
+
+### 7.73 Recovery branches before the next host-integration slice (2026-11-09)
+
+- [x C] Created `backup/cpass-2026-11-09-relay-gate-metadata-mode` at `6af05cd007baa3bd246450b986598e54fd9eaa57`, preserving the FLD branch and its cross-repository relay gate contract.
+- [x C] Retained `backup/post-two-dll-consolidation-2026-11-09` and `backup/cpass-2026-11-09-0915`.
+- [~ T] This backup captures the current red/unverified CI state; it is a recovery point, not a green baseline.
