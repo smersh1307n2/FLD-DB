@@ -2303,3 +2303,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [~ C] The BIN-SYNC `IDataProvider` adapter still needs to bind snapshot pages, FLD Outbox local feed, published-origin stamping, key resolution and current-state lookup to the provider contract. Durable cross-process source-generation recovery remains open.
 - [~ T] Build/CI, page boundaries, retry, compaction stability, cancellation/disposal, mixed Run v1/v2 and identity-retention crash tests are deferred to the T-pass. No test result is claimed.
 - [~ O] Measure O(keys) index footprint, per-page allocations and multi-run LWW resolution cost.
+
+
+### 7.93 BIN-SYNC base IDataProvider bridge in the optional host layer (2026-11-09)
+
+- [x C] BIN-SYNC `samples/FldBinSyncHost/FldDatabaseDataProvider` now binds FLD generation-pinned snapshot pages, Outbox local feed/ACK, direct RecordId/FieldId resolution, current-state reads, published-origin stamping and the FLD commit guard to the base `IDataProvider` contract.
+- [x C] The adapter rejects context-free remote APPLY. The exact `FldRemoteBatchApplyStore` remains the only receive path because it preserves authenticated sender, transport epoch, cursor and digest context in FLD ApplyJournal.
+- [x C] Host composition now validates exact identity across `FldDatabaseDataProvider`, `FldDatabase`, `StorageSyncCoordinator` and `FldRemoteBatchApplyStore`; no FLD→BIN-SYNC runtime dependency was introduced.
+- [~ C] Provider publication-mode cutover and durable author-epoch closure, FULL_REPLACE receiver staging/switch, restart-durable sender snapshot generation and the remaining generic Storage/host scheduler decisions remain open.
+- [~ T] Cross-repository host build, IDataProvider conformance, Outbox lease fencing, page retry/seek, identity stamping and restart/crash tests are deferred to the T-pass. No test/build result is claimed.
