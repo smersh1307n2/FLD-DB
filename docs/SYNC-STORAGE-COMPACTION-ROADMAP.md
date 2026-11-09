@@ -2154,3 +2154,13 @@ Overall FLD integration contribution is estimated at **~75–80%**. Next C work:
 - [~ O] Include startup/recovery author-discovery allocation and CPU in the representative multi-author measurement.
 
 Code commit: `bf72f0d8c4e82303612f079e3aefa790d6794451`. Exact-head CI remains unverified; no test result is inferred from this change.
+
+
+### 7.75 Per-author relay publication ceiling contract (2026-11-09)
+
+- [x C] Updated the BIN-SYNC integration contract so every sender callback receives the durable per-author `StorageRelayAuthorPublicationWatermark` and sends only listed authors through `PublishedThroughSequence`. New local FLD commits made after the last mapping page remain unpublished until the next reconciliation pass.
+- [x C] The host's per-page FLD commit lease is released before network I/O; the explicit durable sequence ceiling, not a long-held database lock, prevents unmapped Outbox rows from escaping during that gap.
+- [~ T] Migrate the actual host sender callbacks and add a concurrent local-write race case between final mapping commit and sender invocation. This is a BIN-SYNC host API migration and remains unvalidated.
+- [~ T] Verify both Node-Outbox and Metadata-Store-owned publication modes use the same ceiling semantics.
+
+BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60489796218cdd39a84f8cbc93ce4f53be90dfd3`, `97609fb3c91e15aac27ff8d2eccf576381993c1c`; contract commit `87a8b7a0d364f80982696f1b748294bf042424a4`.
