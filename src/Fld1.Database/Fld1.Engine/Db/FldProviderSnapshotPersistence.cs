@@ -494,6 +494,8 @@ public sealed partial class FldDatabase
         if (!Directory.Exists(root)) return pinned;
         foreach (string directory in Directory.EnumerateDirectories(root))
         {
+            if (!Guid.TryParseExact(Path.GetFileName(directory), "N", out Guid directoryGeneration))
+                return null;
             string manifestPath = Path.Combine(directory, ProviderSnapshotManifestName);
             // A GUID generation directory without its final manifest is ambiguous:
             // it may be an interrupted unpublished generation or a lost/corrupt
@@ -502,6 +504,8 @@ public sealed partial class FldDatabase
             try
             {
                 ProviderSnapshotManifest manifest = DecodeProviderSnapshotManifest(File.ReadAllBytes(manifestPath));
+                if (manifest.Generation != directoryGeneration)
+                    return null;
                 foreach (ulong runId in manifest.RunIds)
                     pinned.Add(runId);
             }
