@@ -1181,10 +1181,10 @@ public sealed partial class FldDatabase : IDisposable
     private void GcOrphanRuns()
     {
         string runsDir = Path.Combine(_dbDir, "runs");
-        if (!Directory.Exists(runsDir)) return;
 
         // A database directory may contain several namespaces. Only runs absent from
-        // the complete manifest are orphaned; the current FldDatabase loads one namespace.
+        // the complete manifest, provider snapshot pins and active staging generations
+        // are orphaned; the current FldDatabase loads one namespace.
         var manifest = _manifestStore.Load();
         var liveRunIds = manifest.Runs.Select(run => run.RunId).ToHashSet();
         HashSet<ulong>? snapshotPinnedRunIds = GetPinnedProviderSnapshotRunIds();
@@ -1196,15 +1196,28 @@ public sealed partial class FldDatabase : IDisposable
             return; // Corrupt staging metadata cannot authorize deletion of its Run files.
         liveRunIds.UnionWith(stagedRunIds);
 
-        foreach (string file in Directory.EnumerateFiles(runsDir, "*.fld1"))
+        if (Directory.Exists(runsDir))
         {
-            string name = Path.GetFileNameWithoutExtension(file);
-            if (!ulong.TryParse(name, out ulong runId) || liveRunIds.Contains(runId))
-                continue;
+            foreach (string file in Directory.EnumerateFiles(runsDir, "*.fld1"))
+            {
+                string name = Path.GetFileNameWithoutExtension(file);
+                if (!ulong.TryParse(name, out ulong runId) || liveRunIds.Contains(runId))
+                    continue;
 
-            try { File.Delete(file); }
-            catch { /* stale orphan is harmless and will be retried on next open */ }
+                try { File.Delete(file); }
+                catch { /* stale legacy orphan is harmless and will be retried on next open */ }
+            }
         }
+
+        // Run IDs are globally monotonic within the root, so the same live set protects
+        // active, snapshot-pinned and in-progress stage blobs across every namespace.
+        HashSet<Guid> liveBlobIds = liveRunIds.Select(RunBlobId).ToHashSet();
+        int prunedBlobs;
+        do { prunedBlobs = _runBlobStore.PruneUnreferencedBlobs(liveBlobIds, 4096); }
+        while (prunedBlobs == 4096);
+        int prunedPages;
+        do { prunedPages = _runBlobStore.PruneOrphanPages(16_384); }
+        while (prunedPages == 16_384);
     }
 
     /// <summary>Resolve without taking _commitLock (caller may hold it).</summary>
