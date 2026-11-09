@@ -29,6 +29,7 @@ public sealed class StorageBlobStore
     private readonly SharedState _shared;
     private readonly int _pageSize;
 
+    /// <summary>Preferred page size for newly created blobs; existing blobs retain their persisted geometry.</summary>
     public int PageSize => _pageSize;
 
     public StorageBlobStore(
@@ -448,10 +449,15 @@ public sealed class StorageBlobReader : IDisposable
     private readonly object _gate = new();
     private StorageSnapshot? _snapshot;
 
+    /// <summary>Gets the immutable blob identifier.</summary>
     public Guid BlobId => _blobId;
+    /// <summary>Gets the exact byte length.</summary>
     public ulong Length => _metadata.Length;
+    /// <summary>Gets the persisted page size for this blob.</summary>
     public int PageSize => _metadata.PageSize;
+    /// <summary>Gets the persisted page count.</summary>
     public int PageCount => _metadata.PageCount;
+    /// <summary>Gets a copy of the expected whole-blob SHA-256 digest.</summary>
     public byte[] Digest => _metadata.Digest.ToArray();
 
     internal StorageBlobReader(
@@ -468,6 +474,7 @@ public sealed class StorageBlobReader : IDisposable
         _releasePin = releasePin;
     }
 
+    /// <summary>Reads one page and validates its exact expected length; use CopyTo or ReadAllBytes for whole-blob digest verification.</summary>
     public byte[] ReadPage(int pageIndex)
     {
         lock (_gate)
@@ -487,6 +494,7 @@ public sealed class StorageBlobReader : IDisposable
         }
     }
 
+    /// <summary>Streams all pages and verifies the total length and whole-blob SHA-256 before returning. The destination may contain partial bytes if validation or I/O fails.</summary>
     public void CopyTo(Stream destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -508,6 +516,7 @@ public sealed class StorageBlobReader : IDisposable
         }
     }
 
+    /// <summary>Materializes the blob and verifies its total length and whole-blob SHA-256.</summary>
     public byte[] ReadAllBytes()
     {
         lock (_gate)
