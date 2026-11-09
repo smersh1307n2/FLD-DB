@@ -74,6 +74,8 @@ public sealed partial class FldDatabase
             ManifestDocument manifest = _manifestStore.Load();
             ulong[] baseRuns = manifest.Runs.Where(run => run.Ns == _namespaceId)
                 .Select(run => run.RunId).OrderBy(id => id).ToArray();
+            if (baseRuns.Length > 1_000_000)
+                throw new InvalidOperationException("FLD namespace Run set exceeds the bounded FULL_REPLACE staging index.");
             var state = new FullReplaceStageState(
                 generation, manifest.Generation, _lastSealedCommitSeq,
                 sourceFeedWatermark, expectedEntryCount, 0,
@@ -141,6 +143,8 @@ public sealed partial class FldDatabase
                 lastSortKey = sortKey;
             }
 
+            if (state.Runs.Length >= 1_000_000)
+                throw new InvalidOperationException("FULL_REPLACE staged Run index exceeds its bounded capacity.");
             byte[] runBytes = builder.Build();
             var reader = new RunReader(runBytes);
             if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
@@ -573,7 +577,7 @@ public sealed partial class FldDatabase
         if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset)) != FullReplaceStageMagic) throw new InvalidDataException("FULL_REPLACE stage magic mismatch."); offset += 4;
         if (BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)) != FullReplaceStageVersion) throw new InvalidDataException("FULL_REPLACE stage version mismatch."); offset += 2;
         ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)); offset += 2;
-        if ((flags & ~3) != 0) throw new InvalidDataException("FULL_REPLACE stage flags are invalid.");
+        if ((flags & ~3) != 0 || flags == 3) throw new InvalidDataException("FULL_REPLACE stage flags are invalid.");
         Guid generation = new(bytes.AsSpan(offset, 16)); offset += 16;
         ulong baseManifestGeneration = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
         ulong baseSealed = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
@@ -584,7 +588,7 @@ public sealed partial class FldDatabase
         byte[] digest = bytes.AsSpan(offset, 32).ToArray(); offset += 32;
         byte[] lastSortKey = bytes.AsSpan(offset, 19).ToArray(); offset += 19;
         int baseCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
-        if (generation == Guid.Empty || expected < 0 || next < 0 || next > expected || abortRunIndex < 0 || baseCount < 0 || baseCount > 1_000_000)
+        if (generation == Guid.Empty || expected < 0 || next < 0 || next > expected || abortRunIndex < 0 || baseCount < 0 || baseCount > 1_000_000 || ((flags & 2) == 0 && abortRunIndex != 0))
             throw new InvalidDataException("FULL_REPLACE stage scalar fields are invalid.");
         if (offset + (long)baseCount * 8 + 4 > checksumOffset)
             throw new InvalidDataException("FULL_REPLACE stage base-run index is truncated.");
@@ -598,10 +602,11 @@ public sealed partial class FldDatabase
             previousBaseRun = baseRuns[i];
         }
         int runCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
-        if (runCount < 0 || runCount > 1_000_000 || offset + (long)runCount * 48 != checksumOffset)
+        if (runCount < 0 || runCount > 1_000_000 || abortRunIndex > runCount || offset + (long)runCount * 48 != checksumOffset)
             throw new InvalidDataException("FULL_REPLACE stage run index is invalid.");
         var runs = new FullReplaceStageRun[runCount];
         int expectedStart = 0;
+        var uniqueRunIds = new HashSet<ulong>(baseRuns);
         for (int i = 0; i < runCount; i++)
         {
             int start = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
@@ -609,7 +614,9 @@ public sealed partial class FldDatabase
             ulong runId = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
             byte[] min = bytes.AsSpan(offset, 16).ToArray(); offset += 16;
             byte[] max = bytes.AsSpan(offset, 16).ToArray(); offset += 16;
-            if (start != expectedStart || count < 0 || runId == 0 || min.Length != 16 || max.Length != 16)
+            if (start != expectedStart || count < 0 || count > FullReplaceStagePageLimit ||
+                runId == 0 || !uniqueRunIds.Add(runId) ||
+                min.AsSpan().SequenceCompareTo(max) > 0)
                 throw new InvalidDataException("FULL_REPLACE stage page index is not canonical.");
             expectedStart = checked(expectedStart + count);
             runs[i] = new FullReplaceStageRun(start, count, runId, min, max);
