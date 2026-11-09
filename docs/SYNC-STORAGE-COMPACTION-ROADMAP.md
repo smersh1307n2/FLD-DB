@@ -1957,3 +1957,10 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] Routed Core/Engine/Manifest/Run/WAL test projects and both benchmark projects through the consolidated Database project; Storage tests continue to reference Storage directly.
 - [~ T] No build has yet validated linked-source inclusion, duplicate generated attributes, package graph or test assembly visibility. Treat the extraction as a compile-unverified scaffold, not a completed DLL migration.
 - [~ C] Remaining extraction: resolve any compile errors, ensure publish/package output contains exactly the two runtime DLLs, remove or clearly retire component project entry points, update README/package references and test all supported build entry points.
+
+### 7.51 Exact-head build state after two-assembly scaffold (2026-11-09)
+
+- [x C] Branch HEAD before this note: `f971bbe2653415efb0bcb5468ec66bfa658dac2b`; the scaffold commits `Fld1.Database.csproj`, routes Core/Engine/Manifest/Run/WAL tests and benchmarks through it, and reduces the solution's runtime source projects to `Fld1.Database` + `Fld1.Storage`.
+- [~ T] The previous exact-head workflow on `4f248e0edee5506d74f63ee5913ed3de193231f5` failed on Ubuntu, macOS and Windows. GitHub's job-log endpoint currently returns BlobNotFound, so the root cause is not yet verified. Do not attribute those failures to the new extraction without reading the new-head logs.
+- [~ T] The new consolidated project has not yet completed a build/test run. Validate linked source globs, package graph, generated assembly metadata, all test projects and both benchmark projects before treating the two-DLL extraction as done.
+- [~ C] Remaining: finish consumer/public API migration, make exactly two runtime assemblies the supported package output, retire or explicitly mark old component csproj entry points as internal-only, update docs and integration adapters. Keep FLD semantics independent of BIN-SYNC protocol types.
