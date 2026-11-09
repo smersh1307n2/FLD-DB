@@ -26,6 +26,8 @@ public sealed class StorageDatabase : IDisposable
     private ulong _lastCommitSeq;
 
     public ulong PartitionId => _wal.PartitionId;
+    /// <summary>Canonical directory containing this Storage partition.</summary>
+    public string DirectoryPath => _directory;
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
     public int Count { get { lock (_gate) { EnsureUsable(); return _values.Count; } } }
 
