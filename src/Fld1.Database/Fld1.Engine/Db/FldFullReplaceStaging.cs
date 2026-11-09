@@ -419,6 +419,55 @@ public sealed partial class FldDatabase
         return result;
     }
 
+    /// <summary>
+    /// Recover the commit marker if the atomic manifest switch completed immediately
+    /// before a process crash. Called during database open before orphan Run collection.
+    /// </summary>
+    private bool RecoverFullReplaceStageCommitMarkers()
+    {
+        string directory = Path.Combine(_dbDir, "full-replace-staging");
+        if (!Directory.Exists(directory)) return true;
+        try
+        {
+            ManifestDocument manifest = _manifestStore.Load();
+            foreach (string path in Directory.EnumerateFiles(directory, "*.bin"))
+            {
+                FullReplaceStageState state = ReadFullReplaceStage(path);
+                if (!state.IsCommitted && IsFullReplaceStageCommitted(state, manifest))
+                    WriteFullReplaceStage(path, state with { IsCommitted = true });
+            }
+            return true;
+        }
+        catch
+        {
+            // Corrupt stage metadata must never make its Run files eligible for GC.
+            return false;
+        }
+    }
+
+    private HashSet<ulong>? GetUncommittedFullReplaceRunIds()
+    {
+        if (!RecoverFullReplaceStageCommitMarkers()) return null;
+        string directory = Path.Combine(_dbDir, "full-replace-staging");
+        var result = new HashSet<ulong>();
+        if (!Directory.Exists(directory)) return result;
+        try
+        {
+            foreach (string path in Directory.EnumerateFiles(directory, "*.bin"))
+            {
+                FullReplaceStageState state = ReadFullReplaceStage(path);
+                if (state.IsCommitted) continue;
+                foreach (FullReplaceStageRun run in state.Runs)
+                    result.Add(run.RunId);
+            }
+            return result;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private bool IsFullReplaceStageCommitted(FullReplaceStageState state, ManifestDocument manifest)
     {
         if (state.IsCommitted) return true;
