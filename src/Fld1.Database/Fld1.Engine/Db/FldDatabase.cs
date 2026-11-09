@@ -2386,7 +2386,8 @@ public sealed partial class FldDatabase : IDisposable
                     }
                     finally
                     {
-                        _storageLease.Dispose();
+                        try { _runStorage.Dispose(); }
+                        finally { _storageLease.Dispose(); }
                     }
                 }
             }
