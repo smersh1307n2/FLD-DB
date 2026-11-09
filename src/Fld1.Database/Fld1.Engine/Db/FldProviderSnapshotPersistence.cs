@@ -241,7 +241,7 @@ public sealed partial class FldDatabase
         byte[]? overlayHash)
     {
         int length = checked(ProviderSnapshotHeaderSize + runIds.Length * sizeof(ulong) +
-            (overlayHash is null ? 0 : 32));
+            (overlayHash is null ? 0 : 32) + 32);
         byte[] bytes = new byte[length];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, ProviderSnapshotMagic);
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), ProviderSnapshotVersion);
@@ -257,7 +257,11 @@ public sealed partial class FldDatabase
             offset += sizeof(ulong);
         }
         if (overlayHash is not null)
+        {
             overlayHash.CopyTo(bytes, offset);
+            offset += 32;
+        }
+        SHA256.HashData(bytes.AsSpan(0, offset)).CopyTo(bytes, offset);
         return bytes;
     }
 
@@ -276,7 +280,7 @@ public sealed partial class FldDatabase
         ulong watermark = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(28));
         uint runCount = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(36));
         bool hasOverlay = (flags & 1) != 0;
-        long expectedLength = ProviderSnapshotHeaderSize + (long)runCount * sizeof(ulong) + (hasOverlay ? 32 : 0);
+        long expectedLength = ProviderSnapshotHeaderSize + (long)runCount * sizeof(ulong) + (hasOverlay ? 32 : 0) + 32;
         if (generation == Guid.Empty || expectedLength != bytes.Length || runCount > int.MaxValue)
             throw new InvalidDataException("Provider snapshot manifest length or generation is invalid.");
 
@@ -293,7 +297,13 @@ public sealed partial class FldDatabase
         }
         byte[]? overlayHash = null;
         if (hasOverlay)
+        {
             overlayHash = bytes.AsSpan(offset, 32).ToArray();
+            offset += 32;
+        }
+        byte[] actualHash = SHA256.HashData(bytes.AsSpan(0, offset));
+        if (!CryptographicOperations.FixedTimeEquals(actualHash, bytes.AsSpan(offset, 32)))
+            throw new InvalidDataException("Provider snapshot manifest checksum mismatch.");
         return new ProviderSnapshotManifest(generation, namespaceId, watermark, runIds, overlayHash);
     }
 
