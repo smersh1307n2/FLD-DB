@@ -2017,3 +2017,4 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] For accepted groups, the code fills one exact-size array in a direct loop instead of LINQ `Where/Select/ToArray`; semantics and whole-group ordering are unchanged.
 - [~ O] Allocation/throughput benefit is structurally clear for a page that reaches its cap, but no benchmark claim is made until the relay paging benchmark is run on a stable green build.
 - [~ T] Add boundary/resume tests for a page that is nearly full and a following group that does not fit; verify cursor remains before that group.
+- [~ T] Exact current HEAD `4c1393a08f51b9bab751d870a2a5282e155c6c7d` has failed PR/push CI on Ubuntu, macOS and Windows. The connector still does not return job logs/artifacts for this private-repo run; no root cause is asserted. This code change is therefore build/test unverified.
