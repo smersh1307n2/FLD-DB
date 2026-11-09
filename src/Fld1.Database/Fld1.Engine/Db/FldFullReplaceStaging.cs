@@ -18,7 +18,7 @@ public sealed record FldFullReplaceProgress(
 public sealed partial class FldDatabase
 {
     private const uint FullReplaceStageMagic = 0x31524646; // "FFR1"
-    private const ushort FullReplaceStageVersion = 1;
+    private const ushort FullReplaceStageVersion = 2;
     private const int FullReplaceStagePageLimit = 4096;
     private const int FullReplaceStagePageMaxBytes = 16 * 1024 * 1024;
 
@@ -27,6 +27,7 @@ public sealed partial class FldDatabase
 
     private sealed record FullReplaceStageState(
         Guid Generation,
+        uint NamespaceId,
         ulong BaseManifestGeneration,
         ulong BaseLastSealedCommitSeq,
         ulong SourceFeedWatermark,
@@ -77,7 +78,7 @@ public sealed partial class FldDatabase
             if (baseRuns.Length > 1_000_000)
                 throw new InvalidOperationException("FLD namespace Run set exceeds the bounded FULL_REPLACE staging index.");
             var state = new FullReplaceStageState(
-                generation, manifest.Generation, _lastSealedCommitSeq,
+                generation, _namespaceId, manifest.Generation, _lastSealedCommitSeq,
                 sourceFeedWatermark, expectedEntryCount, 0,
                 expectedDigest.ToArray(), new byte[19], baseRuns,
                 Array.Empty<FullReplaceStageRun>(), false, false, 0);
@@ -103,6 +104,8 @@ public sealed partial class FldDatabase
             string statePath = FullReplaceStagePath(generation);
             if (!File.Exists(statePath)) throw new InvalidOperationException("FULL_REPLACE generation has not been begun.");
             FullReplaceStageState state = ReadFullReplaceStage(statePath);
+            if (state.NamespaceId != _namespaceId)
+                throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
             if (state.IsAborting)
                 throw new InvalidOperationException("Aborting FULL_REPLACE generation cannot accept more pages.");
             if (IsFullReplaceStageCommitted(state, _manifestStore.Load()))
@@ -179,6 +182,8 @@ public sealed partial class FldDatabase
             string path = FullReplaceStagePath(generation);
             if (!File.Exists(path)) throw new KeyNotFoundException("FULL_REPLACE staging generation does not exist.");
             FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.NamespaceId != _namespaceId)
+                throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
             if (state.IsAborting) throw new InvalidOperationException("FULL_REPLACE generation is being aborted.");
             if (afterIndex > state.NextIndex) throw new ArgumentOutOfRangeException(nameof(afterIndex));
             var result = new List<FldProviderSnapshotEntry>(Math.Min(limit, state.NextIndex - afterIndex));
@@ -323,6 +328,8 @@ public sealed partial class FldDatabase
             string path = FullReplaceStagePath(generation);
             if (!File.Exists(path)) return true;
             FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.NamespaceId != _namespaceId)
+                throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
             if (state.IsCommitted || IsFullReplaceStageCommitted(state, _manifestStore.Load()))
                 throw new InvalidOperationException("Committed FULL_REPLACE generation cannot be aborted.");
             if (!state.IsAborting)
@@ -366,7 +373,7 @@ public sealed partial class FldDatabase
     }
 
     private string FullReplaceStagePath(Guid generation)
-        => Path.Combine(_dbDir, "full-replace-staging", generation.ToString("N") + ".bin");
+        => Path.Combine(_dbDir, "full-replace-staging", $"ns_{_namespaceId}_{generation:N}.bin");
 
     private static byte[] FullReplaceSortKey(FldProviderSnapshotEntry entry)
     {
@@ -502,7 +509,7 @@ public sealed partial class FldDatabase
     {
         if (state.IsCommitted) return true;
         if (state.IsAborting) return false;
-        var active = manifest.Runs.Where(run => run.Ns == _namespaceId)
+        var active = manifest.Runs.Where(run => run.Ns == state.NamespaceId)
             .Select(run => run.RunId).ToHashSet();
         return state.Runs.Length != 0 &&
             state.Runs.All(run => active.Contains(run.RunId)) &&
@@ -534,7 +541,7 @@ public sealed partial class FldDatabase
 
     private static byte[] EncodeFullReplaceStage(FullReplaceStageState state)
     {
-        int length = checked(4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 +
+        int length = checked(4 + 2 + 2 + 16 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 +
             4 + state.BaseRunIds.Length * 8 + 4 + state.Runs.Length * 48 + 32);
         byte[] bytes = new byte[length];
         int offset = 0;
@@ -543,6 +550,7 @@ public sealed partial class FldDatabase
         ushort flags = (ushort)((state.IsCommitted ? 1 : 0) | (state.IsAborting ? 2 : 0));
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), flags); offset += 2;
         state.Generation.TryWriteBytes(bytes.AsSpan(offset, 16)); offset += 16;
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), state.NamespaceId); offset += 4;
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.BaseManifestGeneration); offset += 8;
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.BaseLastSealedCommitSeq); offset += 8;
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.SourceFeedWatermark); offset += 8;
@@ -568,7 +576,7 @@ public sealed partial class FldDatabase
 
     private static FullReplaceStageState DecodeFullReplaceStage(byte[] bytes)
     {
-        if (bytes.Length < 4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 + 4 + 4 + 32)
+        if (bytes.Length < 4 + 2 + 2 + 16 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 + 4 + 4 + 32)
             throw new InvalidDataException("FULL_REPLACE stage state is truncated.");
         int checksumOffset = bytes.Length - 32;
         byte[] checksum = SHA256.HashData(bytes.AsSpan(0, checksumOffset));
@@ -580,6 +588,7 @@ public sealed partial class FldDatabase
         ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)); offset += 2;
         if ((flags & ~3) != 0 || flags == 3) throw new InvalidDataException("FULL_REPLACE stage flags are invalid.");
         Guid generation = new(bytes.AsSpan(offset, 16)); offset += 16;
+        uint namespaceId = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
         ulong baseManifestGeneration = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
         ulong baseSealed = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
         ulong watermark = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
@@ -589,7 +598,7 @@ public sealed partial class FldDatabase
         byte[] digest = bytes.AsSpan(offset, 32).ToArray(); offset += 32;
         byte[] lastSortKey = bytes.AsSpan(offset, 19).ToArray(); offset += 19;
         int baseCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
-        if (generation == Guid.Empty || expected < 0 || next < 0 || next > expected || abortRunIndex < 0 || baseCount < 0 || baseCount > 1_000_000 || ((flags & 2) == 0 && abortRunIndex != 0))
+        if (generation == Guid.Empty || namespaceId > 0xFFFF || expected < 0 || next < 0 || next > expected || abortRunIndex < 0 || baseCount < 0 || baseCount > 1_000_000 || ((flags & 2) == 0 && abortRunIndex != 0))
             throw new InvalidDataException("FULL_REPLACE stage scalar fields are invalid.");
         if (offset + (long)baseCount * 8 + 4 > checksumOffset)
             throw new InvalidDataException("FULL_REPLACE stage base-run index is truncated.");
@@ -625,7 +634,7 @@ public sealed partial class FldDatabase
         if (expectedStart != next || abortRunIndex > runCount || digest.Length != 32 || lastSortKey.Length != 19)
             throw new InvalidDataException("FULL_REPLACE stage cursor does not match its page index.");
         return new FullReplaceStageState(
-            generation, baseManifestGeneration, baseSealed, watermark, expected, next,
+            generation, namespaceId, baseManifestGeneration, baseSealed, watermark, expected, next,
             digest, lastSortKey, baseRuns, runs, (flags & 1) != 0, (flags & 2) != 0, abortRunIndex);
     }
 }
