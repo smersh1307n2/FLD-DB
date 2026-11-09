@@ -168,6 +168,45 @@ public sealed partial class FldDatabase
         }
     }
 
+    /// <summary>Checks a persisted source generation without loading its Run payloads.</summary>
+    public bool HasProviderSnapshot(Guid generation)
+    {
+        if (generation == Guid.Empty) return false;
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            if (_providerSnapshots.ContainsKey(generation))
+                return true;
+            string directory = GetProviderSnapshotDirectory(generation);
+            if (!Directory.Exists(directory))
+                return false;
+            ProviderSnapshotManifest manifest;
+            try
+            {
+                manifest = ReadProviderSnapshotManifest(directory, generation);
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            foreach (ulong runId in manifest.RunIds)
+            {
+                if (!File.Exists(Path.Combine(_dbDir, "runs", $"{runId}.fld1")))
+                    return false;
+            }
+            if (manifest.OverlayHash is not null)
+            {
+                string overlayPath = Path.Combine(directory, ProviderSnapshotOverlayName);
+                if (!File.Exists(overlayPath))
+                    return false;
+                byte[] hash = SHA256.HashData(File.ReadAllBytes(overlayPath));
+                if (!CryptographicOperations.FixedTimeEquals(hash, manifest.OverlayHash))
+                    throw new InvalidDataException("Provider snapshot overlay checksum mismatch.");
+            }
+            return true;
+        }
+    }
+
     /// <summary>Releases a source generation and permits its formerly pinned Runs to be collected.</summary>
     public void ReleaseProviderSnapshot(Guid generation)
     {
