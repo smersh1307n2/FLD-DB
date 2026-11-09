@@ -1716,11 +1716,6 @@ public sealed class FldDatabase : IDisposable
     }
 
     /// <summary>
-    /// Build one immutable index of host-side ChangeId, RecordId and receipt references.
-    /// Call under the composed application commit lease and reuse the result for all
-    /// candidate checks in that GC pass.
-    /// </summary>
-    /// <summary>
     /// Acquire the application commit guard and capture the immutable reference snapshot
     /// under that guard. The caller owns both resources: dispose the snapshot and then
     /// the returned guard on the acquiring thread after the GC scan is complete.
@@ -1740,6 +1735,11 @@ public sealed class FldDatabase : IDisposable
         }
     }
 
+    /// <summary>
+    /// Build one immutable index of host-side ChangeId, RecordId and receipt references.
+    /// Call under the composed application commit lease and reuse the result for all
+    /// candidate checks in that GC pass.
+    /// </summary>
     public FldReferenceSnapshot OpenReferenceSnapshot()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
