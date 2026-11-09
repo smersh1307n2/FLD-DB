@@ -81,7 +81,11 @@ public sealed class StorageBlobStore
                     batch.Put(metadataKey, EncodeMetadata(metadata));
                 }
             });
-            if (alreadyComplete) return;
+            if (alreadyComplete)
+            {
+                VerifyExistingPages(blobId, content);
+                return;
+            }
 
             string directory = BlobDirectory(blobId);
             Directory.CreateDirectory(directory);
@@ -125,6 +129,7 @@ public sealed class StorageBlobStore
         lock (_shared.Gate)
         {
             StorageSnapshot snapshot = _database.OpenSnapshot();
+            bool pinAdded = false;
             try
             {
                 if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes))
@@ -146,6 +151,7 @@ public sealed class StorageBlobStore
                     throw new InvalidDataException("Published Storage blob page directory is missing.");
                 _shared.Pins.TryGetValue(blobId, out int pins);
                 _shared.Pins[blobId] = checked(pins + 1);
+                pinAdded = true;
                 reader = new StorageBlobReader(
                     snapshot, directory, blobId, metadata, ReleasePin);
                 return true;
@@ -153,6 +159,7 @@ public sealed class StorageBlobStore
             catch
             {
                 snapshot.Dispose();
+                if (pinAdded) ReleasePin(blobId);
                 throw;
             }
         }
@@ -264,6 +271,24 @@ public sealed class StorageBlobStore
             }
             if (deleted != 0) TryFsyncDirectory(_blobDirectory);
             return deleted;
+        }
+    }
+
+    private void VerifyExistingPages(Guid blobId, ReadOnlyMemory<byte> content)
+    {
+        string directory = BlobDirectory(blobId);
+        for (int pageIndex = 0; pageIndex < GetPageCount(content.Length, _pageSize); pageIndex++)
+        {
+            int offset = checked(pageIndex * _pageSize);
+            int length = Math.Min(_pageSize, content.Length - offset);
+            byte[] existing;
+            try { existing = File.ReadAllBytes(Path.Combine(directory, PageFileName(pageIndex))); }
+            catch (FileNotFoundException ex)
+            {
+                throw new InvalidDataException("Published Storage blob page is missing.", ex);
+            }
+            if (!existing.AsSpan().SequenceEqual(content.Span.Slice(offset, length)))
+                throw new InvalidDataException("Published Storage blob page differs from its immutable content.");
         }
     }
 
@@ -514,7 +539,7 @@ public sealed class StorageBlobReader : IDisposable
     {
         StorageSnapshot? snapshot = Interlocked.Exchange(ref _snapshot, null);
         if (snapshot is null) return;
-        snapshot.Dispose();
-        _releasePin(_blobId);
+        try { snapshot.Dispose(); }
+        finally { _releasePin(_blobId); }
     }
 }
