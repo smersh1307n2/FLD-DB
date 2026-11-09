@@ -1950,3 +1950,10 @@ Created `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4
 ### 7.53 RPM3 adapter page bound is whole FLD journal group (2026-11-09)
 
 Updated the cross-repository integration contract to read one `RelayJournalBatch` per page and reject a group with more than 4,096 relay operations before allocating the transient `(JournalSeq, ChangeId)` array. A JournalSeq group is atomic in the RPM3 mapping: it must not be split across independent mapping/cursor commits. The 4,096 limit is currently an adapter bound; it is not yet enforced by FLD remote-apply ingress. If larger single journal groups must be supported, design an explicit continuation protocol that keeps the scan cursor behind the incomplete group and preserves atomic publication/ACK semantics.
+### 7.50 Two-runtime-assembly extraction — implementation scaffold (2026-11-09)
+
+- [x C] Added `src/Fld1.Database/Fld1.Database.csproj`, a consolidated runtime assembly that links the Core, Manifest, Run, WAL and Engine source trees into one `Fld1.Database.dll`; it references the independent generic `Fld1.Storage.dll`.
+- [x C] Changed `Fld.Db.slnx` runtime surface to the two approved source projects: `Fld1.Storage` and `Fld1.Database`. Component projects remain in the tree as historical source/project boundaries but are no longer solution runtime outputs.
+- [x C] Routed Core/Engine/Manifest/Run/WAL test projects and both benchmark projects through the consolidated Database project; Storage tests continue to reference Storage directly.
+- [~ T] No build has yet validated linked-source inclusion, duplicate generated attributes, package graph or test assembly visibility. Treat the extraction as a compile-unverified scaffold, not a completed DLL migration.
+- [~ C] Remaining extraction: resolve any compile errors, ensure publish/package output contains exactly the two runtime DLLs, remove or clearly retire component project entry points, update README/package references and test all supported build entry points.
