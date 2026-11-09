@@ -455,6 +455,18 @@ public sealed partial class FldDatabase
         }
         if (result.Count != run.EntryCount)
             throw new InvalidDataException("FULL_REPLACE staged Run entry count differs from its durable page index.");
+        if (result.Count != 0 &&
+            (!result[0].RecordId.AsSpan().SequenceEqual(run.MinRecordId) ||
+             !result[^1].RecordId.AsSpan().SequenceEqual(run.MaxRecordId)))
+            throw new InvalidDataException("FULL_REPLACE staged Run record bounds differ from its durable page index.");
+        byte[] previousSortKey = new byte[19];
+        for (int i = 0; i < result.Count; i++)
+        {
+            byte[] sortKey = FullReplaceSortKey(result[i]);
+            if (i != 0 && previousSortKey.AsSpan().SequenceCompareTo(sortKey) >= 0)
+                throw new InvalidDataException("FULL_REPLACE staged Run entries are not in canonical unique order.");
+            previousSortKey = sortKey;
+        }
         return result;
     }
 
