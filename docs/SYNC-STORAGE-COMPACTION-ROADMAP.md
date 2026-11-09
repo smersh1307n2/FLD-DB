@@ -1944,3 +1944,6 @@ Required extraction work before creating the public `Fld1.Database.dll`:
 Updated `FLD-STORAGE-CORE-ARCHITECTURE.md` §2.1 to state explicitly that the two-DLL design is normative target architecture, not the current build graph. There is no `Fld1.Database.csproj`; `FldDatabase` still uses the Engine/Run/Manifest/WAL/Core projects and does not use `Fld1.Storage` as its physical backend. This prevents future roadmap readers from mistaking the architectural decision for completed extraction.
 
 The physical compatibility gate remains mandatory: preserve the frozen FLD1 Run/Manifest/WAL format unless a separate versioned format decision authorizes a change. No third Common DLL and no linked-source compilation shortcut.
+### 7.52 Recovery checkpoint after two-DLL architecture audit (2026-11-09)
+
+Created `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4d5e`, preserving the current FLD branch including the source graph audit and architecture-document correction. The latest code-equivalent CI remains green at `d49f710c1e2992f753278836d521157813d8b503`; changes after that point are documentation-only.
