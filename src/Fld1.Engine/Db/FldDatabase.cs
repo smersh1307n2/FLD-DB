@@ -1534,9 +1534,10 @@ public sealed class FldDatabase : IDisposable
 
     /// <summary>
     /// Snapshot the durable local draft horizon while the caller holds AcquireCommitGuard.
-    /// A healthy database has recovered every WAL→Outbox gap before Open returns; local
-    /// uncommitted overlay edits and the unacknowledged Outbox suffix are the only
-    /// unpublished source operations.
+    /// A healthy database has recovered every WAL→Outbox gap before Open returns.
+    /// Dirty overlay edits and the unacknowledged Outbox suffix are counted directly;
+    /// an unsealed WAL prefix also forces a non-zero conservative barrier because
+    /// recovery can reconstruct acknowledged/compacted Outbox rows after restart.
     /// </summary>
     public FldDraftHorizon ReadUnpublishedLocalDraftHorizon()
     {
