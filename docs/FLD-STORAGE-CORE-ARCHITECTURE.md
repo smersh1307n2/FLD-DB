@@ -1,6 +1,6 @@
 # FLD Storage Core — extraction and dependency architecture
 
-**Status:** Architecture decision v0.2 — two independently buildable assemblies.  
+**Status:** Target architecture decision v0.2 — two independently buildable assemblies (not yet reflected by the current source/project graph).  
 **Purpose:** make the durable storage engine independently reusable without loading or depending on the FLD field-database implementation.  
 **Packaging decision:** two DLLs from the first implementation: `Fld1.Storage.dll` and `Fld1.Database.dll`. They are separate projects, build outputs, and packageable artifacts.
 
@@ -46,6 +46,19 @@ Allowed dependency direction:
 - BIN-SYNC Core MUST NOT depend on FLD.
 
 The adapter should normally live outside FLD-DB (for example, in a BIN-SYNC integration package). This prevents the storage engine from acquiring protocol dependencies just because its first consumer is BIN-SYNC.
+
+## 2.1 Current source graph — implementation gap (2026-11-09)
+
+The two-DLL statement above is normative target architecture, not a claim about the current repository build. The current branch still has these separate projects:
+
+- `Fld1.Storage`: an independent opaque byte-key/value engine with atomic batches, snapshots/prefix scans and generic WAL.
+- `Fld1.Engine`: `FldDatabase` and FLD semantic orchestration; it currently references `Fld1.Core`, `Fld1.Run`, `Fld1.Wal` and `Fld1.Manifest`.
+- `Fld1.Core`: a mixed set of generic byte/hash primitives and FLD-specific IDs, HLC and semantic contracts.
+- `Fld1.Run`, `Fld1.Manifest`, `Fld1.Wal`: FLD1-specific field/run/index/manifest/commit-recovery formats.
+
+There is no `Fld1.Database.csproj` yet, and `FldDatabase` does not currently use `StorageDatabase` as its physical backend. Therefore the repository does **not** yet produce the approved two-DLL FLD runtime. Do not claim that project separation or the existing `Fld1.Storage` assembly alone completes the extraction.
+
+The source-backed extraction order and compatibility gates are tracked in `SYNC-STORAGE-COMPACTION-ROADMAP.md` §7.50. The critical decision is to preserve the frozen FLD1 physical format unless an explicit format-version decision says otherwise; do not silently replace Run/Manifest/WAL with opaque key/value storage. No third `Common` runtime DLL and no linked-source compilation shortcut are permitted.
 
 ## 3. What belongs in Storage Core
 
