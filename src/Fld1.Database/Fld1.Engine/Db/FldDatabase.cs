@@ -37,7 +37,7 @@ public sealed class FldPublishedOrigin
     public required ulong OriginSequence { get; init; }
 }
 
-public sealed class FldDatabase : IDisposable
+public sealed partial class FldDatabase : IDisposable
 {
     // One root-wide lock: manifest, namespace WALs, runs and outboxes share this database owner.
     private const ulong StoragePartitionId = 0;
