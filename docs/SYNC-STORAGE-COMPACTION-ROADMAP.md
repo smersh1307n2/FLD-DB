@@ -2271,3 +2271,15 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [~ C] Implement the paged snapshot pin/release lifecycle and the host IDataProvider bridge. Legacy v1 rows must remain explicitly identity-zero; never synthesize ChangeId or Origin.
 - [~ T] Mixed v1/v2, replay, stamp-before-ACK crash, stale stamp, repeated stamp, compaction pin, cancellation/disposal and post-cutover ChangeId stability tests remain open.
 - [~ O] Benchmark Run v2 provenance section overhead and snapshot page allocation/latency; no disk format is emitted by this ADR until writer/recovery implementation is complete.
+
+
+### 7.90 FLD Run v2 provenance writer/reader and WAL identity-stamp (2026-11-09)
+
+- [x C] GROUP_COMMIT body v3 now stores `OriginAuthorEpoch` + `OriginSequence`; legacy body v1/v2 decode remains. APPLY_COMMIT body v4 stores the same pair; legacy body v2/v3 decode remains. Both reject half-populated origin tuples.
+- [x C] The FLD current-state value and remote field-write models now carry the immutable origin. Local provider-owned drafts can enter through the protocol-neutral `FldDatabase.PutWithIdentity` API with a stable nonzero ChangeId/epoch and deferred sequence zero.
+- [x C] RunBuilder emits v2's canonical 48-byte per-field provenance section only when stable ChangeIds exist; no-provenance/legacy builds remain Run v1. Checkpoint and compaction now pass winner ChangeId/origin into the builder.
+- [x C] RunVerify validates v1/v2 and strictly checks v2 provenance bounds, row size, reserved bytes, nonzero ChangeId, origin pair and canonical RecordId/FieldId ordering. RunReader exposes zero-copy ChangeId/Origin from the table; FieldResolver and FldDatabase retain them across overlay/Run resolution.
+- [x C] Added WAL identity-stamp kind/codec and `FldDatabase.CommitPublishedOrigins`. Each stamp records field key + existing ChangeId + immutable origin only; it creates no new Outbox event. Exact repeats are idempotent, stale/superseded ChangeIds are ignored, conflicting origins fail closed, and replay re-applies stamps before checkpoint.
+- [~ C] Generation-pinned paged snapshot still needs run-generation pin/release and bounded current-state pages. The host `IDataProvider` adapter and its local Outbox feed/key resolver/remote apply context are not yet implemented.
+- [~ T] No tests/build have been run for these slices. Required: legacy v1 reopen, mixed v1/v2, WAL v3/v4 old-body decode, stamp/replay crash cuts, stale/duplicate/conflicting stamp, checkpoint/compact identity survival and snapshot pin/release.
+- [~ O] Measure 48-byte provenance overhead, WAL stamp batches, binary search cost and snapshot page allocations after the snapshot API exists.
