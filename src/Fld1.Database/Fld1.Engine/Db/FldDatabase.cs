@@ -774,6 +774,7 @@ public sealed partial class FldDatabase : IDisposable
                 throw new InvalidDataException(
                     $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
+            WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
 
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
@@ -1113,6 +1114,7 @@ public sealed partial class FldDatabase : IDisposable
         ulong runId = _nextRunId++;
         string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
         _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
+        WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
 
         recordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
         ulong seqHi = _pendingFlushedCommitSeq;
