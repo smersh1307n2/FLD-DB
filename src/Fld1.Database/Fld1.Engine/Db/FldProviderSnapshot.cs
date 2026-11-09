@@ -302,7 +302,7 @@ public sealed class FldProviderSnapshot : IDisposable
 
 public sealed partial class FldDatabase
 {
-    private readonly HashSet<FldProviderSnapshot> _providerSnapshots = new();
+    private readonly Dictionary<Guid, FldProviderSnapshot> _providerSnapshots = new();
 
     /// <summary>
     /// Opens a stable, ordered snapshot over the current FLD generation. Immutable
@@ -310,47 +310,7 @@ public sealed partial class FldDatabase
     /// by reference because MemFieldValue instances are immutable after publication.
     /// </summary>
     public FldProviderSnapshot OpenProviderSnapshot()
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        lock (_commitLock)
-        {
-            EnsureHealthy();
-            var runs = new RunReader[_runs.Count];
-            var recordIds = new List<byte[]>();
-            var seen = new HashSet<(ulong Low, ulong High)>();
-            Span<byte> recordId = stackalloc byte[16];
-
-            for (int i = 0; i < _runs.Count; i++)
-            {
-                byte[] bytes = EnsureRunCached(i);
-                runs[i] = new RunReader(bytes);
-                for (uint index = 0; index < runs[i].NumClusters; index++)
-                {
-                    if (!runs[i].TryReadRecordIdAt(index, recordId))
-                        throw new InvalidDataException("Run cluster index changed while opening a provider snapshot.");
-                    AddRecordId(recordId, seen, recordIds);
-                }
-            }
-
-            KeyValuePair<MemFieldKey, MemFieldValue>[] overlay = _overlay.Snapshot().ToArray();
-            foreach (var pair in overlay)
-            {
-                pair.Key.WriteRecordId(recordId);
-                AddRecordId(recordId, seen, recordIds);
-            }
-
-            recordIds.Sort(static (left, right) => left.AsSpan().SequenceCompareTo(right));
-            var snapshot = new FldProviderSnapshot(
-                Guid.NewGuid(),
-                _outbox.HighWatermark,
-                runs,
-                overlay,
-                recordIds.ToArray(),
-                OnProviderSnapshotDisposed);
-            _providerSnapshots.Add(snapshot);
-            return snapshot;
-        }
-    }
+        => OpenProviderSnapshotPersisted();
 
     private static void AddRecordId(
         ReadOnlySpan<byte> recordId,
@@ -366,12 +326,12 @@ public sealed partial class FldDatabase
     private void OnProviderSnapshotDisposed(FldProviderSnapshot snapshot)
     {
         lock (_commitLock)
-            _providerSnapshots.Remove(snapshot);
+            _providerSnapshots.Remove(snapshot.Generation);
     }
 
     private void DisposeProviderSnapshotsUnderLock()
     {
-        foreach (FldProviderSnapshot snapshot in _providerSnapshots.ToArray())
+        foreach (FldProviderSnapshot snapshot in _providerSnapshots.Values.ToArray())
             snapshot.Dispose();
         _providerSnapshots.Clear();
     }
