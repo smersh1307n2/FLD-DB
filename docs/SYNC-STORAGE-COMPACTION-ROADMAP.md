@@ -1875,8 +1875,8 @@ The Node namespace fence now rejects legacy Node-owned receive validation in add
 
 BIN-SYNC `feature/fld-external-storage` now contains `BinSync.Storage.StorageRelayProvenanceMap`, a neutral Storage-backed primitive for the later synchronized-FLD adapter:
 
-- Per-(scope, local replica, namespace, original author) durable `JournalSeq → ChangeId → OutboxSeq` mapping and scan/ACK cursor.
-- Atomic Storage write batch for mapping rows + scanned cursor + RPM2 mapping-set checksum; restart recomputes the SHA-256/XOR checksum over bounded 1,024-row pages and fails closed on mismatch.
+- Per-(scope, local replica, namespace, original author) durable `JournalSeq ↔ OutboxSeq` mapping and scan/ACK cursor. ChangeId→OutboxSeq remains in the global BIN-SYNC ChangeId ledger and is resolved before mapping append.
+- Atomic Storage write batch for mapping rows + scanned cursor + RPM3 mapping-set checksum; restart recomputes the SHA-256/XOR checksum over bounded 1,024-row pages and fails closed on mismatch.
 - OutboxSeq-ordered keys, lower-bound O(log N) safe-ACK translation, same-JournalSeq group retention, and no payload/OriginSequence/per-peer ACK duplication.
 - Durable prune is explicitly after FLD `AcknowledgeRelayBatches` succeeds; the public sample demonstrates restart and partial JournalSeq-group ACK boundaries.
 
@@ -1899,3 +1899,10 @@ The current pre-extraction `Fld1.Engine.Db.FldDatabase` already exposes the core
 - `OpenReferenceSnapshot()` builds one immutable index of ChangeId, RecordId and receipt references. `FldReferenceSnapshot` exposes `UnpublishedLocalDraftHorizon`, `HasChangeIdReference`, `HasRecordReference` and `HasReceiptReference`.
 
 This means the semantic operations and reference-index implementation exist in the current Engine project; they are not yet extracted behind the approved neutral/two-DLL public boundary. The BIN-SYNC adapter can be a thin wrapper after that extraction, but must not be added as a direct Engine→BinSync dependency or premature integration package now. The existing roadmap order in §7.20 remains unchanged.
+
+
+### 7.48 RPM3 removes duplicated ChangeId from provenance rows (2026-11-09)
+
+The BIN-SYNC provenance map was tightened after byte-cost review. RPM3 persists only OutboxSeq in the ordered key and JournalSeq in the value; it does not copy the 16-byte ChangeId already retained by the global BIN-SYNC ChangeId ledger. The synchronized-FLD adapter must still call `Node.TryResolveOutboxSequences` for every (author, ChangeId) before appending the resolved sequence pair. Strictly increasing OutboxSeq plus the global ledger preserve identity uniqueness across restart without a second ChangeId index in the map.
+
+The compact map row is 84 bytes (76-byte key + 8-byte value), down from 100 bytes. The 60-byte RPM3 cursor retains the atomic SHA-256/XOR mapping-set checksum. This is a storage/metadata reduction only; the §7.20 two-DLL and adapter sequencing remains unchanged.
