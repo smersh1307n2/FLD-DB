@@ -51,8 +51,12 @@ public sealed class RunBuilder
         uint logical,
         ReadOnlySpan<byte> authorNodeId,
         ushort keyEpoch = 0,
-        bool isTombstone = false)
-        => Add(new FieldWrite(recordId, fieldId, value, wall, logical, authorNodeId, keyEpoch, isTombstone));
+        bool isTombstone = false,
+        ReadOnlySpan<byte> changeId = default,
+        uint originAuthorEpoch = 0,
+        ulong originSequence = 0)
+        => Add(new FieldWrite(recordId, fieldId, value, wall, logical, authorNodeId,
+            keyEpoch, isTombstone, changeId, originAuthorEpoch, originSequence));
 
     public byte[] Build()
     {
