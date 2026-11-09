@@ -488,7 +488,27 @@ public sealed class StorageSnapshot : IDisposable
             if (_finished) return 0;
 
             int visited = 0;
-            while (_index < values.Count && visited < limit)
+            while (visited < limit && TryReadNext(out StorageEntryView entry))
+            {
+                visited++;
+                if (!visitor(in entry))
+                    break;
+            }
+            return visited;
+        }
+
+        /// <summary>Read one borrowed entry without allocating a page or copying key/value bytes.</summary>
+        public bool TryReadNext(out StorageEntryView entry)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
+            if (_finished)
+            {
+                entry = default;
+                return false;
+            }
+
+            while (_index < values.Count)
             {
                 StorageDatabase.StorageKey key = values.Keys[_index];
                 byte[] value = values.Values[_index];
@@ -504,14 +524,13 @@ public sealed class StorageSnapshot : IDisposable
                 if (_afterKey.Length != 0 && keyBytes.SequenceCompareTo(_afterKey) <= 0)
                     continue;
 
-                var entry = new StorageEntryView(keyBytes, value);
-                visited++;
-                if (!visitor(in entry))
-                    break;
+                entry = new StorageEntryView(keyBytes, value);
+                return true;
             }
-            if (_index >= values.Count)
-                _finished = true;
-            return visited;
+
+            _finished = true;
+            entry = default;
+            return false;
         }
 
         public void Dispose()
