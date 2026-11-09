@@ -113,6 +113,8 @@ public sealed class FldProviderSnapshot : IDisposable
                 {
                     if (!TryLoadNextRecord())
                         break;
+                    if (_currentFieldIds!.Length == 0)
+                        continue;
                 }
 
                 ushort fieldId = _currentFieldIds![_fieldIndex++];
