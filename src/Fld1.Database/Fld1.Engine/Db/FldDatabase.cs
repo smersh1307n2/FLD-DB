@@ -232,9 +232,18 @@ public sealed partial class FldDatabase : IDisposable
         foreach (var re in manifest.Runs.Where(r => r.Ns == _namespaceId).OrderBy(r => r.RunId))
         {
             var path = Path.Combine(_dbDir, "runs", $"{re.RunId}.fld1");
-            if (!File.Exists(path))
+            Guid blobId = RunBlobId(re.RunId);
+            if (_runBlobStore.ContainsBlob(blobId))
+            {
+                if (!_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) || blobReader is null)
+                    throw new InvalidDataException($"Manifest references an incomplete Storage blob for Run {re.RunId}.");
+                blobReader.Dispose();
+            }
+            else if (!File.Exists(path))
+            {
                 throw new InvalidDataException(
-                    $"Manifest references missing Run {re.RunId} for namespace {_namespaceId}.");
+                    $"Manifest references missing Run {re.RunId} in both Storage blobs and legacy Run files.");
+            }
 
             _runs.Add((re.RunId, path, null));
             if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
@@ -763,7 +772,7 @@ public sealed partial class FldDatabase : IDisposable
             if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
                 throw new InvalidDataException(
                     $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
-            WriteRunAtomically(path, runBytes);
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
 
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
@@ -1102,7 +1111,7 @@ public sealed partial class FldDatabase : IDisposable
 
         ulong runId = _nextRunId++;
         string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-        WriteRunAtomically(path, runBytes);
+        _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
 
         recordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
         ulong seqHi = _pendingFlushedCommitSeq;
@@ -1380,7 +1389,20 @@ public sealed partial class FldDatabase : IDisposable
         var (runId, path, cached) = _runs[index];
         if (cached is not null) return cached;
 
-        var bytes = File.ReadAllBytes(path);
+        byte[] bytes;
+        Guid blobId = RunBlobId(runId);
+        if (_runBlobStore.ContainsBlob(blobId))
+        {
+            if (!_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) || blobReader is null)
+                throw new InvalidDataException($"Run {runId} references an incomplete Storage blob.");
+            using (blobReader)
+                bytes = blobReader.ReadAllBytes();
+        }
+        else
+        {
+            bytes = File.ReadAllBytes(path);
+        }
+
         var reader = new RunReader(bytes);
         if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
             throw new InvalidDataException(
@@ -1388,6 +1410,16 @@ public sealed partial class FldDatabase : IDisposable
 
         _runs[index] = (runId, path, bytes);
         return bytes;
+    }
+
+    private static Guid RunBlobId(ulong runId)
+    {
+        if (runId == 0) throw new ArgumentOutOfRangeException(nameof(runId));
+        Span<byte> id = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(id, runId);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(id.Slice(8), 0x314E5552); // RUN1
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(id.Slice(12), 0x31444C46); // FLD1
+        return new Guid(id);
     }
 
 
