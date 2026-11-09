@@ -73,6 +73,7 @@ public sealed class StorageDatabase : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (walRotateAfterBytes < 0) throw new ArgumentOutOfRangeException(nameof(walRotateAfterBytes));
+        directory = Path.GetFullPath(directory);
         StorageDirectorySync.CreateDirectoryDurable(directory);
         string walDirectory = Path.Combine(directory, "wal");
         // Acquire the partition's exclusive writer fence before reading the snapshot
