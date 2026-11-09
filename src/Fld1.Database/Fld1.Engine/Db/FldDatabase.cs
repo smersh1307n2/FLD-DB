@@ -710,7 +710,8 @@ public sealed class FldDatabase : IDisposable
                     rec, kv.Key.FieldId,
                     kv.Value.IsTombstone ? ReadOnlySpan<byte>.Empty : kv.Value.Value,
                     kv.Value.Wall, kv.Value.Logical, kv.Value.AuthorNodeId,
-                    kv.Value.KeyEpoch, kv.Value.IsTombstone);
+                    kv.Value.KeyEpoch, kv.Value.IsTombstone,
+                    kv.Value.ChangeId, kv.Value.OriginAuthorEpoch, kv.Value.OriginSequence);
             }
 
             byte[] runBytes = builder.Build();
@@ -900,13 +901,19 @@ public sealed class FldDatabase : IDisposable
                 {
                     builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
                         resolved.Wall, resolved.Logical,
-                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true);
+                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true,
+                        changeId: resolved.ChangeId ?? Array.Empty<byte>(),
+                        originAuthorEpoch: resolved.OriginAuthorEpoch,
+                        originSequence: resolved.OriginSequence);
                 }
                 else if (resolved.Value is not null)
                 {
                     builder.Add(recordId, fieldId, resolved.Value,
                         resolved.Wall, resolved.Logical,
-                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false);
+                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false,
+                        changeId: resolved.ChangeId ?? Array.Empty<byte>(),
+                        originAuthorEpoch: resolved.OriginAuthorEpoch,
+                        originSequence: resolved.OriginSequence);
                 }
             }
         }
