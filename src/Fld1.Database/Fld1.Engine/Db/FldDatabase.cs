@@ -1158,6 +1158,10 @@ public sealed partial class FldDatabase : IDisposable
         // the complete manifest are orphaned; the current FldDatabase loads one namespace.
         var manifest = _manifestStore.Load();
         var liveRunIds = manifest.Runs.Select(run => run.RunId).ToHashSet();
+        HashSet<ulong>? snapshotPinnedRunIds = GetPinnedProviderSnapshotRunIds();
+        if (snapshotPinnedRunIds is null)
+            return; // Fail closed: never delete Runs if a snapshot pin manifest is corrupt.
+        liveRunIds.UnionWith(snapshotPinnedRunIds);
 
         foreach (string file in Directory.EnumerateFiles(runsDir, "*.fld1"))
         {
