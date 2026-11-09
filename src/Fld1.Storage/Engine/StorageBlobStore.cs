@@ -385,9 +385,13 @@ public sealed class StorageBlobStore
         int pageCount = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(20));
         byte[] digest = bytes.AsSpan(24, 32).ToArray();
         if (flags > 1 || pageSize is < 4096 or > MaxPageSize ||
-            pageCount is < 0 or > MaxBlobPages ||
-            pageCount != (length == 0 ? 0 : checked((int)((length + (ulong)pageSize - 1) / (ulong)pageSize))))
+            pageCount is < 0 or > MaxBlobPages)
             throw new InvalidDataException("Storage blob metadata fields are invalid.");
+        ulong pageSize64 = (ulong)pageSize;
+        ulong expectedPageCount = length / pageSize64 +
+            (length % pageSize64 == 0 ? 0UL : 1UL);
+        if (expectedPageCount > MaxBlobPages || pageCount != (int)expectedPageCount)
+            throw new InvalidDataException("Storage blob metadata length/page count are inconsistent.");
         return new StorageBlobMetadata(length, pageSize, pageCount, digest, flags == 1);
     }
 
@@ -485,13 +489,16 @@ public sealed class StorageBlobReader : IDisposable
     {
         ArgumentNullException.ThrowIfNull(destination);
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        ulong copied = 0;
         for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
         {
             byte[] page = ReadPage(pageIndex);
+            copied = checked(copied + (ulong)page.Length);
             hash.AppendData(page);
             destination.Write(page);
         }
-        if (!CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
+        if (copied != _metadata.Length ||
+            !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
             throw new InvalidDataException("Storage blob content digest mismatch.");
     }
 
