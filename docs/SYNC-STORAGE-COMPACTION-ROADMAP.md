@@ -2211,3 +2211,11 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] No FLD1 WAL/Run/Manifest bytes or record semantics were replaced. FLD remains protocol-neutral; exactly two runtime DLLs.
 - [~ T] Add FLD Database multi-process/namespace lock tests, open-failure cleanup and abandoned-owner recovery. Exact-head build/CI not yet run.
 - [~ C] This does not yet migrate FLD-specific WAL/Run/Manifest persistence onto generic `StorageDatabase`; that requires a separate on-disk format/recovery compatibility ADR and remains open.
+
+
+### 7.82 Cache immutable snapshot index within each commit epoch (2026-11-09)
+
+- [x C] FLD `StorageDatabase` now caches the immutable sorted snapshot index and shares it across snapshots until a successful commit. A commit invalidates only the live cache; snapshots already opened retain their previous index/value generation.
+- [x C] BIN-SYNC's vendored `StorageDatabase.cs` mirrors the exact FLD source (blob `d5fee8be06b9193a294ce4f7c37ba84b5f37da15`).
+- [~ T] Snapshot stability across update/delete/checkpoint/reopen and cache invalidation boundary tests remain pending.
+- [~ O] First snapshot after a commit epoch still builds an O(keys) sorted index; repeated snapshots within the epoch reuse it.
