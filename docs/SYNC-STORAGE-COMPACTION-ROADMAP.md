@@ -2292,3 +2292,14 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [~ C] Build the generation-pinned snapshot state over captured immutable run buffers plus a bounded overlay snapshot; merge record IDs/pages without materializing the whole database. Then expose the provider-facing snapshot/feed/current-state contract.
 - [~ T] Add index boundary, canonical order, empty run, destination-size and snapshot-vs-compaction stability tests. No build/test result is claimed for this commit.
 - [~ O] Measure page allocation and multi-run cursor cost after the snapshot API exists.
+
+
+### 7.92 Generation-pinned paged FLD provider snapshot (2026-11-09)
+
+- [x C] Added `FldDatabase.OpenProviderSnapshot()` and `FldProviderSnapshot`: capture one immutable Run/overlay generation, retain the immutable run buffers across concurrent compaction, and capture the source Outbox high watermark under the commit lock.
+- [x C] The snapshot uses an O(keys) compact sorted RecordId index, per-record overlay-field index and bounded page materialization. It does not copy all field values into one in-memory snapshot list.
+- [x C] Current-state resolution preserves Run v2 ChangeId/Origin and keeps Run v1 rows explicitly identity-zero; field tombstones remain distinct and FLD lifecycle Dead maps to a canonical record tombstone while Alive is not emitted as a data mutation.
+- [x C] Snapshot pages are ordered, bounded to 4,096 entries, sequential and retryable for the immediately preceding page. Snapshot disposal is idempotent; database disposal releases every open snapshot.
+- [~ C] The BIN-SYNC `IDataProvider` adapter still needs to bind snapshot pages, FLD Outbox local feed, published-origin stamping, key resolution and current-state lookup to the provider contract. Durable cross-process source-generation recovery remains open.
+- [~ T] Build/CI, page boundaries, retry, compaction stability, cancellation/disposal, mixed Run v1/v2 and identity-retention crash tests are deferred to the T-pass. No test result is claimed.
+- [~ O] Measure O(keys) index footprint, per-page allocations and multi-run LWW resolution cost.
