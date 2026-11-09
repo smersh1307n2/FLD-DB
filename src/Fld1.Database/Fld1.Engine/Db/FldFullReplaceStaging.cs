@@ -60,6 +60,8 @@ public sealed partial class FldDatabase
             if (File.Exists(path))
             {
                 FullReplaceStageState existing = ReadFullReplaceStage(path);
+                if (existing.IsAborting)
+                    throw new InvalidOperationException("FULL_REPLACE generation is being aborted and cannot be resumed.");
                 if (existing.Generation != generation ||
                     existing.SourceFeedWatermark != sourceFeedWatermark ||
                     existing.ExpectedEntryCount != expectedEntryCount ||
@@ -542,7 +544,7 @@ public sealed partial class FldDatabase
 
     private static FullReplaceStageState DecodeFullReplaceStage(byte[] bytes)
     {
-        if (bytes.Length < 4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 32 + 19 + 4 + 4 + 32)
+        if (bytes.Length < 4 + 2 + 2 + 16 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 + 4 + 4 + 32)
             throw new InvalidDataException("FULL_REPLACE stage state is truncated.");
         int checksumOffset = bytes.Length - 32;
         byte[] checksum = SHA256.HashData(bytes.AsSpan(0, checksumOffset));
