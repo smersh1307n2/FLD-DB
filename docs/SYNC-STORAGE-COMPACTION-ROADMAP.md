@@ -2202,3 +2202,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] FLD authoritative Storage source and BIN-SYNC vendor are byte-identical at blob `a28cd58fbb72a1453a3ffb04a1ab1d5ed43ddaa1`.
 - [x C] BIN-SYNC provider snapshot merge consumes field and record-tombstone streams one row at a time, retaining only the current decoded mutation from each stream.
 - [~ T] Cross-check stream merge order, reset/reopen, disposed cursor and concurrent immutable snapshot behavior; no test run is claimed.
+
+
+### 7.81 FLD Database uses the generic Storage writer-fence seam (2026-11-09)
+
+- [x C] `Fld1.Storage` exposes `StorageDatabase.AcquirePartitionLease` / `StoragePartitionLease` backed by the same `WalWriterFence` as generic Storage, but without creating or opening a generic Storage WAL.
+- [x C] `FldDatabase.Open` acquires a root-wide reserved partition lease before reading/updating Manifest or replaying the FLD-specific WAL, Outbox, ApplyJournal and Runs. The lease is released after file handles on dispose and on every failed open path.
+- [x C] No FLD1 WAL/Run/Manifest bytes or record semantics were replaced. FLD remains protocol-neutral; exactly two runtime DLLs.
+- [~ T] Add FLD Database multi-process/namespace lock tests, open-failure cleanup and abandoned-owner recovery. Exact-head build/CI not yet run.
+- [~ C] This does not yet migrate FLD-specific WAL/Run/Manifest persistence onto generic `StorageDatabase`; that requires a separate on-disk format/recovery compatibility ADR and remains open.
