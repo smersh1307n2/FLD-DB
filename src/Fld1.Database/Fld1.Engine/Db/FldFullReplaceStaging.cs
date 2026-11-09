@@ -159,6 +159,10 @@ public sealed partial class FldDatabase
             ulong runId = AllocateFullReplaceRunId();
             string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
+            // Keep the legacy Run mirror until an explicit storage-format cutover.
+            // Publishing the mirror before the stage cursor means a crash cannot leave
+            // a durable stage reference whose compatibility file was never materialized.
+            WriteRunAtomically(runPath, runBytes);
 
             var stagedRun = new FullReplaceStageRun(
                 startIndex, entries.Count, runId, firstRecord.ToArray(), lastRecord.ToArray());
@@ -277,6 +281,7 @@ public sealed partial class FldDatabase
                 byte[] emptyRun = new RunBuilder(_namespaceId).Build();
                 ulong markerRunId = AllocateFullReplaceRunId();
                 string markerPath = Path.Combine(_dbDir, "runs", $"{markerRunId}.fld1");
+                _runBlobStore.PutImmutableBlob(RunBlobId(markerRunId), emptyRun);
                 WriteRunAtomically(markerPath, emptyRun);
                 state = state with
                 {
@@ -393,7 +398,8 @@ public sealed partial class FldDatabase
         {
             ulong candidate = _nextRunId++;
             if (candidate == 0) continue;
-            if (!File.Exists(Path.Combine(runsDirectory, $"{candidate}.fld1")))
+            if (!File.Exists(Path.Combine(runsDirectory, $"{candidate}.fld1")) &&
+                !_runBlobStore.ContainsBlob(RunBlobId(candidate)))
                 return candidate;
         }
     }
