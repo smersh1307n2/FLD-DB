@@ -36,7 +36,6 @@ public sealed class FldProviderSnapshot : IDisposable
     private readonly object _gate = new();
     private readonly Action<FldProviderSnapshot>? _onDispose;
     private RunReader[]? _runs;
-    private KeyValuePair<MemFieldKey, MemFieldValue>[]? _overlay;
     private Dictionary<MemFieldKey, MemFieldValue>? _overlayByKey;
     private Dictionary<(ulong Low, ulong High), ushort[]>? _overlayFieldsByRecord;
     private byte[][]? _recordIds;
@@ -61,7 +60,6 @@ public sealed class FldProviderSnapshot : IDisposable
         Generation = generation;
         SourceFeedWatermark = sourceFeedWatermark;
         _runs = runs;
-        _overlay = overlay;
         _overlayByKey = new Dictionary<MemFieldKey, MemFieldValue>(overlay.Length);
         var overlayFields = new Dictionary<(ulong Low, ulong High), List<ushort>>();
         foreach (var pair in overlay)
@@ -141,7 +139,6 @@ public sealed class FldProviderSnapshot : IDisposable
             if (_disposed) return;
             _disposed = true;
             _runs = null;
-            _overlay = null;
             _overlayByKey = null;
             _overlayFieldsByRecord = null;
             _recordIds = null;
