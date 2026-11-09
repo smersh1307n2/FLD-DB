@@ -1947,3 +1947,6 @@ The physical compatibility gate remains mandatory: preserve the frozen FLD1 Run/
 ### 7.52 Recovery checkpoint after two-DLL architecture audit (2026-11-09)
 
 Created `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4d5e`, preserving the current FLD branch including the source graph audit and architecture-document correction. The latest code-equivalent CI remains green at `d49f710c1e2992f753278836d521157813d8b503`; changes after that point are documentation-only.
+### 7.53 RPM3 adapter page bound is whole FLD journal group (2026-11-09)
+
+Updated the cross-repository integration contract to read one `RelayJournalBatch` per page and reject a group with more than 4,096 relay operations before allocating the transient `(JournalSeq, ChangeId)` array. A JournalSeq group is atomic in the RPM3 mapping: it must not be split across independent mapping/cursor commits. The 4,096 limit is currently an adapter bound; it is not yet enforced by FLD remote-apply ingress. If larger single journal groups must be supported, design an explicit continuation protocol that keeps the scan cursor behind the incomplete group and preserves atomic publication/ACK semantics.
