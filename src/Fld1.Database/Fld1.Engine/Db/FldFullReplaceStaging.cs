@@ -309,6 +309,7 @@ public sealed partial class FldDatabase
                 var runReader = new RunReader(runBytes);
                 if (!runReader.TryValidate(out var runVerify) || runReader.NamespaceId != _namespaceId)
                     throw new InvalidDataException($"FULL_REPLACE staged Run failed pre-switch validation: {runVerify.Status} {runVerify.Detail}");
+                WriteRunAtomically(runPath, runBytes); // Keep the legacy FLD1 Run mirror until an explicit format cutover.
                 replacementRuns.Add((run.RunId, runPath, runBytes));
             }
 
