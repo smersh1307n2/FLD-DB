@@ -1329,9 +1329,9 @@ public sealed class FldDatabase : IDisposable
             if (_unacknowledgedRelayAuthors is null)
                 RebuildUnacknowledgedRelayAuthorsLocked();
 
-            return _unacknowledgedRelayAuthors!.Values
-                .OrderBy(item => Convert.ToHexString(item.Author), StringComparer.Ordinal)
-                .Select(item => item.Author.ToArray())
+            return _unacknowledgedRelayAuthors!
+                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => pair.Value.Author.ToArray())
                 .ToArray();
         }
     }
