@@ -2010,3 +2010,10 @@ Updated the cross-repository integration contract to read one `RelayJournalBatch
 - [x C] Created `backup/post-two-dll-consolidation-2026-11-09` at `7105cdcd0c6e709681389b18adc066f589744d59` before continuing with the generic Storage backend migration.
 - [x C] The earlier pre-work checkpoint `backup/cpass-2026-11-09-0915` at `94fd1ebdfa15b95b55184a8eee92a5ebea0a4d5e` remains intact.
 - [~ T] The active branch still has red cross-platform CI; no new backend migration should be merged without restoring actionable diagnostics and a passing baseline.
+
+### 7.63 Avoid materializing a relay batch that cannot fit the page budget (2026-11-09)
+
+- [x C] `ReadRelayBatchPage` now counts author-matching relay operations before allocating the `RemoteFieldWrite[]`. If the next whole JournalSeq group would exceed the remaining 4,096-operation budget, it returns with the cursor still before that group and performs no projection allocation for it.
+- [x C] For accepted groups, the code fills one exact-size array in a direct loop instead of LINQ `Where/Select/ToArray`; semantics and whole-group ordering are unchanged.
+- [~ O] Allocation/throughput benefit is structurally clear for a page that reaches its cap, but no benchmark claim is made until the relay paging benchmark is run on a stable green build.
+- [~ T] Add boundary/resume tests for a page that is nearly full and a following group that does not fit; verify cursor remains before that group.
