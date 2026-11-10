@@ -70,6 +70,7 @@ public sealed partial class FldDatabase : IDisposable
     private readonly int _autoCompactRunCount;
     private bool _disposed;
     private bool _faulted;
+    private bool _fullReplaceStageMetadataHealthy = true;
 
     public string DbDir => _dbDir;
     public uint NamespaceId => _namespaceId;
@@ -1119,7 +1120,7 @@ public sealed partial class FldDatabase : IDisposable
         if (!newReader.TryValidate(out var verify) || newReader.NamespaceId != _namespaceId)
             throw new InvalidDataException($"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
 
-        ulong runId = _nextRunId++;
+        ulong runId = AllocateRunId();
         string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
         _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
         WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
@@ -1445,6 +1446,10 @@ public sealed partial class FldDatabase : IDisposable
     /// </summary>
     private ulong AllocateRunId()
     {
+        if (!_fullReplaceStageMetadataHealthy)
+            throw new InvalidOperationException(
+                "Cannot allocate a root-global Run ID while FULL_REPLACE stage metadata recovery is unproven.");
+
         while (true)
         {
             ulong candidate = _nextRunId;

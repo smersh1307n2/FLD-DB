@@ -354,6 +354,7 @@ public sealed partial class FldDatabase
             EnsureHealthy();
             string path = FullReplaceStagePath(generation);
             if (!File.Exists(path)) return true;
+            if (!RecoverFullReplaceStageCommitMarkers()) return false;
             FullReplaceStageState state = ReadFullReplaceStage(path);
             if (state.NamespaceId != _namespaceId)
                 throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
@@ -364,8 +365,16 @@ public sealed partial class FldDatabase
                 state = state with { IsAborting = true, AbortRunIndex = 0 };
                 WriteFullReplaceStage(path, state);
             }
-            int end = Math.Min(state.Runs.Length, checked(state.AbortRunIndex + limit));
-            for (int i = state.AbortRunIndex; i < end; i++)
+            int start = state.AbortRunIndex;
+            int end = Math.Min(state.Runs.Length, checked(start + limit));
+
+            // Persist the abort cursor before deleting any bytes. A crash can then
+            // leave only unreferenced orphans, never a stage cursor that still points
+            // at a Run ID whose blob/mirror may already have been deleted.
+            state = state with { AbortRunIndex = end };
+            WriteFullReplaceStage(path, state);
+
+            for (int i = start; i < end; i++)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{state.Runs[i].RunId}.fld1");
                 try
@@ -373,14 +382,22 @@ public sealed partial class FldDatabase
                     _runBlobStore.DeleteBlob(RunBlobId(state.Runs[i].RunId));
                     if (File.Exists(runPath)) File.Delete(runPath);
                 }
-                catch { return false; }
+                catch
+                {
+                    // Retry the first failed Run when possible. If persisting this
+                    // rewind also fails, the stage metadata becomes untrusted and
+                    // future Run allocation fails closed.
+                    try { WriteFullReplaceStage(path, state with { AbortRunIndex = i }); }
+                    catch { _fullReplaceStageMetadataHealthy = false; }
+                    return false;
+                }
             }
+
             if (end == state.Runs.Length)
             {
                 File.Delete(path);
                 return true;
             }
-            WriteFullReplaceStage(path, state with { AbortRunIndex = end });
             return false;
         }
     }
@@ -494,21 +511,56 @@ public sealed partial class FldDatabase
     private bool RecoverFullReplaceStageCommitMarkers()
     {
         string directory = Path.Combine(_dbDir, "full-replace-staging");
-        if (!Directory.Exists(directory)) return true;
+        if (!Directory.Exists(directory))
+        {
+            _fullReplaceStageMetadataHealthy = true;
+            return true;
+        }
         try
         {
             ManifestDocument manifest = _manifestStore.Load();
             foreach (string path in Directory.EnumerateFiles(directory, "*.bin"))
             {
                 FullReplaceStageState state = ReadFullReplaceStage(path);
+                bool changed = false;
+
+                if (state.IsAborting)
+                {
+                    // Recover old abort batches that deleted a prefix before persisting
+                    // AbortRunIndex. Only a contiguous missing prefix can be skipped:
+                    // the old deleter stopped at the first failed Run.
+                    int next = state.AbortRunIndex;
+                    while (next < state.Runs.Length)
+                    {
+                        FullReplaceStageRun run = state.Runs[next];
+                        string runPath = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
+                        if (File.Exists(runPath) || _runBlobStore.ContainsBlob(RunBlobId(run.RunId)))
+                            break;
+                        next++;
+                    }
+                    if (next != state.AbortRunIndex)
+                    {
+                        state = state with { AbortRunIndex = next };
+                        changed = true;
+                    }
+                }
+
                 if (!state.IsCommitted && IsFullReplaceStageCommitted(state, manifest))
-                    WriteFullReplaceStage(path, state with { IsCommitted = true });
+                {
+                    state = state with { IsCommitted = true };
+                    changed = true;
+                }
+
+                if (changed) WriteFullReplaceStage(path, state);
             }
+            _fullReplaceStageMetadataHealthy = true;
             return true;
         }
         catch
         {
-            // Corrupt stage metadata must never make its Run files eligible for GC.
+            // Corrupt stage metadata must never make its Run files eligible for GC or
+            // allow the root-global Run allocator to reuse an unknown staged identity.
+            _fullReplaceStageMetadataHealthy = false;
             return false;
         }
     }
@@ -525,13 +577,17 @@ public sealed partial class FldDatabase
             {
                 FullReplaceStageState state = ReadFullReplaceStage(path);
                 if (state.IsCommitted) continue;
-                foreach (FullReplaceStageRun run in state.Runs)
-                    result.Add(run.RunId);
+                // The abort cursor is write-ahead: its prefix is no longer live stage
+                // state and may be reclaimed even if a crash left orphan bytes behind.
+                int firstUnreleasedRun = state.IsAborting ? state.AbortRunIndex : 0;
+                for (int i = firstUnreleasedRun; i < state.Runs.Length; i++)
+                    result.Add(state.Runs[i].RunId);
             }
             return result;
         }
         catch
         {
+            _fullReplaceStageMetadataHealthy = false;
             return null;
         }
     }
