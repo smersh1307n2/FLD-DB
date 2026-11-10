@@ -405,7 +405,7 @@ public sealed class RunBuilder
             binaryVersion: provenanceEntries.Count == 0
                 ? RunConstants.BinaryVersion
                 : RunConstants.ProvenanceBinaryVersion,
-            provenanceOff: provenanceOff,
+            provenanceOff: provenanceEntries.Count == 0 ? 0UL : provenanceOff,
             provenanceLen,
             provenanceCount: (uint)provenanceEntries.Count,
             provenanceEntrySize: provenanceEntries.Count == 0 ? 0u : RunConstants.ProvenanceEntrySize);
