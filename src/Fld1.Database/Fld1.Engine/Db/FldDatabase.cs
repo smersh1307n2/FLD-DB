@@ -1226,9 +1226,9 @@ public sealed partial class FldDatabase : IDisposable
         int prunedBlobs;
         do { prunedBlobs = _runBlobStore.PruneUnreferencedBlobs(liveBlobIds, 4096); }
         while (prunedBlobs == 4096);
-        int prunedPages;
-        do { prunedPages = _runBlobStore.PruneOrphanPages(16_384); }
-        while (prunedPages == 16_384);
+        int prunedOrphanBlobs;
+        do { prunedOrphanBlobs = _runBlobStore.PruneOrphanBlobs(16_384); }
+        while (prunedOrphanBlobs == 16_384);
     }
 
     /// <summary>Resolve without taking _commitLock (caller may hold it).</summary>
