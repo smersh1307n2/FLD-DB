@@ -159,7 +159,9 @@ public static class RunVerify
 
             uint epoch = BinaryPrimitives.ReadUInt32LittleEndian(row.Slice(36, 4));
             ulong sequence = BinaryPrimitives.ReadUInt64LittleEndian(row.Slice(40, 8));
-            if ((epoch == 0) != (sequence == 0))
+            // Unpublished local drafts carry a stable author epoch and ChangeId
+            // before the publisher assigns their per-author sequence.
+            if (epoch == 0 && sequence != 0)
                 return checked((int)i);
 
             if (havePrevious)
