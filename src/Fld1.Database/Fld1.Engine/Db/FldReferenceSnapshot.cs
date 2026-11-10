@@ -50,20 +50,45 @@ public sealed class FldReferenceSnapshot : IDisposable
         _snapshotPin = snapshotPin;
     }
 
+    /// <summary>Gets the conservative unpublished local-operation horizon captured with this reference index.</summary>
     public FldDraftHorizon UnpublishedLocalDraftHorizon { get; }
 
-    /// <summary>True while any in-memory or persisted provider-snapshot generation is pinned.</summary>
+    /// <summary>
+    /// Gets whether any in-memory or persisted provider-snapshot generation is pinned.
+    /// While true, ChangeId and RecordId queries conservatively report every candidate
+    /// as referenced; receipt identity remains an independent horizon.
+    /// </summary>
     public bool HasSnapshotPin => _snapshotPin;
 
+    /// <summary>
+    /// Returns whether the exact 16-byte ChangeId is retained by unsealed WAL,
+    /// a provider-snapshot pin, or the captured dirty/Outbox/ApplyJournal index.
+    /// </summary>
+    /// <param name="changeId">Canonical 16-byte ChangeId.</param>
     public bool HasChangeIdReference(ReadOnlySpan<byte> changeId)
         => _unsealedWal || _snapshotPin || _changeIds.Contains(FldId128.From(changeId));
 
+    /// <summary>
+    /// Returns whether the exact 16-byte RecordId or tombstone ChangeId is retained
+    /// by unsealed WAL, a provider-snapshot pin, or the captured reference index.
+    /// </summary>
+    /// <param name="recordId">Canonical 16-byte RecordId.</param>
+    /// <param name="tombstoneChangeId">Canonical 16-byte ChangeId for the tombstone.</param>
     public bool HasRecordReference(
         ReadOnlySpan<byte> recordId, ReadOnlySpan<byte> tombstoneChangeId)
         => _unsealedWal || _snapshotPin ||
            _recordIds.Contains(FldId128.From(recordId)) ||
            _changeIds.Contains(FldId128.From(tombstoneChangeId));
 
+    /// <summary>
+    /// Returns whether the receipt key is retained by unsealed WAL or the captured
+    /// ApplyJournal receipt index. Provider-snapshot pins do not extend receipt lifetime.
+    /// </summary>
+    /// <param name="senderPeer">Canonical 16-byte transport sender identity.</param>
+    /// <param name="authorEpoch">Wire author epoch.</param>
+    /// <param name="transportPeerEpoch">Sender transport-peer epoch.</param>
+    /// <param name="namespaceId">FLD namespace of the receipt.</param>
+    /// <param name="batchId">Canonical 16-byte batch identity.</param>
     public bool HasReceiptReference(
         ReadOnlySpan<byte> senderPeer, uint authorEpoch,
         uint transportPeerEpoch, ushort namespaceId,
@@ -72,6 +97,7 @@ public sealed class FldReferenceSnapshot : IDisposable
             FldId128.From(senderPeer), transportPeerEpoch, authorEpoch,
             namespaceId, FldId128.From(batchId)));
 
+    /// <summary>Ends the caller's logical use of this index; it owns no database lock or file pin.</summary>
     public void Dispose()
     {
         // The snapshot owns only in-memory indexes; no file or lock remains pinned.

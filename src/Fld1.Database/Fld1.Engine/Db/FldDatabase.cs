@@ -18,11 +18,14 @@ using Fld1.Wal.Recovery;
 namespace Fld1.Engine.Db;
 
 /// <summary>
-/// Single-process FLD database.
-/// Put → mem overlay; Commit → WAL; Checkpoint → run + clear sealed prefix;
-/// Open recovers WAL records after last sealed SeqHi into overlay.
+/// Conservative horizon for FLD local work not yet frozen into the downstream
+/// publication authority. Dirty and unacknowledged Outbox entries contribute to
+/// the count; an unsealed WAL-only recovery barrier contributes one conservative
+/// unit rather than claiming an exact operation count.
 /// </summary>
-/// <summary>Conservative count and maximum HLC of unpublished FLD local operations.</summary>
+/// <param name="Count">Conservative non-zero barrier/count for unpublished local work.</param>
+/// <param name="MaxHlcWall">Maximum observed HLC wall component in indexed draft state, or zero.</param>
+/// <param name="MaxHlcLogical">Logical component paired with the maximum wall value.</param>
 public readonly record struct FldDraftHorizon(ulong Count, ulong MaxHlcWall, uint MaxHlcLogical);
 
 /// <summary>
@@ -38,6 +41,11 @@ public sealed class FldPublishedOrigin
     public required ulong OriginSequence { get; init; }
 }
 
+/// <summary>
+/// Single-process FLD database. Put operations update the memory overlay, Commit
+/// appends to WAL, Checkpoint publishes immutable Runs and clears the sealed prefix,
+/// and Open replays WAL records after the last sealed sequence into the overlay.
+/// </summary>
 public sealed partial class FldDatabase : IDisposable
 {
     // One root-wide lock: manifest, namespace WALs, runs and outboxes share this database owner.

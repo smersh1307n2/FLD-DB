@@ -2367,6 +2367,12 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Found a stale call in `FldDatabase.GcOrphanRuns` to nonexistent `StorageBlobStore.PruneOrphanPages`. Replaced it with the implemented `PruneOrphanBlobs(16_384)`, so restart cleanup now removes directories left after catalog-first deletion. Catalog-backed live/pending blobs remain protected.
 - [~ T] Add crash/failure injection at pending catalog, page temp write, page rename, directory flush, completion marker, catalog deletion and directory deletion boundaries. Verify repeated maintenance converges and never removes a live/pinned blob. Windows directory-entry durability is explicitly not claimed by `StorageDirectorySync`; assess/document that platform limitation before production guarantees. No build/test was run in this C slice.
 
+### 7.102 C-pass: align public FLD reference-snapshot API documentation (2026-11-10)
+
+- [x C] Corrected the misplaced `FldDatabase` XML summary so it documents the database class rather than `FldDraftHorizon`; documented the latter's conservative count semantics, including the unsealed-WAL barrier.
+- [x C] Documented the public `FldReferenceSnapshot` horizon, snapshot-pin behavior, exact 16-byte ChangeId/RecordId/receipt query contracts, and its no-resource `Dispose` lifetime. No runtime behavior or persisted bytes changed.
+- [~ T] Verify XML documentation/build warnings and add focused API-contract tests for snapshot pin conservatism and receipt-vs-ChangeId horizon distinction. No build/tests run in this C slice.
+
 ### 7.101 C-pass: unify root-global Run allocation and make abort cursor write-ahead (2026-11-10)
 
 - [x C] Source audit found compaction used direct `_nextRunId++`, bypassing the shared root-global allocator used by checkpoint and FULL_REPLACE. Compaction now calls `AllocateRunId()`; all new Run publication paths use the same collision checks against legacy mirrors and the immutable blob catalog.
