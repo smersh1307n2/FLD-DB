@@ -202,7 +202,7 @@ public sealed class FldProviderSnapshot : IDisposable
                 fields.Add(fieldId);
         }
         foreach (RunReader run in _runs!)
-            run.ScanFieldIds(recordId, fields.Add);
+            run.ScanFieldIds(recordId, fieldId => { fields.Add(fieldId); });
 
         _currentRecordId = recordId;
         _currentFieldIds = fields.Order().ToArray();
