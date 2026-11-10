@@ -400,10 +400,12 @@ public sealed class RunBuilder
             contributorCount: aliveFields,
             ghostCount: 0,
             digest,
+            summaryXor: default,
+            summarySum: default,
             binaryVersion: provenanceEntries.Count == 0
                 ? RunConstants.BinaryVersion
                 : RunConstants.ProvenanceBinaryVersion,
-            provenanceOff,
+            provenanceOff: provenanceOff,
             provenanceLen,
             provenanceCount: (uint)provenanceEntries.Count,
             provenanceEntrySize: provenanceEntries.Count == 0 ? 0u : RunConstants.ProvenanceEntrySize);
