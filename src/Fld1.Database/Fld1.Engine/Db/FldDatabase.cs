@@ -932,13 +932,19 @@ public sealed partial class FldDatabase : IDisposable
                     continue;
                 }
 
-                if (current.OriginAuthorEpoch != 0 || current.OriginSequence != 0)
+                // A local draft may already carry its stable author epoch while
+                // its publication sequence is still unassigned. Only a nonzero
+                // sequence makes the OperationOrigin immutable.
+                if (current.OriginSequence != 0)
                 {
                     if (current.OriginAuthorEpoch != item.OriginAuthorEpoch ||
                         current.OriginSequence != item.OriginSequence)
                         throw new InvalidDataException("A current ChangeId already has a conflicting immutable OperationOrigin.");
                     continue;
                 }
+                if (current.OriginAuthorEpoch != 0 &&
+                    current.OriginAuthorEpoch != item.OriginAuthorEpoch)
+                    throw new InvalidDataException("A local identity draft belongs to a different author epoch.");
 
                 pending.Add(new WalIdentityStamp
                 {
