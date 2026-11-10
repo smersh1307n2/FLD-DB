@@ -609,7 +609,7 @@ public sealed partial class FldDatabase
         bool directoryExisted = Directory.Exists(directory);
         Directory.CreateDirectory(directory);
         if (!directoryExisted)
-            TryFsyncDirectory(Path.GetDirectoryName(directory)!);
+            StorageDirectorySync.Flush(Path.GetDirectoryName(directory)!);
         byte[] bytes = EncodeFullReplaceStage(state);
         string temporary = path + ".tmp";
         using (var stream = new FileStream(
@@ -620,7 +620,7 @@ public sealed partial class FldDatabase
             stream.Flush(flushToDisk: true);
         }
         File.Move(temporary, path, true);
-        TryFsyncDirectory(directory);
+        StorageDirectorySync.Flush(directory);
     }
 
     private static FullReplaceStageState ReadFullReplaceStage(string path)
