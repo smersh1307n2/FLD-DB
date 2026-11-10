@@ -87,6 +87,53 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Commit_published_origin_assigns_sequence_to_epoch_stamped_local_draft()
+    {
+        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] changeId = new byte[16];
+        changeId[0] = 0xA9;
+        var published = new FldPublishedOrigin
+        {
+            RecordId = recordId,
+            FieldId = 7,
+            ChangeId = changeId,
+            OriginAuthorEpoch = 6,
+            OriginSequence = 1
+        };
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.PutWithIdentity(
+                recordId, 7, "publish-draft"u8, changeId,
+                originAuthorEpoch: 6, wall: 125, logical: 0);
+            db.Commit();
+
+            Assert.Equal(1, db.CommitPublishedOrigins(new[] { published }));
+            Assert.Equal(0, db.CommitPublishedOrigins(new[] { published }));
+            Assert.Throws<InvalidDataException>(() => db.CommitPublishedOrigins(new[]
+            {
+                new FldPublishedOrigin
+                {
+                    RecordId = recordId,
+                    FieldId = 7,
+                    ChangeId = changeId,
+                    OriginAuthorEpoch = 6,
+                    OriginSequence = 2
+                }
+            }));
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        using (var snapshot = reopened.OpenProviderSnapshot())
+        {
+            FldProviderSnapshotEntry entry = Assert.Single(snapshot.ReadPage(0, 10).Entries);
+            Assert.Equal(changeId, entry.ChangeId);
+            Assert.Equal(6U, entry.OriginAuthorEpoch);
+            Assert.Equal(1UL, entry.OriginSequence);
+        }
+    }
+
+    [Fact]
     public void Acknowledge_advances_watermark()
     {
         using var db = FldDatabase.Open(_dir);
