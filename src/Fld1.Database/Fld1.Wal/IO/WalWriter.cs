@@ -70,7 +70,8 @@ public sealed class WalWriter : IDisposable
         if (payload.Length > WalConstants.MaxPayloadLen)
             throw new ArgumentException("payload too large");
         if (kind is not (WalConstants.KindGroupCommit or WalConstants.KindNsCreate
-            or WalConstants.KindSnapshotInstall or WalConstants.KindApplyCommit))
+            or WalConstants.KindSnapshotInstall or WalConstants.KindApplyCommit
+            or WalConstants.KindIdentityStamp))
             throw new ArgumentException("unknown kind");
 
         lock (_mutex)
