@@ -2301,7 +2301,7 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] The snapshot uses an O(keys) compact sorted RecordId index, per-record overlay-field index and bounded page materialization. It does not copy all field values into one in-memory snapshot list.
 - [x C] Current-state resolution preserves Run v2 ChangeId/Origin and keeps Run v1 rows explicitly identity-zero; field tombstones remain distinct and FLD lifecycle Dead maps to a canonical record tombstone while Alive is not emitted as a data mutation.
 - [x C] Snapshot pages are ordered, bounded to 4,096 entries, sequential and retryable for the immediately preceding page. Snapshot disposal is idempotent; database disposal releases every open snapshot.
-- [~ C] The BIN-SYNC `IDataProvider` adapter still needs to bind snapshot pages, FLD Outbox local feed, published-origin stamping, key resolution and current-state lookup to the provider contract. Durable cross-process source-generation recovery remains open.
+- [x C] Closed by §7.93 and §7.97: the BIN-SYNC `FldDatabaseDataProvider` binds snapshot pages, FLD Outbox local feed/ACK, published-origin stamping, key resolution, current-state lookup and the persisted source watermark to the provider contract. The FLD layer remains protocol-neutral.
 - [~ T] Build/CI, page boundaries, retry, compaction stability, cancellation/disposal, mixed Run v1/v2 and identity-retention crash tests are deferred to the T-pass. No test result is claimed.
 - [~ O] Measure O(keys) index footprint, per-page allocations and multi-run LWW resolution cost.
 
@@ -2311,7 +2311,8 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] BIN-SYNC `samples/FldBinSyncHost/FldDatabaseDataProvider` now binds FLD generation-pinned snapshot pages, Outbox local feed/ACK, direct RecordId/FieldId resolution, current-state reads, published-origin stamping and the FLD commit guard to the base `IDataProvider` contract.
 - [x C] The adapter rejects context-free remote APPLY. The exact `FldRemoteBatchApplyStore` remains the only receive path because it preserves authenticated sender, transport epoch, cursor and digest context in FLD ApplyJournal.
 - [x C] Host composition now validates exact identity across `FldDatabaseDataProvider`, `FldDatabase`, `StorageSyncCoordinator` and `FldRemoteBatchApplyStore`; no FLD→BIN-SYNC runtime dependency was introduced.
-- [~ C] Provider publication-mode cutover and durable author-epoch closure, FULL_REPLACE receiver staging/switch, restart-durable sender snapshot generation and the remaining generic Storage/host scheduler decisions remain open.
+- [x C] Durable author-epoch closure (§7.94), FULL_REPLACE receiver staging/switch (§7.95) and durable sender snapshot watermark binding (§7.97) are implemented.
+- [~ C] Provider publication-mode cutover and the remaining generic Storage/host scheduler decisions remain open; the actual host executable is outside these repositories.
 - [~ T] Cross-repository host build, IDataProvider conformance, Outbox lease fencing, page retry/seek, identity stamping and restart/crash tests are deferred to the T-pass. No test/build result is claimed.
 
 
@@ -2329,7 +2330,8 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Crash recovery infers and persists the committed marker if the manifest switch completed before process loss. Orphan Run GC preserves uncommitted stage Run files across all namespaces; corrupt stage metadata disables orphan deletion. Abort records a durable cursor and can resume after interruption. Stage index decode validates namespace, unique Run IDs, bounds, page sizes and canonical order; staged Runs are revalidated before switch.
 - [x C] BIN-SYNC host `FldDatabaseDataProvider` now implements `IProviderFullReplace`. It maps provider mutations into neutral FLD snapshot entries, reads staged pages back, recomputes the canonical v3.1 FULL_REPLACE digest and compares it to the signed manifest digest before asking FLD to switch generations.
 - [~ T] Verify exact cross-repository builds, canonical lifecycle/field tombstone round-trips, Run v1/v2 provenance, page boundary/retry, duplicate/out-of-order pages, digest mismatch, crash cuts before/after Run write/state write/manifest switch/commit marker, concurrent local writes, pinned old snapshots, namespace isolation and bounded abort/reopen. No build/test result is claimed.
-- [~ C] Generic Storage page/run/WAL physical-format decision and final public API/source/byte audit remain open. Physical receipt, ChangeId and tombstone/Ghost GC remain disabled.
+- [x C] The generic Storage page/blob + FLD Run compatibility format decision is accepted in `FLD-STORAGE-PHYSICAL-FORMAT-ADR.md`; Run/blob integration and crash-cleanup source audits are recorded in §§7.98–7.101. WAL remains FLD-specific by design and is not silently migrated.
+- [~ C] Final public API/source/byte audit remains open. Physical receipt, ChangeId and tombstone/Ghost GC remain disabled.
 
 ### 7.96 Namespace-safe stage recovery and bounded FULL_REPLACE readback hardening (2026-11-09)
 
