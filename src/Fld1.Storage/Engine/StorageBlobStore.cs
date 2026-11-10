@@ -7,8 +7,10 @@ namespace Fld1.Storage.Engine;
 
 /// <summary>
 /// Generic immutable page/blob store. StorageDatabase owns the small blob catalog
-/// and its WAL; opaque page bytes are stored as durable immutable files so the
-/// in-memory KV index never grows with the total blob payload size.
+/// and its WAL; opaque page bytes are stored outside the in-memory KV index. Page
+/// contents are flushed before atomic publication. Directory-entry fsync is applied
+/// where StorageDirectorySync supports it; Windows directory-entry durability is not
+/// claimed by this implementation.
 /// </summary>
 public sealed class StorageBlobStore
 {
@@ -103,8 +105,8 @@ public sealed class StorageBlobStore
                     Path.Combine(directory, PageFileName(pageIndex)),
                     content.Span.Slice(offset, length));
             }
-            // Each page file is flushed individually; one directory fsync publishes
-            // the complete pending generation before its catalog completion marker.
+            // Each page file is flushed individually; one directory fsync where supported
+            // publishes the complete pending generation before its catalog completion marker.
             StorageDirectorySync.Flush(directory);
 
             metadata = metadata with { IsComplete = true };
