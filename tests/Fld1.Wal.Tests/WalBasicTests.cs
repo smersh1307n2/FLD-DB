@@ -280,7 +280,7 @@ public class WalBasicTests : IDisposable
         };
 
         byte[] payload = ApplyCommitCodec.Encode(commit);
-        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(payload));
+        Assert.Equal(4u, BinaryPrimitives.ReadUInt32LittleEndian(payload));
         var decoded = ApplyCommitCodec.Decode(payload);
 
         Assert.Equal(2, decoded.Fields.Count);
