@@ -2161,13 +2161,21 @@ public sealed partial class FldDatabase : IDisposable
             }
 
             bool unsealedWal = _pendingFlushedCommitSeq > _lastSealedCommitSeq;
+            // A durable or in-memory provider snapshot may retain ChangeId and RecordId
+            // provenance from an older immutable Run generation. Keep both GC horizons
+            // blocked until the host has recovered its active token set and pruned
+            // inactive generations; directory-only crash leftovers fail closed too.
+            string snapshotRoot = Path.Combine(_dbDir, "snapshots");
+            bool snapshotPin = _providerSnapshots.Count != 0 ||
+                (Directory.Exists(snapshotRoot) && Directory.EnumerateDirectories(snapshotRoot).Any());
+
             // Unsealed WAL may replay an acknowledged/compacted Outbox suffix after
             // restart. It is a conservative draft barrier until checkpoint/seal.
             if (unsealedWal && draftCount == 0)
                 draftCount = 1;
             return new FldReferenceSnapshot(
                 new FldDraftHorizon(draftCount, maxWall, maxLogical),
-                changeIds, recordIds, receipts, unsealedWal);
+                changeIds, recordIds, receipts, unsealedWal, snapshotPin);
 
             bool VisitOutbox(in OutboxEntryView entry)
             {

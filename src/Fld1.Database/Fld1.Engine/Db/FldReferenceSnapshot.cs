@@ -32,29 +32,32 @@ public sealed class FldReferenceSnapshot : IDisposable
     private readonly HashSet<FldId128> _recordIds;
     private readonly HashSet<FldReceiptReferenceKey> _receipts;
     private readonly bool _unsealedWal;
+    private readonly bool _snapshotPin;
 
     internal FldReferenceSnapshot(
         FldDraftHorizon drafts,
         HashSet<FldId128> changeIds,
         HashSet<FldId128> recordIds,
         HashSet<FldReceiptReferenceKey> receipts,
-        bool unsealedWal)
+        bool unsealedWal,
+        bool snapshotPin)
     {
         UnpublishedLocalDraftHorizon = drafts;
         _changeIds = changeIds;
         _recordIds = recordIds;
         _receipts = receipts;
         _unsealedWal = unsealedWal;
+        _snapshotPin = snapshotPin;
     }
 
     public FldDraftHorizon UnpublishedLocalDraftHorizon { get; }
 
     public bool HasChangeIdReference(ReadOnlySpan<byte> changeId)
-        => _unsealedWal || _changeIds.Contains(FldId128.From(changeId));
+        => _unsealedWal || _snapshotPin || _changeIds.Contains(FldId128.From(changeId));
 
     public bool HasRecordReference(
         ReadOnlySpan<byte> recordId, ReadOnlySpan<byte> tombstoneChangeId)
-        => _unsealedWal ||
+        => _unsealedWal || _snapshotPin ||
            _recordIds.Contains(FldId128.From(recordId)) ||
            _changeIds.Contains(FldId128.From(tombstoneChangeId));
 
