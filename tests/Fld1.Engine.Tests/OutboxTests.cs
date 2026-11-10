@@ -52,6 +52,41 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Provider_snapshot_preserves_unpublished_identity_draft_with_zero_origin_sequence()
+    {
+        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] changeId = new byte[16];
+        changeId[0] = 0xA8;
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.PutWithIdentity(
+                recordId, 7, "snapshot-draft"u8, changeId,
+                originAuthorEpoch: 6, wall: 124, logical: 0);
+            db.Commit();
+
+            using var snapshot = db.OpenProviderSnapshot();
+            FldProviderSnapshotEntry entry = Assert.Single(snapshot.ReadPage(0, 10).Entries);
+            Assert.Equal(changeId, entry.ChangeId);
+            Assert.Equal(6U, entry.OriginAuthorEpoch);
+            Assert.Equal(0UL, entry.OriginSequence);
+            Assert.Equal("snapshot-draft"u8.ToArray(), entry.Value);
+        }
+
+        // Reopen the persisted snapshot manifest and its overlay Run. Draft identity
+        // must remain present without inventing a publication sequence.
+        using (var reopened = FldDatabase.Open(_dir))
+        using (var snapshot = reopened.OpenProviderSnapshot())
+        {
+            FldProviderSnapshotEntry entry = Assert.Single(snapshot.ReadPage(0, 10).Entries);
+            Assert.Equal(changeId, entry.ChangeId);
+            Assert.Equal(6U, entry.OriginAuthorEpoch);
+            Assert.Equal(0UL, entry.OriginSequence);
+            Assert.Equal("snapshot-draft"u8.ToArray(), entry.Value);
+        }
+    }
+
+    [Fact]
     public void Acknowledge_advances_watermark()
     {
         using var db = FldDatabase.Open(_dir);
