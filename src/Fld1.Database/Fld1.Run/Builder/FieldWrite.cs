@@ -45,8 +45,11 @@ public sealed class FieldWrite
             if (aggregate == 0)
                 throw new ArgumentException("ChangeId must be nonzero.", nameof(changeId));
         }
-        if ((originAuthorEpoch == 0) != (originSequence == 0))
-            throw new ArgumentException("Origin epoch and sequence must be both zero or both nonzero.");
+        // A local identity draft is durable before BIN-SYNC publication assigns
+        // its author sequence. Epoch may therefore be present while sequence is zero;
+        // the inverse (sequence without an epoch) is never a valid origin.
+        if (originAuthorEpoch == 0 && originSequence != 0)
+            throw new ArgumentException("Origin sequence requires an author epoch.");
         if (originAuthorEpoch != 0 && changeId.IsEmpty)
             throw new ArgumentException("OperationOrigin requires a stable ChangeId.");
 
