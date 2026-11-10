@@ -27,6 +27,31 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Local_identity_draft_with_unassigned_origin_sequence_survives_wal_recovery()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        var changeId = new byte[16];
+        changeId[0] = 0xA7;
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.PutWithIdentity(
+                recordId, 7, "draft"u8, changeId,
+                originAuthorEpoch: 6, wall: 123, logical: 0);
+            db.Commit();
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            Assert.True(reopened.TryResolve(recordId, 7, out var resolved));
+            Assert.Equal(changeId, resolved.ChangeId);
+            Assert.Equal(6U, resolved.OriginAuthorEpoch);
+            Assert.Equal(0UL, resolved.OriginSequence);
+            Assert.Single(reopened.ReadOutboxBatch(0, 10));
+        }
+    }
+
+    [Fact]
     public void Acknowledge_advances_watermark()
     {
         using var db = FldDatabase.Open(_dir);
