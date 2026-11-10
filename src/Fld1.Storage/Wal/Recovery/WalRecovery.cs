@@ -4,7 +4,7 @@ using Fld1.Storage.Wal.Format;
 
 namespace Fld1.Storage.Wal.Recovery;
 
-public enum WalRecoveryStatus
+internal enum WalRecoveryStatus
 {
     Ok = 0,
     CorruptHeader,
@@ -17,7 +17,7 @@ public enum WalRecoveryStatus
     TruncatedTorn,
 }
 
-public sealed class WalRecoveredRecord
+internal sealed class WalRecoveredRecord
 {
     public required ulong CommitSeq { get; init; }
     public required byte Kind { get; init; }
@@ -26,7 +26,7 @@ public sealed class WalRecoveredRecord
     public required long FileOffset { get; init; }
 }
 
-public sealed class WalRecoveryResult
+internal sealed class WalRecoveryResult
 {
     public required WalRecoveryStatus Status { get; init; }
     public string? Detail { get; init; }
@@ -40,7 +40,7 @@ public sealed class WalRecoveryResult
 /// WAL recovery algorithm. Spec §5.8.
 /// EnvelopeCrc first; full CRC-invalid never auto-truncate; torn tail truncates.
 /// </summary>
-public static class WalRecovery
+internal static class WalRecovery
 {
     public static WalRecoveryResult Recover(string path)
     {

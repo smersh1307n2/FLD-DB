@@ -159,7 +159,7 @@ Do not leave domain-specific types in a catch-all `Fld1.Core` namespace merely b
 - HLC, UUIDv7 generation, author ordering and field-specific comparison belong above Storage;
 - a helper belongs in a shared namespace only if it has no dependency on either domain and is used by both.
 
-Storage implementation details remain internal. The small public Storage API is the extraction boundary; Database code must use that API rather than reaching into Storage implementation classes. This is what makes later project separation mechanical instead of a redesign.
+Storage implementation details remain internal. The public extraction boundary is limited to `StorageDatabase`, `StoragePartitionLease`, `StorageWriteBatch`, `StorageSnapshot`/`PrefixCursor`, `StorageEntry`, `StorageConflictException`, `StorageBlobStore`/`StorageBlobReader`, and the shared `StorageDirectorySync` durability helper used by Database-owned files. WAL manager/writer/recovery/result/format types, snapshot-file codecs and checksum implementations are implementation details, not a second public WAL API. Database code must use the Storage database/lease/directory helper surface rather than reaching into WAL implementation classes. This is what makes later project separation mechanical instead of a redesign.
 
 ## 5.1. Migration map for the current FLD modules
 

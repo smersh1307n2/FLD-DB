@@ -2367,6 +2367,13 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Found a stale call in `FldDatabase.GcOrphanRuns` to nonexistent `StorageBlobStore.PruneOrphanPages`. Replaced it with the implemented `PruneOrphanBlobs(16_384)`, so restart cleanup now removes directories left after catalog-first deletion. Catalog-backed live/pending blobs remain protected.
 - [~ T] Add crash/failure injection at pending catalog, page temp write, page rename, directory flush, completion marker, catalog deletion and directory deletion boundaries. Verify repeated maintenance converges and never removes a live/pinned blob. Windows directory-entry durability is explicitly not claimed by `StorageDirectorySync`; assess/document that platform limitation before production guarantees. No build/test was run in this C slice.
 
+### 7.103 C-pass: close generic Storage public API leakage (2026-11-10)
+
+- [x C] The two-DLL extraction is now a real assembly boundary, but source audit found generic WAL internals were still accidentally public: `WalManager`, `WalWriter`, `WalRecovery`, recovery result/status/record types, and WAL header/envelope/constants.
+- [x C] Made those WAL implementation types internal. `StorageDatabase` remains the sole owner of the generic WAL lifecycle; the public boundary is the byte-KV database/batch/snapshot/blob API plus the explicit partition lease and directory durability helper needed by FLD Database.
+- [x C] Updated `FLD-STORAGE-CORE-ARCHITECTURE.md` with the concrete public surface and the no-public-WAL rule. `Fld1.Database` has no source references to the internal generic WAL classes; Storage tests and BIN-SYNC Storage Integration retain friend-assembly access for implementation-level verification.
+- [~ T] Verify public metadata/API surface and compile both standalone Storage and cross-repository BIN-SYNC integration on exact heads; add a reflection-based API-surface assertion. No build/tests run in this C slice.
+
 ### 7.102 C-pass: align public FLD reference-snapshot API documentation (2026-11-10)
 
 - [x C] Corrected the misplaced `FldDatabase` XML summary so it documents the database class rather than `FldDraftHorizon`; documented the latter's conservative count semantics, including the unsealed-WAL barrier.

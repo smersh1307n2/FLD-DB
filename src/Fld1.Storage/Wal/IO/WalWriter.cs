@@ -9,7 +9,7 @@ namespace Fld1.Storage.Wal.IO;
 /// Serialized WAL append for one namespace. Spec §5.5.
 /// Single-writer: all appends under lock. PublishedWalEnd monotonic.
 /// </summary>
-public sealed class WalWriter : IDisposable
+internal sealed class WalWriter : IDisposable
 {
     private readonly FileStream _fs;
     private readonly Action<StorageFaultPoint>? _faultInjector;

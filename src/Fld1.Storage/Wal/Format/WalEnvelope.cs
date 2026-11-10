@@ -4,7 +4,7 @@ using Fld1.Storage.Integrity;
 namespace Fld1.Storage.Wal.Format;
 
 /// <summary>Generic WAL record envelope. Payload and non-zero kind are opaque to Storage.</summary>
-public static class WalEnvelope
+internal static class WalEnvelope
 {
     public const int Size = WalConstants.EnvelopeSize;
     public const int OffCommitSeq = 0x00;

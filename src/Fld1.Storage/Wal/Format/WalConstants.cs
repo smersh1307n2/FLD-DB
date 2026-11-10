@@ -1,7 +1,7 @@
 namespace Fld1.Storage.Wal.Format;
 
 /// <summary>Generic storage WAL framing constants. Record kinds are caller-owned opaque tags.</summary>
-public static class WalConstants
+internal static class WalConstants
 {
     public static ReadOnlySpan<byte> Magic => "FLDW"u8;
     public const ushort WalVersion = 2;

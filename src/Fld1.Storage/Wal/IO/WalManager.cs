@@ -8,7 +8,7 @@ namespace Fld1.Storage.Wal.IO;
 /// Multi-segment WAL for one partition. Rotation: fsync active → new segment file.
 /// Segment names: p_{partitionId}.{seg}.log
 /// </summary>
-public sealed class WalManager : IDisposable
+internal sealed class WalManager : IDisposable
 {
     private readonly string _walDir;
     private readonly ulong _partitionId;

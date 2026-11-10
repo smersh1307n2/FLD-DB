@@ -4,7 +4,7 @@ using Fld1.Storage.Integrity;
 namespace Fld1.Storage.Wal.Format;
 
 /// <summary>Storage WAL file header — 64 bytes.</summary>
-public static class WalHeader
+internal static class WalHeader
 {
     public const int Size = WalConstants.HeaderSize;
     public const int OffMagic = 0x00;
