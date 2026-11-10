@@ -81,6 +81,12 @@ public sealed class StorageBlobStore
                 }
                 else
                 {
+                    // A catalog-less directory can survive an interrupted delete. Treat
+                    // it as an occupied immutable ID until orphan maintenance removes it;
+                    // otherwise a root-global Run allocator could reuse the ID and collide.
+                    if (Directory.Exists(BlobDirectory(blobId)))
+                        throw new InvalidDataException(
+                            "Storage blob page directory exists without catalog metadata; orphan cleanup is required before ID reuse.");
                     int pageCount = GetPageCount(content.Length, _pageSize);
                     metadata = new StorageBlobMetadata(
                         (ulong)content.Length, _pageSize, pageCount, digest, IsComplete: false);
@@ -122,14 +128,24 @@ public sealed class StorageBlobStore
         }
     }
 
-    /// <summary>Returns true for either a pending or fully published blob catalog row.</summary>
+    /// <summary>
+    /// Returns true when either catalog metadata or a page directory occupies this ID.
+    /// Catalog-less directories are crash-left delete artifacts and still block ID reuse
+    /// until orphan maintenance removes them.
+    /// </summary>
     public bool ContainsBlob(Guid blobId)
     {
         ValidateBlobId(blobId);
-        using StorageSnapshot snapshot = _database.OpenSnapshot();
-        if (!snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes)) return false;
-        _ = DecodeMetadata(bytes!);
-        return true;
+        lock (_shared.Gate)
+        {
+            using StorageSnapshot snapshot = _database.OpenSnapshot();
+            if (snapshot.TryGet(MetadataKey(blobId), out byte[]? bytes))
+            {
+                _ = DecodeMetadata(bytes!);
+                return true;
+            }
+            return Directory.Exists(BlobDirectory(blobId));
+        }
     }
 
     /// <summary>Opens a stable snapshot reader only for a fully published blob.</summary>
