@@ -1,0 +1,42 @@
+using Fld1.Storage.Engine;
+using Xunit;
+
+namespace Fld1.Storage.Tests;
+
+public sealed class PublicApiSurfaceTests
+{
+    [Fact]
+    public void Storage_assembly_exports_only_the_approved_byte_storage_surface()
+    {
+        string[] actual = typeof(StorageDatabase).Assembly.GetExportedTypes()
+            .Select(type => type.FullName ?? throw new InvalidOperationException("Exported type has no full name."))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        string[] expected =
+        {
+            "Fld1.Storage.Engine.StorageBlobReader",
+            "Fld1.Storage.Engine.StorageBlobStore",
+            "Fld1.Storage.Engine.StorageConflictException",
+            "Fld1.Storage.Engine.StorageDatabase",
+            "Fld1.Storage.Engine.StorageDirectorySync",
+            "Fld1.Storage.Engine.StorageEntry",
+            "Fld1.Storage.Engine.StorageEntryView",
+            "Fld1.Storage.Engine.StorageEntryVisitor",
+            "Fld1.Storage.Engine.StoragePartitionLease",
+            "Fld1.Storage.Engine.StorageSnapshot",
+            "Fld1.Storage.Engine.StorageSnapshot+PrefixCursor",
+            "Fld1.Storage.Engine.StorageWriteBatch"
+        };
+
+        Assert.Equal(expected.OrderBy(name => name, StringComparer.Ordinal), actual);
+        Assert.All(typeof(StorageDatabase).Assembly.GetExportedTypes(), type =>
+            Assert.Equal("Fld1.Storage.Engine", type.Namespace));
+        Assert.DoesNotContain(actual, name =>
+            name.Contains(".Wal.", StringComparison.Ordinal) ||
+            name.Contains(".Integrity.", StringComparison.Ordinal) ||
+            name.Contains("StorageFaultPoint", StringComparison.Ordinal) ||
+            name.Contains("StorageMutation", StringComparison.Ordinal) ||
+            name.Contains("StorageKey", StringComparison.Ordinal));
+    }
+}
