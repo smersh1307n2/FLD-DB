@@ -997,13 +997,16 @@ public sealed partial class FldDatabase : IDisposable
                 !current.ChangeId.AsSpan().SequenceEqual(stamp.ChangeId))
                 continue;
 
-            if (current.OriginAuthorEpoch != 0 || current.OriginSequence != 0)
+            if (current.OriginSequence != 0)
             {
                 if (current.OriginAuthorEpoch != stamp.OriginAuthorEpoch ||
                     current.OriginSequence != stamp.OriginSequence)
                     throw new InvalidDataException("Identity-stamp WAL conflicts with the current field OperationOrigin.");
                 continue;
             }
+            if (current.OriginAuthorEpoch != 0 &&
+                current.OriginAuthorEpoch != stamp.OriginAuthorEpoch)
+                throw new InvalidDataException("Identity-stamp WAL belongs to a different author epoch.");
 
             var value = new MemFieldValue
             {
