@@ -39,7 +39,7 @@ public static class RunHeader
     public const int OffProvenanceLen = 0xB0;
     public const int OffProvenanceCount = 0xB8;
     public const int OffProvenanceEntrySize = 0xBC;
-    public const int ProvenanceHeaderBytes = 20;
+    public const int ProvenanceHeaderBytes = 24;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool CheckMagic(ReadOnlySpan<byte> header)
