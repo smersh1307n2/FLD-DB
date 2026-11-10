@@ -2356,7 +2356,8 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Found that `FldReferenceSnapshot` indexed dirty state, unacknowledged Outbox and ApplyJournal, but did not account for immutable provider snapshots. A pinned snapshot can retain old Run v2 ChangeId provenance and RecordIds after those operations leave the pending feed/journal.
 - [x C] Added a conservative snapshot-pin bit to the immutable reference snapshot. Any in-memory provider snapshot or any persisted snapshot-generation directory blocks all ChangeId and RecordId reclamation queries; receipt queries remain unaffected because provider snapshots do not contain transport receipt identities. This is deliberately not counted as an unpublished local draft.
 - [x C] Persisted directories left by a crash also block GC until the host recovers active sender tokens and calls `PruneProviderSnapshotsExcept`; unknown/incomplete directories fail closed rather than being silently ignored.
-- [~ T] Verify active in-memory pin, persisted pin after restart, release/prune unblocks references, crash-left incomplete directory blocks, and receipt horizon remains independent. No build/test was run in this C slice.
+- [x C] Exposed `FldReferenceSnapshot.HasSnapshotPin` so the BIN-SYNC FLD provider adapter can acquire the same commit-serialized snapshot proof for FULL_REPLACE switches, not only GC scans.
+- [~ T] Verify active in-memory pin, persisted pin after restart, release/prune unblocks references, crash-left incomplete directory blocks, and receipt horizon remains independent. Also verify the provider guard holds the FLD commit gate until disposed. No build/test was run in this C slice.
 
 ### 7.100 C-pass: complete blob-store restart-cleanup source audit (2026-11-10)
 

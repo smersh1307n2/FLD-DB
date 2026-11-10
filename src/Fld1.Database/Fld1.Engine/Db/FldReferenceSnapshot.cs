@@ -52,6 +52,9 @@ public sealed class FldReferenceSnapshot : IDisposable
 
     public FldDraftHorizon UnpublishedLocalDraftHorizon { get; }
 
+    /// <summary>True while any in-memory or persisted provider-snapshot generation is pinned.</summary>
+    public bool HasSnapshotPin => _snapshotPin;
+
     public bool HasChangeIdReference(ReadOnlySpan<byte> changeId)
         => _unsealedWal || _snapshotPin || _changeIds.Contains(FldId128.From(changeId));
 
