@@ -2344,3 +2344,9 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x C] Added `FldDatabase.TryGetProviderSnapshotWatermark`: it reads the source watermark from the generation's checksummed durable snapshot manifest, verifies namespace identity, all pinned Run files and the optional overlay checksum, and returns the watermark bound to that token.
 - [x C] The BIN-SYNC host provider exposes this binding through `IProviderDurableSnapshotStore.TryGetPersistedSnapshotWatermark`; FLD remains protocol-neutral and does not reference BIN-SYNC types.
 - [~ T] Verify mismatched sender metadata watermark, wrong namespace, missing pinned Run, corrupt overlay, reopened provider instance and stale/released token. No build/test result is claimed.
+
+### 7.98 C-pass: validate semantic FLD Run contents before accepting snapshot watermark (2026-11-10)
+
+- [x C] Audited the blob-backed and legacy branches of `HasDurableProviderSnapshotRun`. The blob branch previously streamed bytes to `Stream.Null`, proving page geometry and whole-blob SHA-256 only; unlike `RestoreProviderSnapshot` and the legacy branch, it did not run `RunReader.TryValidate` or compare `NamespaceId`.
+- [x C] Strengthened the verified-content path to materialize the immutable blob through `StorageBlobReader.ReadAllBytes` (retaining page/length/SHA-256 verification), then validate the FLD Run structure and namespace before `TryGetProviderSnapshotWatermark` can accept the generation. The legacy path retains the same semantic checks. Incomplete blobs still fail closed and are not hidden by compatibility mirrors.
+- [~ T] Add a blob-backed semantic-corruption case whose catalog digest is internally consistent but whose bytes are not a valid Run; verify watermark lookup rejects it. Also cover wrong-namespace Run, valid v1/v2 Run, legacy mirror fallback and allocation/latency impact of materialization. No build/test was run in this C slice.

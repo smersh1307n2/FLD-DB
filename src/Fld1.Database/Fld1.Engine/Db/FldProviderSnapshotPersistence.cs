@@ -343,7 +343,13 @@ public sealed partial class FldDatabase
             using (blobReader)
             {
                 if (verifyContent)
-                    blobReader.CopyTo(Stream.Null); // Verify every page and the whole-blob digest without materializing the Run.
+                {
+                    // A valid blob digest proves byte integrity, not that the bytes are a valid FLD Run.
+                    byte[] bytes = blobReader.ReadAllBytes();
+                    var reader = new RunReader(bytes);
+                    if (!reader.TryValidate(out _) || reader.NamespaceId != _namespaceId)
+                        throw new InvalidDataException($"Pinned provider snapshot blob Run {runId} failed validation.");
+                }
             }
             return true;
         }
