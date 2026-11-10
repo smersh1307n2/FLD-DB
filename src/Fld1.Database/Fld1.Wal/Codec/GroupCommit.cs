@@ -101,8 +101,10 @@ public static class GroupCommitCodec
                 ms.Write(f.AuthorNodeId);
                 if (f.ChangeId.Length is not (0 or 16))
                     throw new ArgumentException("ChangeId must be empty or 16 bytes");
-                if ((f.OriginAuthorEpoch == 0) != (f.OriginSequence == 0))
-                    throw new ArgumentException("OriginAuthorEpoch and OriginSequence must be both zero or both nonzero.");
+                // A local unpublished draft has an assigned author epoch but no
+                // immutable origin sequence yet. Sequence without an epoch is invalid.
+                if (f.OriginAuthorEpoch == 0 && f.OriginSequence != 0)
+                    throw new ArgumentException("OriginSequence requires a nonzero OriginAuthorEpoch.");
                 if (f.ChangeId.Length == 16)
                     ms.Write(f.ChangeId);
                 else
@@ -182,8 +184,10 @@ public static class GroupCommitCodec
                     : Array.Empty<byte>();
                 uint originAuthorEpoch = bodyVer >= 3 ? ReadU32(payload, ref pos) : 0;
                 ulong originSequence = bodyVer >= 3 ? ReadU64(payload, ref pos) : 0;
-                if ((originAuthorEpoch == 0) != (originSequence == 0))
-                    throw new InvalidDataException("GROUP_COMMIT origin epoch/sequence must be both zero or both nonzero.");
+                // (epoch != 0, sequence == 0) is the durable local-draft state.
+                // A published/remote origin always has both values nonzero.
+                if (originAuthorEpoch == 0 && originSequence != 0)
+                    throw new InvalidDataException("GROUP_COMMIT origin sequence requires a nonzero epoch.");
                 uint valLen = ReadU32(payload, ref pos);
                 if (valLen > WalConstants.MaxValLen) throw new InvalidDataException("ValLen");
                 var val = ReadBytes(payload, ref pos, (int)valLen);
