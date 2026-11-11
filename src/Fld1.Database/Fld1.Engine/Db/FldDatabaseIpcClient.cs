@@ -68,6 +68,59 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return response.Span[0] == 1;
     }
 
+    public async Task<FldDatabaseIpcOutboxLease> AcquireOutboxLeaseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AcquireOutboxLease,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeOutboxLeaseResponse(response);
+    }
+
+    /// <summary>
+    /// Reads the next Outbox entry after afterSequence, or continues the exact entry
+    /// identified by entrySequence. Large values are returned in bounded chunks.
+    /// </summary>
+    public async Task<FldDatabaseIpcOutboxEntryChunk?> ReadOutboxEntryChunkAsync(
+        FldDatabaseIpcOutboxLease lease,
+        ulong afterSequence,
+        ulong entrySequence = 0,
+        uint valueOffset = 0,
+        uint maxChunkBytes = 256 * 1024,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeReadOutboxEntryChunkPayload(
+            lease, afterSequence, entrySequence, valueOffset, maxChunkBytes);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReadOutboxEntryChunk,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeOutboxEntryChunkResponse(response);
+    }
+
+    public async Task<bool> AcknowledgeOutboxThroughAsync(
+        FldDatabaseIpcOutboxLease lease,
+        ulong throughSequence,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeOutboxAcknowledgementPayload(
+            lease, throughSequence);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AcknowledgeOutbox,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeOutboxBooleanResponse(response);
+    }
+
+    public async Task<bool> ReleaseOutboxLeaseAsync(
+        FldDatabaseIpcOutboxLease lease,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeOutboxLeasePayload(lease);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReleaseOutboxLease,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeOutboxBooleanResponse(response);
+    }
+
     private async Task<ReadOnlyMemory<byte>> SendAsync(
         Guid operationId,
         ushort operationCode,

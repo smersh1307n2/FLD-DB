@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Fld1.Engine.Outbox;
 using Fld1.Storage.Ipc;
 using Fld1.Wal.Format;
 
@@ -10,6 +11,10 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReadField = 0x2101;
     public const ushort WriteBatch = 0x2102;
     public const ushort AcknowledgeReceipts = 0x2103;
+    public const ushort AcquireOutboxLease = 0x2104;
+    public const ushort ReadOutboxEntryChunk = 0x2105;
+    public const ushort AcknowledgeOutbox = 0x2106;
+    public const ushort ReleaseOutboxLease = 0x2107;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -27,6 +32,26 @@ public sealed record FldDatabaseIpcReadResult(
     bool Found,
     byte[]? Value);
 
+public readonly record struct FldDatabaseIpcOutboxLease(ulong Epoch);
+
+public sealed record FldDatabaseIpcOutboxEntryChunk(
+    ulong OutboxSeq,
+    ulong CommitSeq,
+    byte[] ChangeId,
+    byte[] RecordId,
+    ushort FieldId,
+    byte OpKind,
+    byte[] AuthorNodeId,
+    ulong Wall,
+    uint Logical,
+    ushort KeyEpoch,
+    uint ValueLength,
+    uint ValueOffset,
+    byte[] ValueChunk)
+{
+    public bool IsComplete => (ulong)ValueOffset + (uint)ValueChunk.Length == ValueLength;
+}
+
 public static class FldDatabaseIpcProtocol
 {
     private const int WriteHeaderBytes = 12;
@@ -34,6 +59,194 @@ public static class FldDatabaseIpcProtocol
     private const int ReadPayloadBytes = 26;
     private const int ResultHeaderBytes = 13;
     private const int MaxMutationCount = 4096;
+    private const int OutboxChunkRequestBytes = 32;
+    private const int OutboxChunkResponseHeaderBytes = 94;
+    private const int MaxOutboxChunkBytes = StorageIpcProtocol.MaxPayloadBytes - OutboxChunkResponseHeaderBytes;
+
+    public static byte[] EncodeOutboxLeaseResponse(ulong leaseEpoch)
+    {
+        if (leaseEpoch == 0)
+            throw new ArgumentOutOfRangeException(nameof(leaseEpoch));
+        byte[] payload = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(payload, leaseEpoch);
+        return payload;
+    }
+
+    public static FldDatabaseIpcOutboxLease DecodeOutboxLeaseResponse(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != 8)
+            throw new InvalidDataException("FLD Outbox lease response length is invalid.");
+        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(payload.Span);
+        if (epoch == 0)
+            throw new InvalidDataException("FLD Outbox lease epoch must be nonzero.");
+        return new FldDatabaseIpcOutboxLease(epoch);
+    }
+
+    public static byte[] EncodeOutboxLeasePayload(FldDatabaseIpcOutboxLease lease)
+    {
+        if (lease.Epoch == 0)
+            throw new ArgumentOutOfRangeException(nameof(lease));
+        byte[] payload = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(payload, lease.Epoch);
+        return payload;
+    }
+
+    public static ulong DecodeOutboxLeasePayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != 8)
+            throw new InvalidDataException("FLD Outbox lease payload length is invalid.");
+        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(payload.Span);
+        if (epoch == 0)
+            throw new InvalidDataException("FLD Outbox lease epoch must be nonzero.");
+        return epoch;
+    }
+
+    public static byte[] EncodeOutboxAcknowledgementPayload(
+        FldDatabaseIpcOutboxLease lease,
+        ulong throughSequence)
+    {
+        if (lease.Epoch == 0)
+            throw new ArgumentOutOfRangeException(nameof(lease));
+        if (throughSequence == 0)
+            throw new ArgumentOutOfRangeException(nameof(throughSequence));
+        byte[] payload = new byte[16];
+        BinaryPrimitives.WriteUInt64LittleEndian(payload, lease.Epoch);
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(8), throughSequence);
+        return payload;
+    }
+
+    public static (ulong LeaseEpoch, ulong ThroughSequence) DecodeOutboxAcknowledgementPayload(
+        ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != 16)
+            throw new InvalidDataException("FLD Outbox acknowledgement payload length is invalid.");
+        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(payload.Span);
+        ulong through = BinaryPrimitives.ReadUInt64LittleEndian(payload.Span[8..]);
+        if (epoch == 0 || through == 0)
+            throw new InvalidDataException("FLD Outbox acknowledgement identity must be nonzero.");
+        return (epoch, through);
+    }
+
+    public static byte[] EncodeReadOutboxEntryChunkPayload(
+        FldDatabaseIpcOutboxLease lease,
+        ulong afterSequence,
+        ulong entrySequence,
+        uint valueOffset,
+        uint maxChunkBytes)
+    {
+        if (lease.Epoch == 0)
+            throw new ArgumentOutOfRangeException(nameof(lease));
+        if (entrySequence == 0 && valueOffset != 0)
+            throw new ArgumentException("A new Outbox entry read must start at value offset zero.", nameof(valueOffset));
+        if (entrySequence != 0 && (entrySequence <= afterSequence || entrySequence - afterSequence != 1))
+            throw new ArgumentException("An Outbox chunk continuation must target the next sequence after its cursor.", nameof(entrySequence));
+        if (maxChunkBytes == 0 || maxChunkBytes > MaxOutboxChunkBytes)
+            throw new ArgumentOutOfRangeException(nameof(maxChunkBytes));
+
+        byte[] payload = new byte[OutboxChunkRequestBytes];
+        BinaryPrimitives.WriteUInt64LittleEndian(payload, lease.Epoch);
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(8), afterSequence);
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(16), entrySequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(24), valueOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(28), maxChunkBytes);
+        return payload;
+    }
+
+    public static (ulong LeaseEpoch, ulong AfterSequence, ulong EntrySequence, uint ValueOffset, uint MaxChunkBytes)
+        DecodeReadOutboxEntryChunkPayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != OutboxChunkRequestBytes)
+            throw new InvalidDataException("FLD Outbox chunk request length is invalid.");
+        ReadOnlySpan<byte> span = payload.Span;
+        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(span);
+        ulong after = BinaryPrimitives.ReadUInt64LittleEndian(span[8..]);
+        ulong entry = BinaryPrimitives.ReadUInt64LittleEndian(span[16..]);
+        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(span[24..]);
+        uint maxChunk = BinaryPrimitives.ReadUInt32LittleEndian(span[28..]);
+        if (epoch == 0 || maxChunk == 0 || maxChunk > MaxOutboxChunkBytes
+            || (entry == 0 && offset != 0)
+            || (entry != 0 && (entry <= after || entry - after != 1)))
+            throw new InvalidDataException("FLD Outbox chunk request fields are invalid.");
+        return (epoch, after, entry, offset, maxChunk);
+    }
+
+    /// <summary>
+    /// Copies one bounded value slice from the borrowed Outbox view. This must run
+    /// synchronously inside the OutboxEntryVisitor callback.
+    /// </summary>
+    public static byte[] EncodeOutboxEntryChunkResponse(
+        in OutboxEntryView entry,
+        uint valueOffset,
+        uint maxChunkBytes)
+    {
+        if (valueOffset > (uint)entry.Value.Length)
+            throw new ArgumentOutOfRangeException(nameof(valueOffset));
+        if (maxChunkBytes == 0 || maxChunkBytes > MaxOutboxChunkBytes)
+            throw new ArgumentOutOfRangeException(nameof(maxChunkBytes));
+
+        uint totalLength = (uint)entry.Value.Length;
+        int remaining = checked((int)(totalLength - valueOffset));
+        int chunkLength = Math.Min(remaining, checked((int)maxChunkBytes));
+        byte[] response = new byte[checked(OutboxChunkResponseHeaderBytes + chunkLength)];
+        response[0] = 1;
+        BinaryPrimitives.WriteUInt64LittleEndian(response.AsSpan(1), entry.OutboxSeq);
+        BinaryPrimitives.WriteUInt64LittleEndian(response.AsSpan(9), entry.CommitSeq);
+        entry.ChangeId.CopyTo(response.AsSpan(17, 16));
+        entry.RecordId.CopyTo(response.AsSpan(33, 16));
+        BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(49), entry.FieldId);
+        response[51] = entry.OpKind;
+        entry.AuthorNodeId.CopyTo(response.AsSpan(52, 16));
+        BinaryPrimitives.WriteUInt64LittleEndian(response.AsSpan(68), entry.Wall);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(76), entry.Logical);
+        BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(80), entry.KeyEpoch);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(82), totalLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(86), valueOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(90), (uint)chunkLength);
+        entry.Value.Slice(checked((int)valueOffset), chunkLength).CopyTo(response.AsSpan(OutboxChunkResponseHeaderBytes));
+        return response;
+    }
+
+    public static FldDatabaseIpcOutboxEntryChunk? DecodeOutboxEntryChunkResponse(
+        ReadOnlyMemory<byte> response)
+    {
+        ReadOnlySpan<byte> span = response.Span;
+        if (span.Length == 1 && span[0] == 0)
+            return null;
+        if (span.Length < OutboxChunkResponseHeaderBytes || span[0] != 1)
+            throw new InvalidDataException("FLD Outbox chunk response is truncated or has an invalid status.");
+
+        uint totalLength = BinaryPrimitives.ReadUInt32LittleEndian(span[82..]);
+        uint valueOffset = BinaryPrimitives.ReadUInt32LittleEndian(span[86..]);
+        uint chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(span[90..]);
+        if (valueOffset > totalLength
+            || chunkLength > totalLength - valueOffset
+            || chunkLength != (uint)(span.Length - OutboxChunkResponseHeaderBytes))
+            throw new InvalidDataException("FLD Outbox chunk response lengths are invalid.");
+
+        return new FldDatabaseIpcOutboxEntryChunk(
+            BinaryPrimitives.ReadUInt64LittleEndian(span[1..]),
+            BinaryPrimitives.ReadUInt64LittleEndian(span[9..]),
+            span.Slice(17, 16).ToArray(),
+            span.Slice(33, 16).ToArray(),
+            BinaryPrimitives.ReadUInt16LittleEndian(span[49..]),
+            span[51],
+            span.Slice(52, 16).ToArray(),
+            BinaryPrimitives.ReadUInt64LittleEndian(span[68..]),
+            BinaryPrimitives.ReadUInt32LittleEndian(span[76..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(span[80..]),
+            totalLength,
+            valueOffset,
+            span.Slice(OutboxChunkResponseHeaderBytes, (int)chunkLength).ToArray());
+    }
+
+    public static byte[] EncodeOutboxBooleanResponse(bool value) => [value ? (byte)1 : (byte)0];
+
+    public static bool DecodeOutboxBooleanResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != 1 || response.Span[0] > 1)
+            throw new InvalidDataException("FLD Outbox boolean response is invalid.");
+        return response.Span[0] == 1;
+    }
 
     public static byte[] EncodeWriteBatchPayload(
         ulong clientSequence,
