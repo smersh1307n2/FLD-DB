@@ -157,6 +157,7 @@ public static class GroupCommitCodec
 
         WriteU32(ms, (uint)p.LocalOperationReceipts.Count);
         var receiptKeys = new HashSet<string>(StringComparer.Ordinal);
+        var clientSequenceKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var receipt in p.LocalOperationReceipts)
         {
             ValidateReceipt(receipt, nameof(p));
@@ -164,6 +165,10 @@ public static class GroupCommitCodec
                 + ":" + Convert.ToHexString(receipt.ClientId) + Convert.ToHexString(receipt.OperationId);
             if (!receiptKeys.Add(key))
                 throw new ArgumentException("Duplicate local operation receipt identity.", nameof(p));
+            string sequenceKey = receipt.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ":" + Convert.ToHexString(receipt.ClientId) + ":" + receipt.ClientSequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!clientSequenceKeys.Add(sequenceKey))
+                throw new ArgumentException("Duplicate local operation client sequence.", nameof(p));
             WriteU16(ms, receipt.NamespaceId);
             WriteU64(ms, receipt.ClientSequence);
             ms.Write(receipt.ClientId);
@@ -277,6 +282,7 @@ public static class GroupCommitCodec
                 throw new InvalidDataException("local operation receipt count limit");
             localReceipts = new List<WalLocalOperationReceipt>((int)receiptCount);
             var decodedReceiptKeys = new HashSet<string>(StringComparer.Ordinal);
+            var decodedClientSequenceKeys = new HashSet<string>(StringComparer.Ordinal);
             for (uint i = 0; i < receiptCount; i++)
             {
                 ushort namespaceId = ReadU16(payload, ref pos);
@@ -305,6 +311,10 @@ public static class GroupCommitCodec
                     + ":" + Convert.ToHexString(clientId) + Convert.ToHexString(operationId);
                 if (!decodedReceiptKeys.Add(key))
                     throw new InvalidDataException("duplicate local operation receipt identity");
+                string sequenceKey = namespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + ":" + Convert.ToHexString(clientId) + ":" + clientSequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (!decodedClientSequenceKeys.Add(sequenceKey))
+                    throw new InvalidDataException("duplicate local operation client sequence");
                 localReceipts.Add(receipt);
             }
         }
