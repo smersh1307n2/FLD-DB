@@ -483,3 +483,20 @@ The following gates are tracked independently; partial implementation is not ful
 | Crash/reopen, lost ACK, duplicate batch, relay mesh, compaction and concurrent snapshot tests | **Partial.** APPLY WAL recovery, journal rematerialization, duplicate batch receipt, LWW-loser retention, local-Outbox isolation and per-author relay ACK/compaction recovery have tests; end-to-end mesh/provenance-gate and snapshot concurrency remain open. |
 
 **Current status:** FLD-DB's LOCAL/APPLY and Storage Core work is in progress, but it does **not** yet claim full BIN-SYNC v3.0.0 conformance. The remaining gates include the v3 Metadata Store adapter, exact Origin/ChangeId persistence, single authoritative relay history, atomic PendingApply/provider apply, safe receipt/ChangeId/tombstone GC proofs, multi-hop conformance and cross-platform crash tests.
+
+
+
+---
+
+## Implementation addendum — local Database IPC receipts (2026-11-11)
+
+This addendum records the implemented local Database IPC idempotency boundary; it does not change BIN-SYNC protocol ownership or remote APPLY semantics.
+
+- GROUP_COMMIT payload body v4 appends zero or more namespace-scoped local-operation receipts after the existing mutations/results/provenance sections. Each receipt contains stable nonzero ClientId (16 B), stable nonzero OperationId (16 B), canonical request fingerprint (32 B), and a bounded opaque result (≤4 MiB). The enclosing WAL CommitSeq is the receipt's durable commit identity.
+- GROUP_COMMIT body v1-v3 remain readable. New writes use body v4. Invalid identifiers, malformed lengths, duplicate receipt identities and trailing bytes fail closed.
+- `FldDatabase.CommitWithReceipt` writes field mutations, their local Outbox-producing GROUP_COMMIT, and the receipt in one WAL record and one fsync boundary. A receipt-only operation is permitted for a successful read/no-field-change response and does not create an Outbox entry.
+- `TryGetLocalOperationReceipt` returns the exact prior result for the same namespace + ClientId + OperationId + fingerprint. Reusing the identity with a different fingerprint is a hard error; callers must check the receipt before staging a retry's field mutations.
+- Manifest's optional `FLOR` extension checkpoints the live receipt index. The checkpoint manifest is published before sealed WAL segments are truncated; WAL remains the source of truth until that checkpoint. Older manifests ending at CoordinatorSessionId remain readable.
+- Outbox ACK and Outbox compaction do not remove operation receipts. Receipt expiry is not yet enabled: safe deletion requires an explicit durable client acknowledgement/retry-horizon contract. Until then receipts are retained conservatively. This is a retention policy, not a second pending journal.
+- This receipt is strictly for local Database IPC operations. Do not reuse remote ApplyJournal identity (issuer/epoch/batch) for local-author writes. Remote Apply and its protocol state remain governed by BIN-SYNC v3 and the existing APPLY_COMMIT path.
+
