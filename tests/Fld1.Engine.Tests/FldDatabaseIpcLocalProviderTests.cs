@@ -32,6 +32,38 @@ public sealed class FldDatabaseIpcLocalProviderTests
     }
 
     [Fact]
+    public void Local_provider_codec_preserves_field_tombstones_and_canonical_record_tombstones()
+    {
+        var fieldTombstone = new FldLocalProviderMutation(
+            FldDatabase.NewRecordId(), 4, Array.Empty<byte>(), Id(0x75),
+            OriginAuthorEpoch: 12, Wall: 123457, Logical: 8,
+            KeyEpoch: 0, IsTombstone: true);
+        var recordTombstone = new FldLocalProviderMutation(
+            FldDatabase.NewRecordId(), FldLifecycle.FieldId, FldLifecycle.DeadValue.ToArray(), Id(0x76),
+            OriginAuthorEpoch: 12, Wall: 123458, Logical: 9,
+            KeyEpoch: 0, IsTombstone: false);
+
+        byte[] encoded = FldDatabaseIpcLocalProviderProtocol.EncodeRequest(
+            8, [fieldTombstone, recordTombstone]);
+        (ulong sequence, IReadOnlyList<FldLocalProviderMutation> decoded) =
+            FldDatabaseIpcLocalProviderProtocol.DecodeRequest(encoded);
+
+        Assert.Equal(8ul, sequence);
+        Assert.Equal(2, decoded.Count);
+        Assert.True(decoded[0].IsTombstone);
+        Assert.Empty(decoded[0].Value);
+        Assert.Equal(FldLifecycle.FieldId, decoded[1].FieldId);
+        Assert.Equal(FldLifecycle.DeadValue, decoded[1].Value);
+
+        var invalidLifecycle = recordTombstone with { Value = "not-dead"u8.ToArray() };
+        Assert.Throws<ArgumentException>(() =>
+            FldDatabaseIpcLocalProviderProtocol.EncodeRequest(9, [invalidLifecycle]));
+        var invalidFieldDelete = fieldTombstone with { Value = "must-be-empty"u8.ToArray() };
+        Assert.Throws<ArgumentException>(() =>
+            FldDatabaseIpcLocalProviderProtocol.EncodeRequest(9, [invalidFieldDelete]));
+    }
+
+    [Fact]
     public async Task Local_provider_ipc_preserves_change_id_hlc_and_epoch_and_retries_atomically()
     {
         string root = Path.Combine(Path.GetTempPath(), "fld-local-provider-ipc-" + Guid.NewGuid().ToString("N"));
