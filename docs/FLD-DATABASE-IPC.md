@@ -45,7 +45,8 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
 | GetOutboxHighWatermark | 0x210E | empty payload; response is durable Outbox HighWatermark (u64) |
 | AppendLocalProviderBatchAutoSequence | 0x2111 | Versioned identity-preserving local provider batch with ClientSequence = 0; Host allocates the next contiguous sequence under the commit lock |
-| GetLocalAuthor | 0x2112 | empty payload; response is the authoritative nonzero LocalAuthor (16 bytes) configured by the Database Host |
+| AcknowledgeProviderOutbox | 0x2112 | Outbox lease + safe-through sequence; retires matching contiguous auto-sequenced provider receipts before acknowledging the Outbox prefix |
+| GetLocalAuthor | 0x2113 | empty payload; response is the authoritative nonzero LocalAuthor (16 bytes) configured by the Database Host |
 | ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
 | ReadCurrentValueChunk | 0x2110 | RecordId (16 bytes), FieldId (u16), expected ChangeId (16 bytes), ValueOffset (u32), MaxChunkBytes (u32); returns Data, Missing or Changed plus one bounded value slice |
 
@@ -109,7 +110,7 @@ The caller supplies a stable, nonzero OperationId. The IPC client adapter derive
 
 This variant closes the response-loss window without asking an async provider to persist a second sequence allocator. It does not change Outbox sequencing: OutboxSeq remains the local feed coordinate, not OriginSequence. OriginSequence is still assigned only at BIN-SYNC publication freeze.
 
-### Host identity discovery (0x2112; implemented)
+### Host identity discovery (0x2113; implemented)
 
 GetLocalAuthor returns the Database Host's configured nonzero LocalAuthor identity. An IPC-backed provider must compare it with the BIN-SYNC local replica identity before accepting local drafts. The Host remains authoritative when writing provider mutations; the IPC caller cannot select or override LocalAuthor.
 ## Contextual remote APPLY IPC (0x210C; implemented)
