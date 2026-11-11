@@ -18,18 +18,18 @@ public sealed class StorageIpcConnectionTests
             pipeName, clientId, TimeSpan.FromSeconds(10));
         Assert.NotEqual(0UL, client.SessionGeneration);
 
-        byte[] first = await client.RequestAsync("first"u8.ToArray());
-        Assert.Equal(clientId, new Guid(first.AsSpan(0, 16)));
-        Assert.Equal("first"u8.ToArray(), first.AsSpan(16).ToArray());
+        ReadOnlyMemory<byte> first = await client.RequestAsync("first"u8.ToArray());
+        Assert.Equal(clientId, new Guid(first.Span[..16]));
+        Assert.Equal("first"u8.ToArray(), first.Span[16..].ToArray());
 
         StorageIpcRemoteException remote = await Assert.ThrowsAsync<StorageIpcRemoteException>(
             async () => await client.RequestAsync("fail"u8.ToArray()));
         Assert.Equal(2UL, remote.RequestId);
         Assert.Contains("intentional handler failure", remote.Message, StringComparison.Ordinal);
 
-        byte[] third = await client.RequestAsync("third"u8.ToArray());
-        Assert.Equal(clientId, new Guid(third.AsSpan(0, 16)));
-        Assert.Equal("third"u8.ToArray(), third.AsSpan(16).ToArray());
+        ReadOnlyMemory<byte> third = await client.RequestAsync("third"u8.ToArray());
+        Assert.Equal(clientId, new Guid(third.Span[..16]));
+        Assert.Equal("third"u8.ToArray(), third.Span[16..].ToArray());
 
         await client.DisposeAsync();
         serverCancellation.Cancel();
