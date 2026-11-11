@@ -105,11 +105,12 @@ public sealed class StorageIpcConnectionTests
             }
         }
 
-        Assert.NotNull(replacementClient);
-        await using (replacementClient)
+        StorageIpcClientConnection connectedReplacement = replacementClient
+            ?? throw new InvalidOperationException("The IPC admission slot was not released within the bounded retry window.");
+        await using (connectedReplacement)
         {
             ReadOnlyMemory<byte> replacementResponse =
-                await replacementClient.RequestAsync("slot-reused"u8.ToArray());
+                await connectedReplacement.RequestAsync("slot-reused"u8.ToArray());
             Assert.Equal("slot-reused"u8.ToArray(), replacementResponse.Span[16..].ToArray());
         }
 
