@@ -110,7 +110,10 @@ public class ManifestTests : IDisposable
         Assert.Equal(1u, recovered.NamespaceId);
         Assert.Equal(receipt.ClientId, recovered.ClientId);
         Assert.Equal(receipt.OperationId, recovered.OperationId);
+        Assert.Equal(receipt.ClientSequence, recovered.ClientSequence);
         Assert.Equal(receipt.Fingerprint, recovered.Fingerprint);
+        Assert.Single(decoded.LocalOperationClients);
+        Assert.Equal(1ul, decoded.LocalOperationClients[0].LastCommittedSequence);
         Assert.Equal(receipt.CommitSeq, recovered.CommitSeq);
         Assert.Equal(receipt.Result, recovered.Result);
     }
