@@ -52,6 +52,7 @@ public sealed class ProvenanceIndexEntry
 /// <summary>Checkpointed local IPC idempotency receipt; keyed by ClientId + OperationId.</summary>
 public sealed class LocalOperationReceiptEntry
 {
+    public required uint NamespaceId { get; init; }
     public required byte[] ClientId { get; init; } // 16
     public required byte[] OperationId { get; init; } // 16
     public required byte[] Fingerprint { get; init; } // 32
