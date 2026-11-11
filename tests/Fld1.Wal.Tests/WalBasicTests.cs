@@ -318,6 +318,69 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Group_commit_v4_roundtrips_stable_local_operation_receipt()
+    {
+        var receipt = new WalLocalOperationReceipt
+        {
+            ClientId = Id(0x31),
+            OperationId = Id(0x32),
+            Fingerprint = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray(),
+            Result = "committed-result"u8.ToArray()
+        };
+        var payload = new GroupCommitPayload
+        {
+            Mutations = [],
+            Results = [],
+            Provenance = [],
+            LocalOperationReceipts = [receipt]
+        };
+
+        byte[] encoded = GroupCommitCodec.Encode(payload);
+        Assert.Equal(4u, BinaryPrimitives.ReadUInt32LittleEndian(encoded.AsSpan(12, 4)));
+        var decoded = GroupCommitCodec.Decode(encoded);
+        var recovered = Assert.Single(decoded.LocalOperationReceipts);
+        Assert.Equal(receipt.ClientId, recovered.ClientId);
+        Assert.Equal(receipt.OperationId, recovered.OperationId);
+        Assert.Equal(receipt.Fingerprint, recovered.Fingerprint);
+        Assert.Equal(receipt.Result, recovered.Result);
+    }
+
+    [Fact]
+    public void Group_commit_v4_decoder_keeps_legacy_v3_compatible()
+    {
+        byte[] encoded = GroupCommitCodec.Encode(EmptyPayload());
+        byte[] legacyV3 = encoded.AsSpan(0, encoded.Length - sizeof(uint)).ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(legacyV3.AsSpan(12, 4), 3);
+
+        var decoded = GroupCommitCodec.Decode(legacyV3);
+        Assert.Empty(decoded.LocalOperationReceipts);
+        Assert.Empty(decoded.Mutations);
+    }
+
+    [Fact]
+    public void Group_commit_rejects_invalid_local_operation_receipt()
+    {
+        var payload = new GroupCommitPayload
+        {
+            Mutations = [],
+            Results = [],
+            Provenance = [],
+            LocalOperationReceipts =
+            [
+                new WalLocalOperationReceipt
+                {
+                    ClientId = new byte[16],
+                    OperationId = Id(0x33),
+                    Fingerprint = new byte[32],
+                    Result = []
+                }
+            ]
+        };
+
+        Assert.Throws<ArgumentException>(() => GroupCommitCodec.Encode(payload));
+    }
+
+    [Fact]
     public void Torn_tail_truncates()
     {
         var path = PathOf("torn.log");
