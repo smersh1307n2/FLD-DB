@@ -607,7 +607,7 @@ public sealed partial class FldDatabase
         generation.TryWriteBytes(bytes.AsSpan(8, 16), bigEndian: true, out _);
         clientId.TryWriteBytes(bytes.AsSpan(24, 16), bigEndian: true, out _);
         hostGeneration.TryWriteBytes(bytes.AsSpan(40, 16), bigEndian: true, out _);
-        SHA256.HashData(bytes.AsSpan(0, ProviderSnapshotIpcDescriptorPayloadSize))
+        SHA256.HashData(bytes.AsSpan(0, ProviderSnapshotIpcDescriptorPayloadSize)).AsSpan()
             .CopyTo(bytes.AsSpan(ProviderSnapshotIpcDescriptorPayloadSize, 32));
         return bytes;
     }
