@@ -15,6 +15,10 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReadOutboxEntryChunk = 0x2105;
     public const ushort AcknowledgeOutbox = 0x2106;
     public const ushort ReleaseOutboxLease = 0x2107;
+    public const ushort OpenSnapshot = 0x2108;
+    public const ushort ReadSnapshotPage = 0x2109;
+    public const ushort ReadSnapshotValueChunk = 0x210A;
+    public const ushort ReleaseSnapshot = 0x210B;
 }
 
 public sealed record FldDatabaseIpcMutation(
