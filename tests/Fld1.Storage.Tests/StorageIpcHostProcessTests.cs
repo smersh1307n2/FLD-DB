@@ -117,7 +117,7 @@ public sealed class StorageIpcHostProcessTests
                     $"Storage Host exited with {host.ExitCode}. stdout={stdout} stderr={stderr}");
             }
 
-            if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root)))
+            if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, partition)))
                 return StorageIpcEndpoint.Read(root, partition);
 
             await Task.Delay(100);
