@@ -250,8 +250,9 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
 
     /// <summary>
     /// Appends an identity-preserving provider batch with server-assigned contiguous receipt sequence.
-    /// The caller supplies a stable OperationId (normally derived from the mutation ChangeId);
-    /// the same id and exact payload are safe to retry across client and Host restarts.
+    /// The response includes the assigned ClientSequence; the caller must persist it before the
+    /// separate receipt ACK. The caller supplies a stable OperationId (normally derived from the
+    /// mutation ChangeId); the same id and exact payload are safe to retry across client and Host restarts.
     /// </summary>
     public async Task<FldDatabaseIpcAutoSequenceWriteResult> AppendLocalProviderBatchAutoSequenceAsync(
         Guid operationId,
