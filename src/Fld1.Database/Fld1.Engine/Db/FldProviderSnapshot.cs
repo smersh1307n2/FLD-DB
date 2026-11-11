@@ -411,21 +411,18 @@ public sealed class FldProviderSnapshot : IDisposable
         resolvedValue = recordTombstone || bestTombstone
             ? ReadOnlyMemory<byte>.Empty
             : bestValue;
-        byte[] ownedRecordId = recordId.ToArray();
-        byte[] ownedAuthor = bestAuthor.ToArray();
-        byte[] ownedChangeId = bestChangeId.ToArray();
         if (includeValues)
         {
             entry = new FldProviderSnapshotEntry(
-                ownedRecordId,
+                recordId.ToArray(),
                 fieldId,
                 resolvedValue.ToArray(),
                 bestWall,
                 bestLogical,
-                ownedAuthor,
+                bestAuthor.ToArray(),
                 recordTombstone ? (ushort)0 : bestKeyEpoch,
                 bestTombstone,
-                ownedChangeId,
+                bestChangeId.ToArray(),
                 bestOriginEpoch,
                 bestOriginSequence,
                 recordTombstone);
@@ -435,15 +432,15 @@ public sealed class FldProviderSnapshot : IDisposable
         {
             entry = null;
             metadata = new FldProviderSnapshotEntryMetadata(
-                ownedRecordId,
+                recordId.ToArray(),
                 fieldId,
                 checked((uint)resolvedValue.Length),
                 bestWall,
                 bestLogical,
-                ownedAuthor,
+                bestAuthor.ToArray(),
                 recordTombstone ? (ushort)0 : bestKeyEpoch,
                 bestTombstone,
-                ownedChangeId,
+                bestChangeId.ToArray(),
                 bestOriginEpoch,
                 bestOriginSequence,
                 recordTombstone);
