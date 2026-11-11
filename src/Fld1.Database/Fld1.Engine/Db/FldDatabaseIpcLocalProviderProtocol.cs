@@ -25,10 +25,7 @@ public static class FldDatabaseIpcLocalProviderProtocol
         foreach (FldLocalProviderMutation mutation in mutations)
         {
             ArgumentNullException.ThrowIfNull(mutation);
-            if (mutation.RecordId is null || mutation.RecordId.Length != 16 ||
-                mutation.ChangeId is null || mutation.ChangeId.Length != 16 ||
-                mutation.Value is null)
-                throw new ArgumentException("Provider mutation identifiers and value must be present.", nameof(mutations));
+            mutation.Validate();
             length += MutationHeaderBytes + (long)mutation.Value.Length;
         }
         if (length > MaximumPayloadBytes)
@@ -88,9 +85,15 @@ public static class FldDatabaseIpcLocalProviderProtocol
             byte[] value = ReadExact(reader, checked((int)valueLength));
             if (tombstone == 1 && value.Length != 0)
                 throw new InvalidDataException("Local provider tombstone value must be empty.");
-            mutations[i] = new FldLocalProviderMutation(
+            var mutation = new FldLocalProviderMutation(
                 recordId, fieldId, value, changeId, authorEpoch,
                 wall, logical, keyEpoch, tombstone == 1);
+            try { mutation.Validate(); }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException("Local provider IPC mutation violates its canonical contract.", exception);
+            }
+            mutations[i] = mutation;
         }
 
         if (stream.Position != stream.Length)
