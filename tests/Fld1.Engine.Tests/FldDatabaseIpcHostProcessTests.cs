@@ -20,6 +20,12 @@ public sealed class FldDatabaseIpcHostProcessTests
         FldDatabaseIpcOutboxLease secondOutboxLease = default;
         byte[] recordId = FldDatabase.NewRecordId();
         byte[] value = "durable-database-host"u8.ToArray();
+        Guid nonIpcSnapshotGeneration;
+        using (var seedDatabase = FldDatabase.Open(root, namespaceId))
+        {
+            FldProviderSnapshot nonIpcSnapshot = seedDatabase.OpenProviderSnapshot();
+            nonIpcSnapshotGeneration = nonIpcSnapshot.Generation;
+        }
         Process? firstHost = null;
         Process? competingHost = null;
         Process? secondHost = null;
@@ -134,6 +140,8 @@ public sealed class FldDatabaseIpcHostProcessTests
             using var recovered = FldDatabase.Open(root, namespaceId);
             Assert.NotNull(firstSnapshot);
             Assert.False(recovered.HasProviderSnapshot(firstSnapshot!.SnapshotToken));
+            Assert.True(recovered.HasProviderSnapshot(nonIpcSnapshotGeneration));
+            recovered.ReleaseProviderSnapshot(nonIpcSnapshotGeneration);
             Assert.True(recovered.TryGetBytes(recordId, 1, out byte[]? firstValue));
             Assert.Equal(value, firstValue);
             Assert.True(recovered.TryGetBytes(recordId, 2, out byte[]? secondValue));
