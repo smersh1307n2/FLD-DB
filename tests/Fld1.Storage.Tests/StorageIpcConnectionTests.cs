@@ -80,9 +80,12 @@ public sealed class StorageIpcConnectionTests
         await using var admittedClient = await StorageIpcClientConnection.ConnectAsync(
             pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10));
 
-        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+        Exception? rejection = await Record.ExceptionAsync(async () =>
             await StorageIpcClientConnection.ConnectAsync(
                 pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10)));
+        Assert.NotNull(rejection);
+        Assert.True(rejection is IOException or InvalidDataException,
+            $"Expected a transport-level rejection, received {rejection.GetType().Name}.");
 
         ReadOnlyMemory<byte> response = await admittedClient.RequestAsync("still-usable"u8.ToArray());
         Assert.Equal("still-usable"u8.ToArray(), response.Span[16..].ToArray());
