@@ -77,13 +77,17 @@ The host creates the snapshot from its provider-snapshot mechanism; IPC does not
 
 **Important lifetime boundary:** the IPC handle and the `(ClientId, OpenOperationId) → SnapshotToken` replay map are owned by the live `FldDatabaseIpcDispatcher`, not by a durable IPC handle registry. Dispatcher disposal releases all remaining handles and clears the replay map; a new dispatcher receives a new HostGeneration. Therefore a handle is reconnect-safe only while the same Host generation remains alive. It is not a restart-resumable token, and replaying the same OpenOperationId after Host restart can open a new snapshot at a new feed watermark. The client must detect HostGeneration changes, discard the old token/cursor, and restart snapshot enumeration from a newly opened snapshot. Do not advertise IPC snapshot open as exactly-once across Host restart. This is distinct from durable local write receipts, which are stored in FLD WAL and survive Host restart.
 
-## Provider current-state reads and feed watermark (snapshot API; implemented)
+## Provider current-state reads and feed watermark (point read + snapshot; implemented)
 
 The IPC facade does not need a separate high-watermark operation for a provider snapshot. `OpenSnapshotAsync` returns `SourceFeedWatermark`, captured by `FldDatabase.OpenProviderSnapshotForIpc` from the same immutable generation as the snapshot index and overlay. This is the source-feed ceiling that a snapshot-based provider must use; it must not fetch a later live Outbox watermark and combine it with an older snapshot.
 
-`ReadSnapshotPageAsync` returns metadata for every visible field winner, including RecordId, FieldId, value length, HLC, AuthorNodeId, KeyEpoch, tombstone state, ChangeId, OriginAuthorEpoch, OriginSequence and record-lifecycle tombstone state. `ReadSnapshotValueChunkAsync` retrieves the corresponding value from that same pinned generation. Together these operations are sufficient to implement a correct snapshot-backed `ReadCurrentAsync` by traversing metadata pages and fetching the matching value chunks. This is a stable but potentially expensive fallback; it is not an efficient point-read API and callers must not pretend it is O(1).
+For ordinary provider point reads, `ReadCurrentMetadata` (0x210F) resolves exactly one RecordId/FieldId through the existing indexed LWW resolver across the mutable overlay and immutable Runs. It returns value length, HLC, AuthorNodeId, KeyEpoch, tombstone state, ChangeId, OriginAuthorEpoch and OriginSequence. It does not scan or materialize the complete snapshot and does not create a WAL receipt for a read-only query.
 
-A future dedicated point-read operation may improve lookup cost, but it must preserve the same generation semantics or return an explicit current-state version token. It is not a prerequisite for correctness of the initial async provider. The remaining material provider gaps are published-origin stamping, durable author-epoch/publication-mode operations, full-replace/snapshot-state capabilities, and a cross-call async commit barrier. The existing snapshot handle already carries the feed watermark; do not add a redundant high-watermark RPC.
+`ReadCurrentValueChunk` (0x2110) requires the ChangeId returned by the metadata query. Before copying each bounded value slice, the Host resolves the field again and compares its current ChangeId. It returns an explicit Changed status if the field was superseded between metadata and chunk requests; callers must restart from metadata rather than assemble bytes from different versions. Missing fields are reported separately. Each request takes only the ordinary short database read lock; no lock or borrowed view is held across IPC calls. Tombstones are returned as metadata with zero value length.
+
+Snapshot pages still return metadata for every visible field winner, including record-lifecycle tombstone state, and snapshot value chunks read from that same pinned generation. Use snapshots when a stable whole-database view is required; use the addressed operations for point reads. The existing snapshot handle already carries the source-feed watermark; do not combine it with a later live Outbox watermark or add another redundant watermark RPC.
+
+The remaining material provider gaps are published-origin stamping, durable author-epoch/publication-mode operations, full-replace/snapshot-state capabilities, durable async remote-apply mapping, and a cross-call async commit barrier.
 
 ## Identity-preserving local provider writes (0x210D; implemented)
 
@@ -121,12 +125,13 @@ Implemented in the current facade:
 - receipt-backed ReadField;
 - lease-fenced Outbox acquisition, bounded entry chunks, durable Outbox high-watermark query, Outbox ACK and release;
 - immutable provider snapshots over IPC: idempotent open within one live Host generation, bounded metadata pages/value chunks, client/Host-generation fencing and release (handles are not restart-resumable);
+- addressed current-field metadata reads and ChangeId-fenced bounded value chunks; read requests do not create durable receipts or WAL records;
 - retry/recovery across Host restart for durable local write receipts and Outbox lease epoch fencing; IPC snapshot handles themselves are invalidated on Host restart;
 - single-owner Host endpoint publication.
 
 Not exposed by this facade yet:
 
-- provider-current metadata reads with complete field identity/version metadata (the ordinary ReadField receipt is value-only; immutable snapshot pages remain the supported metadata read path);
+- durable published-origin stamping, author-epoch/publication-mode operations, FULL_REPLACE and snapshot-state capability operations;
 - subscriptions or streaming change feeds;
 - multi-entry Outbox aggregation beyond the one-entry chunk cursor;
 - a complete asynchronous IDataProvider / remote-apply coordinator surface, including provider-current metadata reads, published-origin stamping and cross-call commit-lease composition.
