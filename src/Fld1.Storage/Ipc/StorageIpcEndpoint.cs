@@ -85,7 +85,19 @@ public static class StorageIpcEndpoint
                 stream.Write(bytes);
                 stream.Flush(flushToDisk: true);
             }
-            File.Move(temporary, path, overwrite: true);
+            // The database partition lease is already held by this Host, so
+            // any pre-existing endpoint belongs to a stopped/crashed owner. On
+            // Windows, replacing that stale discovery file with MoveFileEx can
+            // fail with ERROR_ACCESS_DENIED (for example after an ungraceful
+            // process-tree kill). Remove the stale name first, then publish the
+            // fully flushed temporary file. Readers already tolerate the brief
+            // absent-file window while a Host is starting.
+            if (File.Exists(path))
+            {
+                File.SetAttributes(path, FileAttributes.Normal);
+                File.Delete(path);
+            }
+            File.Move(temporary, path);
         }
         finally
         {
