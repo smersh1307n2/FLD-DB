@@ -45,7 +45,6 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
 | GetOutboxHighWatermark | 0x210E | empty payload; response is durable Outbox HighWatermark (u64) |
 | AppendLocalProviderBatchAutoSequence | 0x2111 | Versioned identity-preserving local provider batch with ClientSequence = 0; Host allocates the next contiguous sequence under the commit lock |
-| AcknowledgeProviderOutbox | 0x2112 | Outbox lease + safe-through sequence; retires matching contiguous auto-sequenced provider receipts before acknowledging the Outbox prefix |
 | GetLocalAuthor | 0x2113 | empty payload; response is the authoritative nonzero LocalAuthor (16 bytes) configured by the Database Host |
 | CommitPublishedOrigins | 0x2114 | Versioned bounded list of RecordId/FieldId/ChangeId/OriginAuthorEpoch/OriginSequence stamps; identity-only and idempotent |
 | ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
