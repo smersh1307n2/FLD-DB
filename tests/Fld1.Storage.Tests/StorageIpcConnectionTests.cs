@@ -69,6 +69,29 @@ public sealed class StorageIpcConnectionTests
         await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
+    [Fact]
+    public async Task Local_pipe_server_rejects_clients_above_configured_admission_limit()
+    {
+        string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
+        using var serverCancellation = new CancellationTokenSource();
+        var server = new StorageIpcServer(pipeName, EchoClientAndPayload, maxConcurrentClients: 1);
+        Task serverTask = server.RunAsync(serverCancellation.Token);
+
+        await using var admittedClient = await StorageIpcClientConnection.ConnectAsync(
+            pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await StorageIpcClientConnection.ConnectAsync(
+                pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10)));
+
+        ReadOnlyMemory<byte> response = await admittedClient.RequestAsync("still-usable"u8.ToArray());
+        Assert.Equal("still-usable"u8.ToArray(), response.Span[16..].ToArray());
+
+        await admittedClient.DisposeAsync();
+        serverCancellation.Cancel();
+        await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     private static ValueTask<ReadOnlyMemory<byte>> EchoClientAndPayload(
         StorageIpcRequestContext context,
         ReadOnlyMemory<byte> payload,
