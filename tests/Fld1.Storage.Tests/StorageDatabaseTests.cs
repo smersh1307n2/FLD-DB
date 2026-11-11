@@ -238,6 +238,12 @@ public sealed class StorageDatabaseTests : IDisposable
     [Fact]
     public void Wal_writer_fence_recovers_abandoned_mutex_before_wal_recovery()
     {
+        // This scenario abandons a named Mutex by terminating its owning managed thread.
+        // Unix named-Mutex ownership is process-scoped, so thread exit does not abandon it there.
+        // A separate child-process harness is required to exercise process-death recovery on Unix.
+        if (!OperatingSystem.IsWindows())
+            return;
+
         const ulong partitionId = 110;
         string walDirectory = Path.Combine(_dir, "wal");
         Directory.CreateDirectory(walDirectory);
