@@ -59,6 +59,9 @@ public sealed partial class FldDatabase : IDisposable
     private readonly HlcClock _clock;
     private readonly MemOverlay _overlay = new();
     private readonly Dictionary<MemFieldKey, MemFieldValue> _dirty = new();
+    // Rebuilt from GROUP_COMMIT WAL receipts and the atomic checkpoint manifest.
+    private readonly Dictionary<string, LocalOperationReceiptEntry> _localOperationReceipts =
+        new(StringComparer.Ordinal);
     private ApplyJournal _applyJournal;
     // Rebuildable in-memory author discovery cache; no duplicate durable author index.
     private Dictionary<string, (byte[] Author, ulong MaxUnackedJournalSeq)>? _unacknowledgedRelayAuthors;
@@ -245,6 +248,14 @@ public sealed partial class FldDatabase : IDisposable
                 _nextRunId = checked(entry.RunId + 1);
         }
 
+        foreach (LocalOperationReceiptEntry receipt in manifest.LocalOperationReceipts
+                     .Where(item => item.NamespaceId == _namespaceId))
+        {
+            if (receipt.CommitSeq > manifest.LastFlushedCommitSeq)
+                throw new InvalidDataException("Manifest local-operation receipt exceeds LastFlushedCommitSeq.");
+            AddLocalOperationReceipt(receipt);
+        }
+
         foreach (var re in manifest.Runs.Where(r => r.Ns == _namespaceId).OrderBy(r => r.RunId))
         {
             var path = Path.Combine(_dbDir, "runs", $"{re.RunId}.fld1");
@@ -359,6 +370,21 @@ public sealed partial class FldDatabase : IDisposable
                 continue;
 
             var payload = GroupCommitCodec.Decode(record.Payload);
+            foreach (WalLocalOperationReceipt receipt in payload.LocalOperationReceipts)
+            {
+                if (receipt.NamespaceId != _namespaceId)
+                    throw new InvalidDataException("GROUP_COMMIT local-operation receipt namespace mismatch.");
+                AddLocalOperationReceipt(new LocalOperationReceiptEntry
+                {
+                    NamespaceId = receipt.NamespaceId,
+                    ClientId = receipt.ClientId,
+                    OperationId = receipt.OperationId,
+                    Fingerprint = receipt.Fingerprint,
+                    CommitSeq = record.CommitSeq,
+                    Result = receipt.Result
+                });
+            }
+
             foreach (var mutation in payload.Mutations)
             {
                 if (mutation.Ns != _namespaceId)
@@ -607,13 +633,94 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     /// <summary>Durable group commit of current overlay into WAL. Overlay kept for reads.</summary>
-    public ulong Commit()
+    public ulong Commit() => CommitCore(null).CommitSeq;
+
+    /// <summary>
+    /// Commit the current local field mutations and their stable IPC operation receipt
+    /// in one GROUP_COMMIT WAL record. Call TryGetLocalOperationReceipt before staging
+    /// mutations when retrying an operation.
+    /// </summary>
+    public FldLocalOperationCommitResult CommitWithReceipt(FldLocalOperationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        ValidateLocalOperationReceipt(receipt);
+        var stableReceipt = new FldLocalOperationReceipt
+        {
+            ClientId = receipt.ClientId.ToArray(),
+            OperationId = receipt.OperationId.ToArray(),
+            Fingerprint = receipt.Fingerprint.ToArray(),
+            Result = receipt.Result.ToArray()
+        };
+        return CommitCore(stableReceipt);
+    }
+
+    /// <summary>
+    /// Look up a durable local operation result. Reusing an identity with a different
+    /// request fingerprint fails closed rather than applying the request again.
+    /// </summary>
+    public bool TryGetLocalOperationReceipt(
+        ReadOnlySpan<byte> clientId,
+        ReadOnlySpan<byte> operationId,
+        ReadOnlySpan<byte> fingerprint,
+        out FldLocalOperationCommitResult? result)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ValidateOperationIdentity(clientId, operationId, fingerprint);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string key = LocalOperationKey(clientId, operationId);
+            if (!_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? stored))
+            {
+                result = null;
+                return false;
+            }
+
+            if (!stored.Fingerprint.AsSpan().SequenceEqual(fingerprint))
+                throw new InvalidDataException("ClientId + OperationId was reused with a different request fingerprint.");
+
+            result = new FldLocalOperationCommitResult
+            {
+                CommitSeq = stored.CommitSeq,
+                Result = stored.Result.ToArray(),
+                IsDuplicate = true
+            };
+            return true;
+        }
+    }
+
+    private FldLocalOperationCommitResult CommitCore(FldLocalOperationReceipt? operationReceipt)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
             EnsureHealthy();
-            if (_dirty.Count == 0) return 0;
+            if (operationReceipt is not null)
+            {
+                string key = LocalOperationKey(operationReceipt.ClientId, operationReceipt.OperationId);
+                if (_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? prior))
+                {
+                    if (!prior.Fingerprint.AsSpan().SequenceEqual(operationReceipt.Fingerprint))
+                        throw new InvalidDataException("ClientId + OperationId was reused with a different request fingerprint.");
+                    if (_dirty.Count != 0)
+                        throw new InvalidOperationException(
+                            "A duplicate operation was found after new overlay writes were staged; query its receipt before applying mutations.");
+                    return new FldLocalOperationCommitResult
+                    {
+                        CommitSeq = prior.CommitSeq,
+                        Result = prior.Result.ToArray(),
+                        IsDuplicate = true
+                    };
+                }
+            }
+
+            if (_dirty.Count == 0 && operationReceipt is null)
+                return new FldLocalOperationCommitResult
+                {
+                    CommitSeq = 0,
+                    Result = Array.Empty<byte>(),
+                    IsDuplicate = false
+                };
 
             // Capture the actual local operation at write time. A later remote merge may
             // win the visible overlay, but must not rewrite the local operation's identity.
@@ -641,6 +748,20 @@ public sealed partial class FldDatabase : IDisposable
                 });
             }
 
+            var walReceipts = operationReceipt is null
+                ? new List<WalLocalOperationReceipt>()
+                : new List<WalLocalOperationReceipt>
+                {
+                    new()
+                    {
+                        NamespaceId = checked((ushort)_namespaceId),
+                        ClientId = operationReceipt.ClientId,
+                        OperationId = operationReceipt.OperationId,
+                        Fingerprint = operationReceipt.Fingerprint,
+                        Result = operationReceipt.Result
+                    }
+                };
+
             var payload = GroupCommitCodec.Encode(new GroupCommitPayload
             {
                 Mutations =
@@ -665,7 +786,8 @@ public sealed partial class FldDatabase : IDisposable
                         ProvenanceIdx = 0xFFFFFFFF
                     }
                 ],
-                Provenance = []
+                Provenance = [],
+                LocalOperationReceipts = walReceipts
             });
 
             ulong commitSeq;
@@ -695,28 +817,99 @@ public sealed partial class FldDatabase : IDisposable
                 }
 
                 _outbox.Flush();
+                if (operationReceipt is not null)
+                {
+                    AddLocalOperationReceipt(new LocalOperationReceiptEntry
+                    {
+                        NamespaceId = checked((uint)_namespaceId),
+                        ClientId = operationReceipt.ClientId,
+                        OperationId = operationReceipt.OperationId,
+                        Fingerprint = operationReceipt.Fingerprint,
+                        CommitSeq = commitSeq,
+                        Result = operationReceipt.Result
+                    });
+                }
             }
             catch
             {
                 // WAL may already be durable. Do not append another logical commit in
-                // this process; startup replay will finish the idempotent Outbox append.
+                // this process; startup replay will finish the idempotent Outbox append
+                // and rebuild the receipt index from the same durable GROUP_COMMIT.
                 _faulted = true;
                 throw;
             }
 
             _dirty.Clear();
-
-            // Defer manifest disk write — WAL is source of truth until Checkpoint/FlushManifest
             _pendingFlushedCommitSeq = commitSeq;
             _manifestDirty = true;
             bool autoCkpt = _autoCheckpointOverlayFields > 0
                             && _overlay.Count >= _autoCheckpointOverlayFields;
-            if (!autoCkpt)
-                return commitSeq;
-            CheckpointUnderLock();
-            return commitSeq;
+            if (autoCkpt)
+                CheckpointUnderLock();
+
+            return new FldLocalOperationCommitResult
+            {
+                CommitSeq = commitSeq,
+                Result = operationReceipt?.Result.ToArray() ?? Array.Empty<byte>(),
+                IsDuplicate = false
+            };
         }
     }
+
+    private static void ValidateLocalOperationReceipt(FldLocalOperationReceipt receipt)
+        => ValidateOperationIdentity(receipt.ClientId, receipt.OperationId, receipt.Fingerprint);
+
+    private static void ValidateOperationIdentity(
+        ReadOnlySpan<byte> clientId, ReadOnlySpan<byte> operationId, ReadOnlySpan<byte> fingerprint)
+    {
+        if (clientId.Length != 16 || IsZeroId(clientId))
+            throw new ArgumentException("ClientId must be a nonzero 16-byte identifier.", nameof(clientId));
+        if (operationId.Length != 16 || IsZeroId(operationId))
+            throw new ArgumentException("OperationId must be a nonzero 16-byte identifier.", nameof(operationId));
+        if (fingerprint.Length != 32)
+            throw new ArgumentException("Fingerprint must be exactly 32 bytes.", nameof(fingerprint));
+    }
+
+    private static string LocalOperationKey(ReadOnlySpan<byte> clientId, ReadOnlySpan<byte> operationId)
+    {
+        Span<char> key = stackalloc char[64];
+        Convert.TryToHexString(clientId, key, out int clientChars);
+        Convert.TryToHexString(operationId, key.Slice(clientChars), out int operationChars);
+        return new string(key.Slice(0, clientChars + operationChars));
+    }
+
+    private void AddLocalOperationReceipt(LocalOperationReceiptEntry receipt)
+    {
+        ValidateOperationIdentity(receipt.ClientId, receipt.OperationId, receipt.Fingerprint);
+        string key = LocalOperationKey(receipt.ClientId, receipt.OperationId);
+        if (_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? existing))
+        {
+            if (existing.NamespaceId != receipt.NamespaceId
+                || existing.CommitSeq != receipt.CommitSeq
+                || !existing.Fingerprint.AsSpan().SequenceEqual(receipt.Fingerprint)
+                || !existing.Result.AsSpan().SequenceEqual(receipt.Result))
+                throw new InvalidDataException("Conflicting durable local-operation receipt identity.");
+            return;
+        }
+        _localOperationReceipts.Add(key, new LocalOperationReceiptEntry
+        {
+            NamespaceId = receipt.NamespaceId,
+            ClientId = receipt.ClientId.ToArray(),
+            OperationId = receipt.OperationId.ToArray(),
+            Fingerprint = receipt.Fingerprint.ToArray(),
+            CommitSeq = receipt.CommitSeq,
+            Result = receipt.Result.ToArray()
+        });
+    }
+
+    private List<LocalOperationReceiptEntry> BuildManifestLocalOperationReceipts(
+        IReadOnlyList<LocalOperationReceiptEntry> existing)
+    {
+        var result = existing.Where(item => item.NamespaceId != _namespaceId).ToList();
+        result.AddRange(_localOperationReceipts.Values);
+        return result;
+    }
+
 
     public ulong Checkpoint()
     {
@@ -1328,6 +1521,7 @@ public sealed partial class FldDatabase : IDisposable
             Retains = m.Retains,
             ResultClients = m.ResultClients,
             ProvenanceIndex = m.ProvenanceIndex,
+            LocalOperationReceipts = m.LocalOperationReceipts,
             CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
             CoordinatorSessionId = m.CoordinatorSessionId
         };
