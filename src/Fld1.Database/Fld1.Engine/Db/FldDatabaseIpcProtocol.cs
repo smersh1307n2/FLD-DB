@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Fld1.Storage.Ipc;
+using Fld1.Wal;
 
 namespace Fld1.Engine.Db;
 
@@ -185,7 +186,7 @@ public static class FldDatabaseIpcProtocol
             throw new InvalidDataException("FLD IPC commit result is truncated.");
         byte duplicate = span[8];
         uint rawLength = BinaryPrimitives.ReadUInt32LittleEndian(span[9..]);
-        if (duplicate > 1 || rawLength != span.Length - ResultHeaderBytes)
+        if (duplicate > 1 || rawLength != (uint)(span.Length - ResultHeaderBytes))
             throw new InvalidDataException("FLD IPC commit result flags or length are invalid.");
         return (BinaryPrimitives.ReadUInt64LittleEndian(span), duplicate == 1,
             span.Slice(ResultHeaderBytes, (int)rawLength).ToArray());
@@ -218,7 +219,7 @@ public static class FldDatabaseIpcProtocol
         if (result.Length < 5 || result[0] > 1)
             throw new InvalidDataException("FLD IPC read result is invalid.");
         uint rawLength = BinaryPrimitives.ReadUInt32LittleEndian(result[1..]);
-        if (rawLength != result.Length - 5 || (result[0] == 0 && rawLength != 0))
+        if (rawLength != (uint)(result.Length - 5) || (result[0] == 0 && rawLength != 0))
             throw new InvalidDataException("FLD IPC read result value length is invalid.");
         return new FldDatabaseIpcReadResult(
             commitSeq, isDuplicate, result[0] == 1,
