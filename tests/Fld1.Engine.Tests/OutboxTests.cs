@@ -74,7 +74,7 @@ public class OutboxTests : IDisposable
         using (var reopened = FldDatabase.Open(options))
         {
             Assert.True(reopened.TryGetLocalOperationReceipt(
-                clientId, operationId, fingerprint, out var found));
+                clientId, operationId, 1, fingerprint, out var found));
             Assert.Equal(originalCommitSeq, found!.CommitSeq);
             Assert.Equal(response, found.Result);
 
@@ -119,6 +119,80 @@ public class OutboxTests : IDisposable
                 clientId, operationId, 1, fingerprint, out var replay));
             Assert.Equal(response, replay!.Result);
             Assert.Equal(1ul, replay.CommitSeq);
+        }
+    }
+
+    [Fact]
+    public void Client_acknowledgement_retires_only_a_contiguous_receipt_prefix_and_survives_recovery()
+    {
+        byte[] clientId = new byte[16]; clientId[0] = 0x71;
+        byte[] operation1 = new byte[16]; operation1[0] = 0x72;
+        byte[] operation2 = new byte[16]; operation2[0] = 0x73;
+        byte[] fingerprint1 = new byte[32]; fingerprint1[0] = 0x74;
+        byte[] fingerprint2 = new byte[32]; fingerprint2[0] = 0x75;
+        var first = new FldLocalOperationReceipt
+        {
+            ClientId = clientId, OperationId = operation1, ClientSequence = 1,
+            Fingerprint = fingerprint1, Result = "one"u8.ToArray()
+        };
+        var second = new FldLocalOperationReceipt
+        {
+            ClientId = clientId, OperationId = operation2, ClientSequence = 2,
+            Fingerprint = fingerprint2, Result = "two"u8.ToArray()
+        };
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            db.Put(FldDatabase.NewRecordId(), 1, "first"u8);
+            db.CommitWithReceipt(first);
+            db.Put(FldDatabase.NewRecordId(), 1, "second"u8);
+            db.CommitWithReceipt(second);
+
+            Assert.True(db.AcknowledgeLocalOperationReceipts(clientId, 1));
+            Assert.False(db.AcknowledgeLocalOperationReceipts(clientId, 1));
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => db.AcknowledgeLocalOperationReceipts(clientId, 3));
+            Assert.Throws<InvalidOperationException>(() => db.TryGetLocalOperationReceipt(
+                clientId, operation1, 1, fingerprint1, out _));
+            Assert.True(db.TryGetLocalOperationReceipt(
+                clientId, operation2, 2, fingerprint2, out var retained));
+            Assert.Equal("two"u8.ToArray(), retained!.Result);
+            Assert.Equal(2, db.ReadOutboxBatch(0, 10).Count);
+        }
+
+        // Dispose persisted the watermark, while the WAL still contains both commits and ACK.
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            Assert.Throws<InvalidOperationException>(() => reopened.TryGetLocalOperationReceipt(
+                clientId, operation1, 1, fingerprint1, out _));
+            Assert.True(reopened.TryGetLocalOperationReceipt(
+                clientId, operation2, 2, fingerprint2, out var retained));
+            Assert.Equal("two"u8.ToArray(), retained!.Result);
+
+            Assert.True(reopened.AcknowledgeLocalOperationReceipts(clientId, 2));
+            Assert.False(reopened.AcknowledgeLocalOperationReceipts(clientId, 2));
+            reopened.Checkpoint();
+        }
+
+        using (var compacted = FldDatabase.Open(_dir))
+        {
+            Assert.Throws<InvalidOperationException>(() => compacted.TryGetLocalOperationReceipt(
+                clientId, operation1, 1, fingerprint1, out _));
+            Assert.Throws<InvalidOperationException>(() => compacted.TryGetLocalOperationReceipt(
+                clientId, operation2, 2, fingerprint2, out _));
+
+            byte[] operation3 = new byte[16]; operation3[0] = 0x76;
+            byte[] fingerprint3 = new byte[32]; fingerprint3[0] = 0x77;
+            FldLocalOperationCommitResult next = compacted.CommitWithReceipt(new FldLocalOperationReceipt
+            {
+                ClientId = clientId,
+                OperationId = operation3,
+                ClientSequence = 3,
+                Fingerprint = fingerprint3,
+                Result = "three"u8.ToArray()
+            });
+            Assert.Equal(5ul, next.CommitSeq); // two field commits + two durable ACK records
+            Assert.Equal(2, compacted.ReadOutboxBatch(0, 10).Count);
         }
     }
 
