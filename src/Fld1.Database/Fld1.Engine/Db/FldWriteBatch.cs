@@ -10,29 +10,34 @@ public sealed class FldWriteBatch
 
     public int Count => Entries.Count;
 
-    public FldWriteBatch Put(ReadOnlySpan<byte> recordId, ushort fieldId, ReadOnlySpan<byte> value)
+    public FldWriteBatch Put(
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        ReadOnlySpan<byte> value,
+        ushort keyEpoch = 0)
     {
         if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes");
-        Entries.Add(new Entry(recordId.ToArray(), fieldId, value.ToArray(), Tombstone: false));
+        Entries.Add(new Entry(recordId.ToArray(), fieldId, value.ToArray(), keyEpoch, Tombstone: false));
         return this;
     }
 
-    public FldWriteBatch Put(byte[] recordId, ushort fieldId, byte[] value)
+    public FldWriteBatch Put(byte[] recordId, ushort fieldId, byte[] value, ushort keyEpoch = 0)
     {
         if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes");
-        Entries.Add(new Entry(recordId, fieldId, value, Tombstone: false));
+        ArgumentNullException.ThrowIfNull(value);
+        Entries.Add(new Entry(recordId, fieldId, value, keyEpoch, Tombstone: false));
         return this;
     }
 
     /// <summary>Lifecycle-style delete: field tombstone (value empty).</summary>
-    public FldWriteBatch Delete(ReadOnlySpan<byte> recordId, ushort fieldId)
+    public FldWriteBatch Delete(ReadOnlySpan<byte> recordId, ushort fieldId, ushort keyEpoch = 0)
     {
         if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes");
-        Entries.Add(new Entry(recordId.ToArray(), fieldId, Array.Empty<byte>(), Tombstone: true));
+        Entries.Add(new Entry(recordId.ToArray(), fieldId, Array.Empty<byte>(), keyEpoch, Tombstone: true));
         return this;
     }
 
     public void Clear() => Entries.Clear();
 
-    internal readonly record struct Entry(byte[] RecordId, ushort FieldId, byte[] Value, bool Tombstone);
+    internal readonly record struct Entry(byte[] RecordId, ushort FieldId, byte[] Value, ushort KeyEpoch, bool Tombstone);
 }

@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Fld1.Storage.Ipc;
-using Fld1.Wal;
+using Fld1.Wal.Format;
 
 namespace Fld1.Engine.Db;
 

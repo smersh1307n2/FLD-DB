@@ -658,9 +658,9 @@ public sealed partial class FldDatabase : IDisposable
             foreach (var entry in batch.Entries)
             {
                 if (entry.Tombstone)
-                    Delete(entry.RecordId, entry.FieldId);
+                    Delete(entry.RecordId, entry.FieldId, entry.KeyEpoch);
                 else
-                    PutOwned(entry.RecordId, entry.FieldId, entry.Value);
+                    PutOwned(entry.RecordId, entry.FieldId, entry.Value, entry.KeyEpoch);
             }
         }
     }
