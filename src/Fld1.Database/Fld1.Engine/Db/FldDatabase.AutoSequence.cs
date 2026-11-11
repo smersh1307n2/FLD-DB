@@ -19,7 +19,7 @@ public sealed partial class FldDatabase
         {
             EnsureHealthy();
             string key = LocalOperationKey(clientId, operationId);
-            if (_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? stored))
+            if (_localOperationReceipts.TryGetValue(key, out var stored))
             {
                 if (!stored.Fingerprint.AsSpan().SequenceEqual(fingerprint))
                     throw new InvalidDataException("ClientId + OperationId was reused with a different request fingerprint.");
