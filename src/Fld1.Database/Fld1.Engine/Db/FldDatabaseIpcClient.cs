@@ -183,6 +183,26 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Appends provider-owned local drafts with stable ChangeId, HLC and author epoch.
+    /// Retry with the same OperationId, ClientSequence and exact mutation payload.
+    /// </summary>
+    public async Task<FldDatabaseIpcWriteResult> AppendLocalProviderBatchAsync(
+        Guid operationId,
+        ulong clientSequence,
+        IReadOnlyList<FldLocalProviderMutation> mutations,
+        CancellationToken cancellationToken = default)
+    {
+        if (operationId == Guid.Empty)
+            throw new ArgumentException("Local provider IPC operation id must be nonzero.", nameof(operationId));
+        byte[] payload = FldDatabaseIpcLocalProviderProtocol.EncodeRequest(clientSequence, mutations);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            operationId, FldDatabaseIpcOperationCodes.AppendLocalProviderBatch, payload, cancellationToken)
+            .ConfigureAwait(false);
+        (ulong commitSeq, bool duplicate, byte[] result) = FldDatabaseIpcProtocol.DecodeCommitResult(response);
+        return FldDatabaseIpcProtocol.DecodeWriteResult(commitSeq, duplicate, result);
+    }
+
+    /// <summary>
     /// Atomically applies one contextual remote batch. Retry with the same batch identity;
     /// ApplyJournal, rather than the IPC operation id, is the durable deduplication authority.
     /// </summary>
