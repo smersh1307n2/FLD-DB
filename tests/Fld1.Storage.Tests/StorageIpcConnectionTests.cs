@@ -1,3 +1,4 @@
+using System.IO.Pipes;
 using Fld1.Storage.Ipc;
 using Xunit;
 
@@ -116,6 +117,99 @@ public sealed class StorageIpcConnectionTests
 
         serverCancellation.Cancel();
         await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task Local_pipe_server_shutdown_closes_every_admitted_session()
+    {
+        string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
+        using var serverCancellation = new CancellationTokenSource();
+        var server = new StorageIpcServer(pipeName, EchoClientAndPayload, maxConcurrentClients: 8);
+        Task serverTask = server.RunAsync(serverCancellation.Token);
+        var clients = new List<StorageIpcClientConnection>();
+
+        try
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                clients.Add(await StorageIpcClientConnection.ConnectAsync(
+                    pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10)));
+            }
+
+            serverCancellation.Cancel();
+            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+            foreach (StorageIpcClientConnection client in clients)
+            {
+                Exception disconnected = await Assert.ThrowsAnyAsync<Exception>(async () =>
+                    await client.RequestAsync("after-shutdown"u8.ToArray()));
+                Assert.True(disconnected is IOException or InvalidDataException or ObjectDisposedException,
+                    $"Expected a closed IPC transport, received {disconnected.GetType().Name}.");
+            }
+        }
+        finally
+        {
+            serverCancellation.Cancel();
+            foreach (StorageIpcClientConnection client in clients)
+                await client.DisposeAsync();
+            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
+    public async Task Local_pipe_server_rejects_request_from_stale_session_generation()
+    {
+        string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
+        using var serverCancellation = new CancellationTokenSource();
+        int handlerCalls = 0;
+        var server = new StorageIpcServer(
+            pipeName,
+            (context, payload, cancellationToken) =>
+            {
+                Interlocked.Increment(ref handlerCalls);
+                return ValueTask.FromResult(payload);
+            });
+        Task serverTask = server.RunAsync(serverCancellation.Token);
+
+        try
+        {
+            await using var pipe = new NamedPipeClientStream(
+                ".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await pipe.ConnectAsync(10_000);
+            byte[] clientId = Guid.NewGuid().ToByteArray();
+            await StorageIpcProtocol.WriteAsync(pipe,
+                new StorageIpcFrame(StorageIpcFrameType.Hello, 0, 0, clientId));
+
+            StorageIpcFrame? helloAck = await StorageIpcProtocol.ReadAsync(pipe);
+            Assert.NotNull(helloAck);
+            Assert.Equal(StorageIpcFrameType.HelloAck, helloAck.Value.Type);
+            ulong liveGeneration = helloAck.Value.SessionGeneration;
+            ulong staleGeneration = liveGeneration == 1 ? 2UL : liveGeneration - 1;
+
+            await StorageIpcProtocol.WriteAsync(pipe,
+                new StorageIpcFrame(StorageIpcFrameType.Request, 1, staleGeneration, "stale"u8.ToArray()));
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            StorageIpcFrame? response = null;
+            Exception? transportFailure = null;
+            try
+            {
+                response = await StorageIpcProtocol.ReadAsync(pipe, timeout.Token);
+            }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            {
+                transportFailure = exception;
+            }
+
+            Assert.True(response is null || transportFailure is not null,
+                "The server must close a session that presents a stale generation.");
+            Assert.Equal(0, Volatile.Read(ref handlerCalls));
+        }
+        finally
+        {
+            serverCancellation.Cancel();
+            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
     }
 
     private static ValueTask<ReadOnlyMemory<byte>> EchoClientAndPayload(
