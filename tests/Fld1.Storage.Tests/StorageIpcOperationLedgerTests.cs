@@ -108,6 +108,45 @@ public sealed class StorageIpcOperationLedgerTests
     }
 
     [Fact]
+    public void Concurrent_batches_for_the_same_operation_identity_cannot_both_commit()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), "fld-storage-ipc-ledger-race-" + Guid.NewGuid().ToString("N"));
+        const ulong partition = 0x1D05;
+        Guid clientId = Guid.NewGuid();
+        Guid operationId = Guid.NewGuid();
+        byte[] fingerprint = StorageIpcOperationLedger.ComputeFingerprint(5, "same-operation"u8);
+
+        try
+        {
+            using var database = StorageDatabase.Open(directory, partition);
+            var ledger = new StorageIpcOperationLedger(database);
+            using var first = database.BeginWriteBatch();
+            using var second = database.BeginWriteBatch();
+
+            first.Put("first-effect"u8, "committed"u8);
+            second.Put("second-effect"u8, "must-not-commit"u8);
+            Assert.True(ledger.TryStageResult(
+                first, clientId, operationId, fingerprint, "durable-result"u8, out _));
+            Assert.True(ledger.TryStageResult(
+                second, clientId, operationId, fingerprint, "durable-result"u8, out _));
+
+            first.Commit();
+            Assert.Throws<StorageConflictException>(() => second.Commit());
+
+            Assert.True(database.TryGet("first-effect"u8, out byte[]? firstValue));
+            Assert.Equal("committed"u8.ToArray(), firstValue);
+            Assert.False(database.TryGet("second-effect"u8, out _));
+            Assert.True(ledger.TryGetResult(clientId, operationId, fingerprint, out byte[]? replayed));
+            Assert.Equal("durable-result"u8.ToArray(), replayed);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Operation_ledger_rejects_a_write_batch_from_a_different_storage_database()
     {
         string firstDirectory = Path.Combine(
