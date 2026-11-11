@@ -61,6 +61,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
             await StopHostAsync(firstHost);
             firstHost = null;
+            await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
 
             secondHost = StartHost(root, namespaceId);
             StorageIpcEndpointInfo secondEndpoint = await WaitForEndpointAsync(
@@ -106,6 +107,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
             await StopHostAsync(secondHost);
             secondHost = null;
+            await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
 
             thirdHost = StartHost(root, namespaceId);
             await WaitForEndpointAsync(root, thirdHost, TimeSpan.FromSeconds(45), secondEndpoint.OwnerId);
@@ -136,6 +138,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
             await StopHostAsync(thirdHost);
             thirdHost = null;
+            await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
 
             using var recovered = FldDatabase.Open(root, namespaceId);
             Assert.NotNull(firstSnapshot);
@@ -223,6 +226,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
             await StopHostAsync(firstHost);
             firstHost = null;
+            await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
             secondHost = StartHost(root, namespaceId);
             await WaitForEndpointAsync(root, secondHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
 
@@ -260,6 +264,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
             await StopHostAsync(secondHost);
             secondHost = null;
+            await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
 
             using var recoveredDatabase = FldDatabase.Open(root, namespaceId);
             Assert.Equal(2ul, recoveredDatabase.GetOutboxWatermark());
@@ -346,6 +351,30 @@ public sealed class FldDatabaseIpcHostProcessTests
             await Task.Delay(100);
         }
         throw new TimeoutException("FLD Database Host did not publish its endpoint before the deadline.");
+    }
+
+    private static async Task WaitForWriterFenceReleaseAsync(
+        string root, uint namespaceId, TimeSpan timeout)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        IOException? lastFailure = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var probe = FldDatabase.Open(root, namespaceId);
+                return;
+            }
+            catch (IOException exception)
+            {
+                lastFailure = exception;
+                await Task.Delay(50);
+            }
+        }
+
+        throw new TimeoutException(
+            "Database Host exited but its WAL writer fence was not released before the deadline.",
+            lastFailure);
     }
 
     private static async Task StopHostAsync(Process host)
