@@ -26,6 +26,7 @@ public sealed partial class FldDatabase
                 return new FldLocalOperationCommitResult
                 {
                     CommitSeq = stored.CommitSeq,
+                    ClientSequence = stored.ClientSequence,
                     Result = stored.Result.ToArray(),
                     IsDuplicate = true
                 };
