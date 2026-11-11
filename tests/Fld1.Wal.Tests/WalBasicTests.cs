@@ -343,6 +343,7 @@ public class WalBasicTests : IDisposable
         var recovered = Assert.Single(decoded.LocalOperationReceipts);
         Assert.Equal(receipt.ClientId, recovered.ClientId);
         Assert.Equal(receipt.OperationId, recovered.OperationId);
+        Assert.Equal(receipt.ClientSequence, recovered.ClientSequence);
         Assert.Equal(receipt.Fingerprint, recovered.Fingerprint);
         Assert.Equal(receipt.Result, recovered.Result);
     }
