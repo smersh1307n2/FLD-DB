@@ -8,6 +8,7 @@ public sealed class FldLocalOperationReceipt
 {
     public required byte[] ClientId { get; init; }
     public required byte[] OperationId { get; init; }
+    /// <summary>Strictly contiguous, durable per-client sequence, reused unchanged on retry.</summary>
     public required ulong ClientSequence { get; init; }
     public required byte[] Fingerprint { get; init; }
     public required byte[] Result { get; init; }

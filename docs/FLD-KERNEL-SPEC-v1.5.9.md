@@ -500,3 +500,13 @@ This addendum records the implemented local Database IPC idempotency boundary; i
 - Outbox ACK and Outbox compaction do not remove operation receipts. Receipt expiry is not yet enabled: safe deletion requires an explicit durable client acknowledgement/retry-horizon contract. Until then receipts are retained conservatively. This is a retention policy, not a second pending journal.
 - This receipt is strictly for local Database IPC operations. Do not reuse remote ApplyJournal identity (issuer/epoch/batch) for local-author writes. Remote Apply and its protocol state remain governed by BIN-SYNC v3 and the existing APPLY_COMMIT path.
 
+
+
+
+### Local IPC receipt retention addendum (2026-11-11)
+
+- Each local IPC operation carries a nonzero `ClientSequence`, strictly contiguous per `(NamespaceId, ClientId)`. Retries reuse the same ClientSequence, OperationId and fingerprint. The host rejects gaps, sequence reuse and attempts to replay an already acknowledged sequence.
+- Manifest extension `FLOC` stores per-client `LastCommittedSequence` and `AcknowledgedThroughSequence`; `FLOR` stores only receipts in the active unacknowledged window. The manifest validates that every sequence in that window has exactly one receipt.
+- `AcknowledgeLocalOperationReceipts(ClientId, throughSequence)` appends a dedicated WAL acknowledgement record, flushes it, then retires the contiguous receipt prefix. Acknowledgement is idempotent. Recovery replays GroupCommit receipts and ACK records in WAL order; checkpoint publishes the new watermark before WAL truncation.
+- Client contract: persist all operation results through sequence N durably before acknowledging N. If the ACK is lost, the client may resend it; if the ACK is durable, a retry at or below N is rejected and can never reapply the operation. Never acknowledge a gap.
+- This bounds receipt-result retention by unacknowledged client work and keeps only one small watermark per client after retirement. Outbox entries and peer synchronization ACKs remain independent and are not modified by this local IPC acknowledgement.
