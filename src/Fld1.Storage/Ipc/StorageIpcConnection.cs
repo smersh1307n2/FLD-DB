@@ -6,9 +6,9 @@ using System.Text;
 namespace Fld1.Storage.Ipc;
 
 /// <summary>
- * Identity attached to one request on an authenticated local pipe session.
- * RequestId is a per-session transport correlation value; it is not a durable
- * idempotency key and may restart from one after reconnect.
+/// Identity attached to one request on an authenticated local pipe session.
+/// RequestId is a per-session transport correlation value; it is not a durable
+/// idempotency key and may restart from one after reconnect.
 /// </summary>
 public readonly record struct StorageIpcRequestContext(
     Guid ClientId,
