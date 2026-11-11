@@ -17,7 +17,7 @@ public sealed class StorageIpcEndpointTests
 
         Assert.Equal(first, same);
         Assert.NotEqual(first, otherPartition);
-        Assert.True(first.StartsWith("fld1-", StringComparison.Ordinal));
+        Assert.StartsWith("fld1-", first);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public sealed class StorageIpcEndpointTests
         {
             StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
                 root, 0x201, Guid.NewGuid(), Environment.ProcessId));
-            Assert.Throws<InvalidDataException>(() => StorageIpcEndpoint.Read(root, 0x202));
+            Assert.Throws<FileNotFoundException>(() => StorageIpcEndpoint.Read(root, 0x202));
         }
         finally
         {
