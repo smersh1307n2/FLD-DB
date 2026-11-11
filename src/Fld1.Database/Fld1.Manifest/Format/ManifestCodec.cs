@@ -266,7 +266,7 @@ public static class ManifestCodec
                 throw new InvalidDataException("unsupported FLOC local-operation client format");
             pos += 4;
             int clientCount = ReadCount(
-                data, ref pos, minimumEntryBytes: 40, maxCount: 100_000, "local operation client");
+                data, ref pos, minimumEntryBytes: 36, maxCount: 100_000, "local operation client");
             localOperationClients = new List<LocalOperationClientEntry>(clientCount);
             for (int i = 0; i < clientCount; i++)
             {
