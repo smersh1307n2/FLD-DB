@@ -707,6 +707,7 @@ public sealed partial class FldDatabase : IDisposable
             throw new ArgumentOutOfRangeException(nameof(mutations), "A provider operation must contain 1..4096 mutations.");
 
         var seenFields = new HashSet<string>(StringComparer.Ordinal);
+        var seenChangeIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (FldLocalProviderMutation mutation in mutations)
         {
             ArgumentNullException.ThrowIfNull(mutation);
@@ -717,6 +718,8 @@ public sealed partial class FldDatabase : IDisposable
             if (mutation.RecordId.All(value => value == 0) ||
                 mutation.ChangeId.All(value => value == 0))
                 throw new ArgumentException("Provider RecordId and ChangeId must be nonzero.", nameof(mutations));
+            if (!seenChangeIds.Add(Convert.ToHexString(mutation.ChangeId)))
+                throw new ArgumentException("A provider operation cannot reuse a ChangeId.", nameof(mutations));
             if (mutation.OriginAuthorEpoch == 0 || mutation.Wall == 0)
                 throw new ArgumentException("Provider draft requires a nonzero author epoch and HLC wall.", nameof(mutations));
             if (mutation.IsTombstone && mutation.Value.Length != 0)
