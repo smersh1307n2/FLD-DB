@@ -34,6 +34,9 @@ internal static class Program
         try
         {
             using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+            // This host generation does not restore IPC snapshot handles after restart.
+            // The exclusive Database root lease is held before stale provider pins are pruned.
+            database.PruneProviderSnapshotsExcept(new HashSet<Guid>());
             Guid ownerId = Guid.NewGuid();
             using var shutdown = new CancellationTokenSource();
             ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -43,7 +46,7 @@ internal static class Program
             };
             Console.CancelKeyPress += cancelHandler;
 
-            var dispatcher = new FldDatabaseIpcDispatcher(database);
+            using var dispatcher = new FldDatabaseIpcDispatcher(database);
             var server = new StorageIpcServer(
                 StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
             Task serverTask = server.RunAsync(shutdown.Token);
