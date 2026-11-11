@@ -16,13 +16,15 @@ The first Database Host currently owns partition 0. Its endpoint discovery recor
 A client identity is a stable, non-empty 16-byte ClientId represented by Guid. The caller persists this identity across process restarts and reconnects. Each operation carries:
 
 - a unique, non-empty OperationId;
-- a nonzero ClientSequence, contiguous per ClientId;
 - a canonical request fingerprint (SHA-256 over the little-endian operation code followed by the exact operation payload);
-- an opaque result retained in the same durable GROUP_COMMIT as the field mutations, or in a receipt-only GROUP_COMMIT for reads.
+- for caller-sequenced operations, a nonzero ClientSequence contiguous per ClientId;
+- an opaque result retained in the same durable GROUP_COMMIT as field mutations, or in a receipt-only GROUP_COMMIT for reads.
 
-The caller must persist OperationId and ClientSequence before transmission. If a connection is lost after the Host commits but before the caller receives the response, the caller resends the same OperationId, ClientSequence and exact request bytes. The Host returns the original CommitSeq/result and does not stage or publish the field changes again. Reusing an identity with different bytes, skipping a sequence, or retrying a sequence at/below the durable acknowledgement watermark fails closed.
+Caller-sequenced operations (WriteBatch, ReadField, and the explicit-sequence provider append) require the caller to persist OperationId and ClientSequence before transmission. The auto-sequence provider append (0x2111) instead sends ClientSequence = 0; the Host assigns the next contiguous sequence under the Database commit lock and returns that ClientSequence together with CommitSeq. The caller must durably persist the returned sequence before acknowledging receipts.
 
-The client must durably persist a successful response before acknowledging it. Acknowledgement advances only a contiguous prefix. The Host persists the watermark in WAL before retiring the acknowledged operation results; replay after restart preserves both the watermark and the next expected sequence. Outbox ACK/compaction is separate and must not be used as a substitute for IPC receipt acknowledgement.
+If a connection is lost after the Host commits but before the caller receives the response, the caller retries the auto-sequence operation with the same OperationId and exact payload. The Host returns the original CommitSeq and ClientSequence and does not append a second Outbox entry. Reusing an identity with different bytes, skipping a caller-supplied sequence, or retrying a sequence at/below the durable acknowledgement watermark fails closed.
+
+Receipt acknowledgement advances only a contiguous prefix. The Host persists the watermark in WAL before retiring acknowledged operation results; replay after restart preserves both the watermark and the next expected sequence. A repeated ACK of an already acknowledged prefix is an idempotent no-op. Outbox ACK/compaction is separate and must not be used as a substitute for IPC receipt acknowledgement.
 
 ## Current operation payloads
 
@@ -44,7 +46,7 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (implemented in the current branch) |
 | AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
 | GetOutboxHighWatermark | 0x210E | empty payload; response is durable Outbox HighWatermark (u64) |
-| AppendLocalProviderBatchAutoSequence | 0x2111 | Versioned identity-preserving local provider batch with ClientSequence = 0; Host allocates the next contiguous sequence under the commit lock |
+| AppendLocalProviderBatchAutoSequence | 0x2111 | Versioned identity-preserving local provider batch with ClientSequence = 0; Host allocates the next contiguous sequence under the commit lock and returns it with CommitSeq, duplicate flag and mutation count |
 | GetLocalAuthor | 0x2113 | empty payload; response is the authoritative nonzero LocalAuthor (16 bytes) configured by the Database Host |
 | CommitPublishedOrigins | 0x2114 | Versioned bounded list of RecordId/FieldId/ChangeId/OriginAuthorEpoch/OriginSequence stamps; identity-only and idempotent |
 | ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
