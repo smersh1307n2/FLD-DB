@@ -55,31 +55,39 @@ public sealed class StorageIpcEndpointTests
         string root = Path.Combine(Path.GetTempPath(), "fld ipc endpoint connect " + Guid.NewGuid().ToString("N"));
         const ulong partition = 0x203;
         string pipeName = StorageIpcEndpoint.ComputePipeName(root, partition);
-        using var database = StorageDatabase.Open(root, partition);
-        var dispatcher = new StorageIpcOperationDispatcher(database);
-        using var serverCancellation = new CancellationTokenSource();
-        var server = new StorageIpcServer(pipeName, dispatcher.HandleAsync);
-        Task serverTask = server.RunAsync(serverCancellation.Token);
+        Guid ownerId = Guid.NewGuid();
 
         try
         {
-            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
-            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
-                root, partition, Guid.NewGuid(), Environment.ProcessId));
+            using var database = StorageDatabase.Open(root, partition);
+            var dispatcher = new StorageIpcOperationDispatcher(database);
+            using var serverCancellation = new CancellationTokenSource();
+            var server = new StorageIpcServer(pipeName, dispatcher.HandleAsync);
+            Task serverTask = server.RunAsync(serverCancellation.Token);
 
-            await using var client = await StorageIpcClientConnection.ConnectToDatabaseAsync(
-                root, partition, Guid.NewGuid(), TimeSpan.FromSeconds(10));
-            byte[] request = StorageIpcOperationProtocol.Encode(
-                new StorageIpcOperationEnvelope(
-                    Guid.NewGuid(), StorageIpcOperationCodes.Get, "missing-key"u8.ToArray()));
-            ReadOnlyMemory<byte> response = await client.RequestAsync(request);
-            Assert.Equal(new byte[] { 0, 0, 0, 0, 0 }, response.ToArray());
+            try
+            {
+                await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+                StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                    root, partition, ownerId, Environment.ProcessId));
+
+                await using var client = await StorageIpcClientConnection.ConnectToDatabaseAsync(
+                    root, partition, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+                byte[] request = StorageIpcOperationProtocol.Encode(
+                    new StorageIpcOperationEnvelope(
+                        Guid.NewGuid(), StorageIpcOperationCodes.Get, "missing-key"u8.ToArray()));
+                ReadOnlyMemory<byte> response = await client.RequestAsync(request);
+                Assert.Equal(new byte[] { 0, 0, 0, 0, 0 }, response.ToArray());
+            }
+            finally
+            {
+                serverCancellation.Cancel();
+                await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
         }
         finally
         {
-            serverCancellation.Cancel();
-            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
-            StorageIpcEndpoint.DeleteIfOwned(root, StorageIpcEndpoint.Read(root, partition).OwnerId);
+            StorageIpcEndpoint.DeleteIfOwned(root, ownerId);
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }
