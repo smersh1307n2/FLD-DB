@@ -52,7 +52,8 @@ public sealed class StorageIpcHostProcessTests
 
             restartedHost = StartHost(root, partition);
             StorageIpcEndpointInfo restartedEndpoint =
-                await WaitForEndpointAsync(root, partition, restartedHost, TimeSpan.FromSeconds(45));
+                await WaitForEndpointAsync(
+                    root, partition, restartedHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
             Assert.NotEqual(firstEndpoint.OwnerId, restartedEndpoint.OwnerId);
 
             await using (var reconnected = await StorageIpcClientConnection.ConnectToDatabaseAsync(
@@ -112,7 +113,8 @@ public sealed class StorageIpcHostProcessTests
         string root,
         ulong partition,
         Process host,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        Guid? previousOwnerId = null)
     {
         DateTime deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
@@ -126,7 +128,11 @@ public sealed class StorageIpcHostProcessTests
             }
 
             if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, partition)))
-                return StorageIpcEndpoint.Read(root, partition);
+            {
+                StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, partition);
+                if (previousOwnerId is null || endpoint.OwnerId != previousOwnerId.Value)
+                    return endpoint;
+            }
 
             await Task.Delay(100);
         }
