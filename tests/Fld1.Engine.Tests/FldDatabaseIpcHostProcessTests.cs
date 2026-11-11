@@ -16,6 +16,7 @@ public sealed class FldDatabaseIpcHostProcessTests
         Guid clientId = Guid.NewGuid();
         Guid firstOperation = Guid.NewGuid();
         FldDatabaseIpcOutboxLease firstOutboxLease = default;
+        FldDatabaseIpcSnapshotHandle? firstSnapshot = null;
         FldDatabaseIpcOutboxLease secondOutboxLease = default;
         byte[] recordId = FldDatabase.NewRecordId();
         byte[] value = "durable-database-host"u8.ToArray();
@@ -40,6 +41,11 @@ public sealed class FldDatabaseIpcHostProcessTests
                 Assert.False(first.IsDuplicate);
                 firstOutboxLease = await client.AcquireOutboxLeaseAsync();
                 Assert.Equal(1ul, firstOutboxLease.Epoch);
+
+                firstSnapshot = await client.OpenSnapshotAsync(Guid.NewGuid());
+                FldProviderSnapshotMetadataPage firstSnapshotPage =
+                    await client.ReadSnapshotPageAsync(firstSnapshot, 0, 16);
+                Assert.Single(firstSnapshotPage.Entries);
             }
 
             competingHost = StartHost(root, namespaceId);
@@ -58,6 +64,14 @@ public sealed class FldDatabaseIpcHostProcessTests
             await using (var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, clientId, TimeSpan.FromSeconds(10)))
             {
+                Assert.NotNull(firstSnapshot);
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                    client.ReadSnapshotPageAsync(firstSnapshot!, 0, 16));
+                FldDatabaseIpcSnapshotHandle secondSnapshot =
+                    await client.OpenSnapshotAsync(Guid.NewGuid());
+                Assert.NotEqual(firstSnapshot!.HostGeneration, secondSnapshot.HostGeneration);
+                Assert.True(await client.ReleaseSnapshotAsync(secondSnapshot));
+
                 FldDatabaseIpcWriteResult replay = await client.WriteBatchAsync(
                     firstOperation, 1,
                     [new FldDatabaseIpcMutation(recordId, 1, 0, false, value)]);
@@ -118,6 +132,8 @@ public sealed class FldDatabaseIpcHostProcessTests
             thirdHost = null;
 
             using var recovered = FldDatabase.Open(root, namespaceId);
+            Assert.NotNull(firstSnapshot);
+            Assert.False(recovered.HasProviderSnapshot(firstSnapshot!.SnapshotToken));
             Assert.True(recovered.TryGetBytes(recordId, 1, out byte[]? firstValue));
             Assert.Equal(value, firstValue);
             Assert.True(recovered.TryGetBytes(recordId, 2, out byte[]? secondValue));
