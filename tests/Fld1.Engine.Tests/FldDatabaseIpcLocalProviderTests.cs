@@ -53,7 +53,7 @@ public sealed class FldDatabaseIpcLocalProviderTests
         Assert.True(decoded[0].IsTombstone);
         Assert.Empty(decoded[0].Value);
         Assert.Equal(FldLifecycle.FieldId, decoded[1].FieldId);
-        Assert.Equal(FldLifecycle.DeadValue, decoded[1].Value);
+        Assert.Equal(FldLifecycle.DeadValue.ToArray(), decoded[1].Value);
 
         var invalidLifecycle = recordTombstone with { Value = "not-dead"u8.ToArray() };
         Assert.Throws<ArgumentException>(() =>
