@@ -62,6 +62,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleReadOutboxEntryChunk(clientId, operation.Payload),
             FldDatabaseIpcOperationCodes.AcknowledgeOutbox =>
                 HandleOutboxAcknowledgement(clientId, operation.Payload),
+            FldDatabaseIpcOperationCodes.AcknowledgeProviderOutbox =>
+                HandleProviderOutboxAcknowledgement(clientId, operation.Payload),
             FldDatabaseIpcOperationCodes.ReleaseOutboxLease =>
                 HandleReleaseOutboxLease(clientId, operation.Payload),
             FldDatabaseIpcOperationCodes.OpenSnapshot =>
@@ -208,6 +210,17 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         (ulong leaseEpoch, ulong throughSequence) =
             FldDatabaseIpcProtocol.DecodeOutboxAcknowledgementPayload(payload);
         _database.AcknowledgeOutbox(
+            throughSequence, new OutboxLease(leaseEpoch, clientId.ToArray()));
+        return FldDatabaseIpcProtocol.EncodeOutboxBooleanResponse(true);
+    }
+
+    private byte[] HandleProviderOutboxAcknowledgement(
+        ReadOnlySpan<byte> clientId,
+        ReadOnlyMemory<byte> payload)
+    {
+        (ulong leaseEpoch, ulong throughSequence) =
+            FldDatabaseIpcProtocol.DecodeOutboxAcknowledgementPayload(payload);
+        _database.AcknowledgeProviderOutbox(
             throughSequence, new OutboxLease(leaseEpoch, clientId.ToArray()));
         return FldDatabaseIpcProtocol.EncodeOutboxBooleanResponse(true);
     }
