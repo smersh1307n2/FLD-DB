@@ -122,6 +122,65 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcProtocol.DecodeOutboxBooleanResponse(response);
     }
 
+    /// <summary>
+    /// Opens an immutable provider snapshot. Persist and reuse operationId when retrying
+    /// an uncertain open request on the same Database host generation.
+    /// </summary>
+    public async Task<FldDatabaseIpcSnapshotHandle> OpenSnapshotAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default)
+    {
+        if (operationId == Guid.Empty)
+            throw new ArgumentException("Snapshot-open operation id must be nonzero.", nameof(operationId));
+        ReadOnlyMemory<byte> response = await SendAsync(
+            operationId, FldDatabaseIpcOperationCodes.OpenSnapshot,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeSnapshotOpenResponse(response);
+    }
+
+    /// <summary>Reads a bounded metadata page from the immutable snapshot generation.</summary>
+    public async Task<FldProviderSnapshotMetadataPage> ReadSnapshotPageAsync(
+        FldDatabaseIpcSnapshotHandle handle,
+        int afterIndex,
+        int limit = FldDatabaseIpcProtocol.MaxSnapshotPageEntries,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeSnapshotPagePayload(handle, afterIndex, limit);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReadSnapshotPage,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeSnapshotPageResponse(response);
+    }
+
+    /// <summary>Reads one bounded value slice by the RecordId/FieldId returned in a snapshot page.</summary>
+    public async Task<FldProviderSnapshotValueChunk?> ReadSnapshotValueChunkAsync(
+        FldDatabaseIpcSnapshotHandle handle,
+        ReadOnlyMemory<byte> recordId,
+        ushort fieldId,
+        uint valueOffset = 0,
+        uint maxChunkBytes = (uint)FldDatabaseIpcProtocol.MaxSnapshotValueChunkBytes,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeSnapshotValueChunkPayload(
+            handle, recordId.Span, fieldId, valueOffset, maxChunkBytes);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReadSnapshotValueChunk,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeSnapshotValueChunkResponse(response);
+    }
+
+    /// <summary>Releases a snapshot handle. Repeated release requests are idempotent.</summary>
+    public async Task<bool> ReleaseSnapshotAsync(
+        FldDatabaseIpcSnapshotHandle handle,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeSnapshotReleasePayload(handle);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReleaseSnapshot,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeSnapshotReleaseResponse(response);
+    }
+
     private async Task<ReadOnlyMemory<byte>> SendAsync(
         Guid operationId,
         ushort operationCode,
