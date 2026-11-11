@@ -19,6 +19,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReadSnapshotPage = 0x2109;
     public const ushort ReadSnapshotValueChunk = 0x210A;
     public const ushort ReleaseSnapshot = 0x210B;
+    public const ushort ApplyRemoteBatch = 0x210C;
 }
 
 public sealed record FldDatabaseIpcMutation(
