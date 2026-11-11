@@ -88,6 +88,14 @@ public sealed class StorageIpcConnectionTests
         Assert.Equal("still-usable"u8.ToArray(), response.Span[16..].ToArray());
 
         await admittedClient.DisposeAsync();
+        await using (var replacementClient = await StorageIpcClientConnection.ConnectAsync(
+            pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10)))
+        {
+            ReadOnlyMemory<byte> replacementResponse =
+                await replacementClient.RequestAsync("slot-reused"u8.ToArray());
+            Assert.Equal("slot-reused"u8.ToArray(), replacementResponse.Span[16..].ToArray());
+        }
+
         serverCancellation.Cancel();
         await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
     }
