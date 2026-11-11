@@ -52,6 +52,7 @@ public sealed class WalProvenance
 public sealed class WalLocalOperationReceipt
 {
     public required ushort NamespaceId { get; init; }
+    public required ulong ClientSequence { get; init; }
     public required byte[] ClientId { get; init; } // 16, stable across reconnects
     public required byte[] OperationId { get; init; } // 16, independent of transport RequestId
     public required byte[] Fingerprint { get; init; } // 32, canonical request digest
@@ -164,6 +165,7 @@ public static class GroupCommitCodec
             if (!receiptKeys.Add(key))
                 throw new ArgumentException("Duplicate local operation receipt identity.", nameof(p));
             WriteU16(ms, receipt.NamespaceId);
+            WriteU64(ms, receipt.ClientSequence);
             ms.Write(receipt.ClientId);
             ms.Write(receipt.OperationId);
             ms.Write(receipt.Fingerprint);
@@ -278,6 +280,7 @@ public static class GroupCommitCodec
             for (uint i = 0; i < receiptCount; i++)
             {
                 ushort namespaceId = ReadU16(payload, ref pos);
+                ulong clientSequence = ReadU64(payload, ref pos);
                 byte[] clientId = ReadBytes(payload, ref pos, 16);
                 byte[] operationId = ReadBytes(payload, ref pos, 16);
                 byte[] fingerprint = ReadBytes(payload, ref pos, 32);
@@ -287,6 +290,7 @@ public static class GroupCommitCodec
                 var receipt = new WalLocalOperationReceipt
                 {
                     NamespaceId = namespaceId,
+                    ClientSequence = clientSequence,
                     ClientId = clientId,
                     OperationId = operationId,
                     Fingerprint = fingerprint,
@@ -328,6 +332,8 @@ public static class GroupCommitCodec
             throw new ArgumentException("Receipt ClientId must be a nonzero 16-byte identifier.", parameterName);
         if (receipt.OperationId.Length != 16 || IsZero(receipt.OperationId))
             throw new ArgumentException("Receipt OperationId must be a nonzero 16-byte identifier.", parameterName);
+        if (receipt.ClientSequence == 0)
+            throw new ArgumentException("Receipt ClientSequence must be nonzero.", parameterName);
         if (receipt.Fingerprint.Length != 32)
             throw new ArgumentException("Receipt Fingerprint must be exactly 32 bytes.", parameterName);
         if (receipt.Result.Length > WalConstants.MaxValLen)

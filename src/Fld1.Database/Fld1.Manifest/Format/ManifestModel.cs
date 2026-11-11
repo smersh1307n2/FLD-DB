@@ -55,9 +55,19 @@ public sealed class LocalOperationReceiptEntry
     public required uint NamespaceId { get; init; }
     public required byte[] ClientId { get; init; } // 16
     public required byte[] OperationId { get; init; } // 16
+    public required ulong ClientSequence { get; init; }
     public required byte[] Fingerprint { get; init; } // 32
     public required ulong CommitSeq { get; init; }
     public required byte[] Result { get; init; }
+}
+
+/// <summary>Per-client local operation sequence and acknowledgement watermark.</summary>
+public sealed class LocalOperationClientEntry
+{
+    public required uint NamespaceId { get; init; }
+    public required byte[] ClientId { get; init; } // 16
+    public required ulong LastCommittedSequence { get; init; }
+    public required ulong AcknowledgedThroughSequence { get; init; }
 }
 
 public sealed class ManifestDocument
@@ -71,6 +81,7 @@ public sealed class ManifestDocument
     public required List<ResultClient> ResultClients { get; init; }
     public required List<ProvenanceIndexEntry> ProvenanceIndex { get; init; }
     public List<LocalOperationReceiptEntry> LocalOperationReceipts { get; init; } = [];
+    public List<LocalOperationClientEntry> LocalOperationClients { get; init; } = [];
     public required ulong CoordinatorLeaseEpoch { get; init; }
     public required byte[] CoordinatorSessionId { get; init; } // 16, zeros if none
 
@@ -85,6 +96,7 @@ public sealed class ManifestDocument
         ResultClients = [],
         ProvenanceIndex = [],
         LocalOperationReceipts = [],
+        LocalOperationClients = [],
         CoordinatorLeaseEpoch = 0,
         CoordinatorSessionId = new byte[16]
     };

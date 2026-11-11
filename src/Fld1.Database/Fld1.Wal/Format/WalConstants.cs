@@ -17,6 +17,7 @@ public static class WalConstants
     public const byte KindSnapshotInstall = 0x03;
     public const byte KindApplyCommit = 0x04;
     public const byte KindIdentityStamp = 0x05;
+    public const byte KindLocalOperationAck = 0x06;
 
     public const int MaxMutations = 10_000;
     public const int MaxResults = 10_000;
@@ -36,4 +37,5 @@ public enum WalRecordKind : byte
     SnapshotInstall = WalConstants.KindSnapshotInstall,
     ApplyCommit = WalConstants.KindApplyCommit,
     IdentityStamp = WalConstants.KindIdentityStamp,
+    LocalOperationAck = WalConstants.KindLocalOperationAck,
 }

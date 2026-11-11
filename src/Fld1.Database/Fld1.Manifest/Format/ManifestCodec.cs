@@ -96,12 +96,24 @@ public static class ManifestCodec
         foreach (var receipt in doc.LocalOperationReceipts)
         {
             WriteU32(ms, receipt.NamespaceId);
+            WriteU64(ms, receipt.ClientSequence);
             ms.Write(receipt.ClientId);
             ms.Write(receipt.OperationId);
             ms.Write(receipt.Fingerprint);
             WriteU64(ms, receipt.CommitSeq);
             WriteU32(ms, (uint)receipt.Result.Length);
             ms.Write(receipt.Result);
+        }
+
+        // Per-client sequence state lets an explicit contiguous ACK safely retire receipts.
+        ms.Write("FLOC"u8);
+        WriteU32(ms, (uint)doc.LocalOperationClients.Count);
+        foreach (var client in doc.LocalOperationClients)
+        {
+            WriteU32(ms, client.NamespaceId);
+            ms.Write(client.ClientId);
+            WriteU64(ms, client.LastCommittedSequence);
+            WriteU64(ms, client.AcknowledgedThroughSequence);
         }
 
         var bytes = ms.ToArray();
@@ -212,11 +224,12 @@ public static class ManifestCodec
                 throw new InvalidDataException("unknown manifest extension");
             pos += 4;
             int receiptCount = ReadCount(
-                data, ref pos, minimumEntryBytes: 80, maxCount: 1_000_000, "local operation receipt");
+                data, ref pos, minimumEntryBytes: 88, maxCount: 1_000_000, "local operation receipt");
             localReceipts = new List<LocalOperationReceiptEntry>(receiptCount);
             for (int i = 0; i < receiptCount; i++)
             {
                 uint namespaceId = ReadU32(data, ref pos);
+                ulong clientSequence = ReadU64(data, ref pos);
                 byte[] clientId = ReadBytes(data, ref pos, 16);
                 byte[] operationId = ReadBytes(data, ref pos, 16);
                 byte[] fingerprint = ReadBytes(data, ref pos, 32);
@@ -230,9 +243,31 @@ public static class ManifestCodec
                     NamespaceId = namespaceId,
                     ClientId = clientId,
                     OperationId = operationId,
+                    ClientSequence = clientSequence,
                     Fingerprint = fingerprint,
                     CommitSeq = commitSeq,
                     Result = result
+                });
+            }
+        }
+
+        var localOperationClients = new List<LocalOperationClientEntry>();
+        if (pos < data.Length)
+        {
+            if (data.Length - pos < 8 || !data.Slice(pos, 4).SequenceEqual("FLOC"u8))
+                throw new InvalidDataException("unknown manifest local-operation client extension");
+            pos += 4;
+            int clientCount = ReadCount(
+                data, ref pos, minimumEntryBytes: 40, maxCount: 100_000, "local operation client");
+            localOperationClients = new List<LocalOperationClientEntry>(clientCount);
+            for (int i = 0; i < clientCount; i++)
+            {
+                localOperationClients.Add(new LocalOperationClientEntry
+                {
+                    NamespaceId = ReadU32(data, ref pos),
+                    ClientId = ReadBytes(data, ref pos, 16),
+                    LastCommittedSequence = ReadU64(data, ref pos),
+                    AcknowledgedThroughSequence = ReadU64(data, ref pos)
                 });
             }
         }
@@ -251,6 +286,7 @@ public static class ManifestCodec
             ResultClients = clients,
             ProvenanceIndex = prov,
             LocalOperationReceipts = localReceipts,
+            LocalOperationClients = localOperationClients,
             CoordinatorLeaseEpoch = leaseEpoch,
             CoordinatorSessionId = sessionId
         };
@@ -386,6 +422,7 @@ public static class ManifestCodec
             if (receipt.NamespaceId > 0xFFFF || !namespaces.Contains(receipt.NamespaceId)
                 || receipt.ClientId.Length != 16 || IsZero(receipt.ClientId)
                 || receipt.OperationId.Length != 16 || IsZero(receipt.OperationId)
+                || receipt.ClientSequence == 0
                 || receipt.Fingerprint.Length != 32 || receipt.CommitSeq == 0
                 || receipt.Result.Length > 4 * 1024 * 1024)
                 throw new InvalidDataException("invalid LocalOperationReceiptEntry");
@@ -393,6 +430,32 @@ public static class ManifestCodec
                 + ":" + Convert.ToHexString(receipt.ClientId) + Convert.ToHexString(receipt.OperationId);
             if (!operationReceiptKeys.Add(key))
                 throw new InvalidDataException("duplicate LocalOperationReceiptEntry");
+        }
+
+        var operationClientKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var client in document.LocalOperationClients)
+        {
+            if (client.NamespaceId > 0xFFFF || !namespaces.Contains(client.NamespaceId)
+                || client.ClientId.Length != 16 || IsZero(client.ClientId)
+                || client.AcknowledgedThroughSequence > client.LastCommittedSequence)
+                throw new InvalidDataException("invalid LocalOperationClientEntry");
+            string key = client.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ":" + Convert.ToHexString(client.ClientId);
+            if (!operationClientKeys.Add(key))
+                throw new InvalidDataException("duplicate LocalOperationClientEntry");
+        }
+
+        foreach (var receipt in document.LocalOperationReceipts)
+        {
+            string key = receipt.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ":" + Convert.ToHexString(receipt.ClientId);
+            LocalOperationClientEntry? client = document.LocalOperationClients.FirstOrDefault(
+                item => item.NamespaceId == receipt.NamespaceId
+                    && item.ClientId.AsSpan().SequenceEqual(receipt.ClientId));
+            if (client is null
+                || receipt.ClientSequence <= client.AcknowledgedThroughSequence
+                || receipt.ClientSequence > client.LastCommittedSequence)
+                throw new InvalidDataException("LocalOperationReceiptEntry is outside its client sequence window.");
         }
 
         if (document.CoordinatorSessionId.Length != 16)
