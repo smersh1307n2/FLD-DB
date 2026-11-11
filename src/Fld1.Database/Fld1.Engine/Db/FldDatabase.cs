@@ -691,6 +691,70 @@ public sealed partial class FldDatabase : IDisposable
     /// Atomically applies a field batch and its local IPC receipt under the database
     /// commit lock. An exact retry is detected before staging and has no Outbox side effect.
     /// </summary>
+    /// <summary>
+    /// Atomically appends provider-owned local drafts with caller-stable ChangeId,
+    /// HLC and author epoch plus a durable IPC receipt. OriginSequence remains zero
+    /// until the BIN-SYNC publication freeze assigns it.
+    /// </summary>
+    public FldLocalOperationCommitResult ApplyLocalProviderOperation(
+        IReadOnlyList<FldLocalProviderMutation> mutations,
+        FldLocalOperationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(mutations);
+        ArgumentNullException.ThrowIfNull(receipt);
+        ValidateLocalOperationReceipt(receipt);
+        if (mutations.Count is < 1 or > 4096)
+            throw new ArgumentOutOfRangeException(nameof(mutations), "A provider operation must contain 1..4096 mutations.");
+
+        var seenFields = new HashSet<string>(StringComparer.Ordinal);
+        foreach (FldLocalProviderMutation mutation in mutations)
+        {
+            ArgumentNullException.ThrowIfNull(mutation);
+            if (mutation.RecordId is null || mutation.RecordId.Length != 16 ||
+                mutation.ChangeId is null || mutation.ChangeId.Length != 16)
+                throw new ArgumentException("Provider RecordId and ChangeId must be 16 bytes.", nameof(mutations));
+            if (mutation.RecordId.All(value => value == 0) ||
+                mutation.ChangeId.All(value => value == 0))
+                throw new ArgumentException("Provider RecordId and ChangeId must be nonzero.", nameof(mutations));
+            if (mutation.OriginAuthorEpoch == 0 || mutation.Wall == 0)
+                throw new ArgumentException("Provider draft requires a nonzero author epoch and HLC wall.", nameof(mutations));
+            if (mutation.IsTombstone && mutation.Value.Length != 0)
+                throw new ArgumentException("Provider field tombstone payload must be empty.", nameof(mutations));
+            if (mutation.Value.Length > WalConstants.MaxValLen)
+                throw new ArgumentOutOfRangeException(nameof(mutations), "Provider value exceeds the WAL value limit.");
+
+            string fieldKey = Convert.ToHexString(mutation.RecordId) + ":" +
+                mutation.FieldId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!seenFields.Add(fieldKey))
+                throw new ArgumentException("A provider operation cannot contain the same field more than once.", nameof(mutations));
+        }
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (TryGetLocalOperationReceipt(
+                receipt.ClientId, receipt.OperationId, receipt.ClientSequence,
+                receipt.Fingerprint, out FldLocalOperationCommitResult? prior))
+                return prior!;
+
+            EnsureNextLocalOperationSequence(receipt.ClientId, receipt.ClientSequence);
+            foreach (FldLocalProviderMutation mutation in mutations)
+            {
+                PutWithIdentity(
+                    mutation.RecordId,
+                    mutation.FieldId,
+                    mutation.Value,
+                    mutation.ChangeId,
+                    mutation.OriginAuthorEpoch,
+                    mutation.Wall,
+                    mutation.Logical,
+                    mutation.KeyEpoch,
+                    mutation.IsTombstone);
+            }
+            return CommitWithReceipt(receipt);
+        }
+    }
+
     public FldLocalOperationCommitResult ApplyLocalOperation(
         FldWriteBatch batch,
         FldLocalOperationReceipt receipt)
