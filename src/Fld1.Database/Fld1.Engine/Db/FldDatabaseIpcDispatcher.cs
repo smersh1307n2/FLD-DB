@@ -208,7 +208,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                     MaxActiveSnapshotHandlesPerClient)
                 throw new InvalidOperationException("The active FLD snapshot handle limit has been reached.");
 
-            FldProviderSnapshot snapshot = _database.OpenProviderSnapshot();
+            FldProviderSnapshot snapshot = _database.OpenProviderSnapshotForIpc(clientId, _hostGeneration);
             var handle = new IpcSnapshotHandle(clientId, operationId, snapshot);
             _snapshotHandles.Add(snapshot.Generation, handle);
             _snapshotOpenOperations.Add(operationKey, snapshot.Generation);
