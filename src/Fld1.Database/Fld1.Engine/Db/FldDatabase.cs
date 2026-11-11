@@ -865,6 +865,7 @@ public sealed partial class FldDatabase : IDisposable
                 result = new FldLocalOperationCommitResult
                 {
                     CommitSeq = stored.CommitSeq,
+                    ClientSequence = stored.ClientSequence,
                     Result = stored.Result.ToArray(),
                     IsDuplicate = true
                 };
@@ -956,6 +957,7 @@ public sealed partial class FldDatabase : IDisposable
                     return new FldLocalOperationCommitResult
                     {
                         CommitSeq = prior.CommitSeq,
+                        ClientSequence = prior.ClientSequence,
                         Result = prior.Result.ToArray(),
                         IsDuplicate = true
                     };
@@ -968,6 +970,7 @@ public sealed partial class FldDatabase : IDisposable
                 return new FldLocalOperationCommitResult
                 {
                     CommitSeq = 0,
+                    ClientSequence = 0,
                     Result = Array.Empty<byte>(),
                     IsDuplicate = false
                 };
@@ -1102,6 +1105,7 @@ public sealed partial class FldDatabase : IDisposable
             return new FldLocalOperationCommitResult
             {
                 CommitSeq = commitSeq,
+                ClientSequence = operationReceipt?.ClientSequence ?? 0,
                 Result = operationReceipt?.Result.ToArray() ?? Array.Empty<byte>(),
                 IsDuplicate = false
             };
