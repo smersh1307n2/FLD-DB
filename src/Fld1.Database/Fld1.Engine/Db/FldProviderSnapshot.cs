@@ -468,6 +468,15 @@ public sealed partial class FldDatabase
     public FldProviderSnapshot OpenProviderSnapshot()
         => OpenProviderSnapshotPersisted();
 
+    internal FldProviderSnapshot OpenProviderSnapshotForIpc(Guid clientId, Guid hostGeneration)
+    {
+        if (clientId == Guid.Empty)
+            throw new ArgumentException("IPC client id is required.", nameof(clientId));
+        if (hostGeneration == Guid.Empty)
+            throw new ArgumentException("IPC host generation is required.", nameof(hostGeneration));
+        return OpenProviderSnapshotPersisted(clientId, hostGeneration);
+    }
+
     private static void AddRecordId(
         ReadOnlySpan<byte> recordId,
         HashSet<(ulong Low, ulong High)> seen,
