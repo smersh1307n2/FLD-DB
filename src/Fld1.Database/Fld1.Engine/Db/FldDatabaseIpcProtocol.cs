@@ -52,6 +52,12 @@ public sealed record FldDatabaseIpcOutboxEntryChunk(
     public bool IsComplete => (ulong)ValueOffset + (uint)ValueChunk.Length == ValueLength;
 }
 
+public sealed record FldDatabaseIpcSnapshotHandle(
+    Guid HostGeneration,
+    Guid SnapshotToken,
+    ulong SourceFeedWatermark,
+    int RecordCount);
+
 public static class FldDatabaseIpcProtocol
 {
     private const int WriteHeaderBytes = 12;
@@ -62,6 +68,15 @@ public static class FldDatabaseIpcProtocol
     private const int OutboxChunkRequestBytes = 32;
     private const int OutboxChunkResponseHeaderBytes = 94;
     public const int MaxOutboxChunkBytes = StorageIpcProtocol.MaxPayloadBytes - OutboxChunkResponseHeaderBytes;
+    private const int SnapshotOpenResponseBytes = 44;
+    private const int SnapshotPageRequestBytes = 38;
+    private const int SnapshotPageResponseHeaderBytes = 7;
+    private const int SnapshotPageEntryBytes = 81;
+    private const int SnapshotValueChunkRequestBytes = 58;
+    private const int SnapshotValueChunkResponseHeaderBytes = 13;
+    private const int SnapshotReleasePayloadBytes = 32;
+    public const int MaxSnapshotPageEntries = 256;
+    public const int MaxSnapshotValueChunkBytes = StorageIpcProtocol.MaxPayloadBytes - SnapshotValueChunkResponseHeaderBytes;
 
     public static byte[] EncodeOutboxLeaseResponse(ulong leaseEpoch)
     {
@@ -437,6 +452,305 @@ public static class FldDatabaseIpcProtocol
         return new FldDatabaseIpcReadResult(
             commitSeq, isDuplicate, result[0] == 1,
             result[0] == 1 ? result.Slice(5, (int)rawLength).ToArray() : null);
+    }
+
+    public static byte[] EncodeSnapshotOpenResponse(
+        Guid hostGeneration,
+        Guid snapshotToken,
+        ulong sourceFeedWatermark,
+        int recordCount)
+    {
+        if (hostGeneration == Guid.Empty || snapshotToken == Guid.Empty)
+            throw new ArgumentException("Snapshot host generation and token must be non-empty.");
+        if (recordCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(recordCount));
+        byte[] response = new byte[SnapshotOpenResponseBytes];
+        WriteGuid(hostGeneration, response);
+        WriteGuid(snapshotToken, response.AsSpan(16));
+        BinaryPrimitives.WriteUInt64LittleEndian(response.AsSpan(32), sourceFeedWatermark);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(40), checked((uint)recordCount));
+        return response;
+    }
+
+    public static FldDatabaseIpcSnapshotHandle DecodeSnapshotOpenResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != SnapshotOpenResponseBytes)
+            throw new InvalidDataException("FLD snapshot-open response length is invalid.");
+        Guid hostGeneration = ReadGuid(response.Span);
+        Guid snapshotToken = ReadGuid(response.Span[16..]);
+        ulong watermark = BinaryPrimitives.ReadUInt64LittleEndian(response.Span[32..]);
+        uint recordCount = BinaryPrimitives.ReadUInt32LittleEndian(response.Span[40..]);
+        if (hostGeneration == Guid.Empty || snapshotToken == Guid.Empty || recordCount > int.MaxValue)
+            throw new InvalidDataException("FLD snapshot-open response fields are invalid.");
+        return new FldDatabaseIpcSnapshotHandle(hostGeneration, snapshotToken, watermark, (int)recordCount);
+    }
+
+    public static byte[] EncodeSnapshotPagePayload(
+        FldDatabaseIpcSnapshotHandle handle,
+        int afterIndex,
+        int limit)
+    {
+        ValidateSnapshotHandle(handle);
+        if (afterIndex < 0)
+            throw new ArgumentOutOfRangeException(nameof(afterIndex));
+        if (limit is < 1 or > MaxSnapshotPageEntries)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        byte[] payload = new byte[SnapshotPageRequestBytes];
+        WriteGuid(handle.HostGeneration, payload);
+        WriteGuid(handle.SnapshotToken, payload.AsSpan(16));
+        BinaryPrimitives.WriteInt32LittleEndian(payload.AsSpan(32), afterIndex);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(36), checked((ushort)limit));
+        return payload;
+    }
+
+    public static (Guid HostGeneration, Guid SnapshotToken, int AfterIndex, int Limit)
+        DecodeSnapshotPagePayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != SnapshotPageRequestBytes)
+            throw new InvalidDataException("FLD snapshot-page request length is invalid.");
+        Guid hostGeneration = ReadGuid(payload.Span);
+        Guid snapshotToken = ReadGuid(payload.Span[16..]);
+        int afterIndex = BinaryPrimitives.ReadInt32LittleEndian(payload.Span[32..]);
+        ushort limit = BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[36..]);
+        if (hostGeneration == Guid.Empty || snapshotToken == Guid.Empty ||
+            afterIndex < 0 || limit is < 1 or > MaxSnapshotPageEntries)
+            throw new InvalidDataException("FLD snapshot-page request fields are invalid.");
+        return (hostGeneration, snapshotToken, afterIndex, limit);
+    }
+
+    public static byte[] EncodeSnapshotPageResponse(FldProviderSnapshotMetadataPage page)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        if (page.NextIndex < 0 || page.Entries.Count > MaxSnapshotPageEntries)
+            throw new ArgumentOutOfRangeException(nameof(page));
+        byte[] response = new byte[checked(SnapshotPageResponseHeaderBytes + page.Entries.Count * SnapshotPageEntryBytes)];
+        BinaryPrimitives.WriteInt32LittleEndian(response, page.NextIndex);
+        response[4] = page.HasMore ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(5), checked((ushort)page.Entries.Count));
+        int offset = SnapshotPageResponseHeaderBytes;
+        foreach (FldProviderSnapshotEntryMetadata entry in page.Entries)
+        {
+            ArgumentNullException.ThrowIfNull(entry);
+            if (entry.RecordId is null || entry.RecordId.Length != 16 ||
+                entry.AuthorNodeId is null || entry.ChangeId is null ||
+                (entry.AuthorNodeId.Length is not (0 or 16)) ||
+                (entry.ChangeId.Length is not (0 or 16)))
+                throw new InvalidDataException("FLD snapshot page entry identity fields are invalid.");
+            entry.RecordId.CopyTo(response, offset);
+            offset += 16;
+            BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(offset), entry.FieldId);
+            offset += 2;
+            BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(offset), entry.ValueLength);
+            offset += 4;
+            BinaryPrimitives.WriteUInt64LittleEndian(response.AsSpan(offset), entry.HlcWall);
+            offset += 8;
+            BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(offset), entry.HlcLogical);
+            offset += 4;
+            byte flags = 0;
+            if (entry.IsTombstone) flags |= 1;
+            if (entry.IsRecordTombstone) flags |= 2;
+            if (entry.AuthorNodeId.Length == 16) flags |= 4;
+            if (entry.ChangeId.Length == 16) flags |= 8;
+            response[offset++] = flags;
+            if (entry.AuthorNodeId.Length == 16)
+                entry.AuthorNodeId.CopyTo(response, offset);
+            offset += 16;
+            BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(offset), entry.KeyEpoch);
+            offset += 2;
+            if (entry.ChangeId.Length == 16)
+                entry.ChangeId.CopyTo(response, offset);
+            offset += 16;
+            BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(offset), entry.OriginAuthorEpoch);
+            offset += 4;
+            BinaryPrimitives.WriteUInt64LittleEndian(response.AsSpan(offset), entry.OriginSequence);
+            offset += 8;
+        }
+        return response;
+    }
+
+    public static FldProviderSnapshotMetadataPage DecodeSnapshotPageResponse(ReadOnlyMemory<byte> response)
+    {
+        ReadOnlySpan<byte> span = response.Span;
+        if (span.Length < SnapshotPageResponseHeaderBytes)
+            throw new InvalidDataException("FLD snapshot-page response is truncated.");
+        int nextIndex = BinaryPrimitives.ReadInt32LittleEndian(span);
+        byte hasMore = span[4];
+        ushort count = BinaryPrimitives.ReadUInt16LittleEndian(span[5..]);
+        long expectedLength = SnapshotPageResponseHeaderBytes + (long)count * SnapshotPageEntryBytes;
+        if (nextIndex < 0 || hasMore > 1 || count > MaxSnapshotPageEntries || expectedLength != span.Length)
+            throw new InvalidDataException("FLD snapshot-page response header or length is invalid.");
+        var entries = new FldProviderSnapshotEntryMetadata[count];
+        int offset = SnapshotPageResponseHeaderBytes;
+        for (int i = 0; i < entries.Length; i++)
+        {
+            byte[] recordId = span.Slice(offset, 16).ToArray();
+            offset += 16;
+            ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(span[offset..]);
+            offset += 2;
+            uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(span[offset..]);
+            offset += 4;
+            ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(span[offset..]);
+            offset += 8;
+            uint logical = BinaryPrimitives.ReadUInt32LittleEndian(span[offset..]);
+            offset += 4;
+            byte flags = span[offset++];
+            if ((flags & 0xF0) != 0)
+                throw new InvalidDataException("FLD snapshot-page entry contains unknown flags.");
+            byte[] author = span.Slice(offset, 16).ToArray();
+            offset += 16;
+            ushort keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(span[offset..]);
+            offset += 2;
+            byte[] changeId = span.Slice(offset, 16).ToArray();
+            offset += 16;
+            uint originEpoch = BinaryPrimitives.ReadUInt32LittleEndian(span[offset..]);
+            offset += 4;
+            ulong originSequence = BinaryPrimitives.ReadUInt64LittleEndian(span[offset..]);
+            offset += 8;
+            bool isTombstone = (flags & 1) != 0;
+            bool isRecordTombstone = (flags & 2) != 0;
+            if (isRecordTombstone && valueLength != 0)
+                throw new InvalidDataException("FLD record tombstone snapshot entry cannot carry a value.");
+            entries[i] = new FldProviderSnapshotEntryMetadata(
+                recordId,
+                fieldId,
+                valueLength,
+                wall,
+                logical,
+                (flags & 4) != 0 ? author : Array.Empty<byte>(),
+                keyEpoch,
+                isTombstone,
+                (flags & 8) != 0 ? changeId : Array.Empty<byte>(),
+                originEpoch,
+                originSequence,
+                isRecordTombstone);
+        }
+        return new FldProviderSnapshotMetadataPage(nextIndex, hasMore == 1, entries);
+    }
+
+    public static byte[] EncodeSnapshotValueChunkPayload(
+        FldDatabaseIpcSnapshotHandle handle,
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        uint valueOffset,
+        uint maxChunkBytes)
+    {
+        ValidateSnapshotHandle(handle);
+        if (recordId.Length != 16 || recordId.IndexOfAnyExcept((byte)0) < 0)
+            throw new ArgumentException("Snapshot value RecordId must be a nonzero 16-byte identifier.", nameof(recordId));
+        if (maxChunkBytes == 0 || maxChunkBytes > MaxSnapshotValueChunkBytes)
+            throw new ArgumentOutOfRangeException(nameof(maxChunkBytes));
+        byte[] payload = new byte[SnapshotValueChunkRequestBytes];
+        WriteGuid(handle.HostGeneration, payload);
+        WriteGuid(handle.SnapshotToken, payload.AsSpan(16));
+        recordId.CopyTo(payload.AsSpan(32, 16));
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(48), fieldId);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(50), valueOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(54), maxChunkBytes);
+        return payload;
+    }
+
+    public static (Guid HostGeneration, Guid SnapshotToken, byte[] RecordId, ushort FieldId, uint ValueOffset, uint MaxChunkBytes)
+        DecodeSnapshotValueChunkPayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != SnapshotValueChunkRequestBytes)
+            throw new InvalidDataException("FLD snapshot value-chunk request length is invalid.");
+        Guid hostGeneration = ReadGuid(payload.Span);
+        Guid snapshotToken = ReadGuid(payload.Span[16..]);
+        byte[] recordId = payload.Span.Slice(32, 16).ToArray();
+        ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[48..]);
+        uint valueOffset = BinaryPrimitives.ReadUInt32LittleEndian(payload.Span[50..]);
+        uint maxChunkBytes = BinaryPrimitives.ReadUInt32LittleEndian(payload.Span[54..]);
+        if (hostGeneration == Guid.Empty || snapshotToken == Guid.Empty ||
+            recordId.All(value => value == 0) || maxChunkBytes == 0 ||
+            maxChunkBytes > MaxSnapshotValueChunkBytes)
+            throw new InvalidDataException("FLD snapshot value-chunk request fields are invalid.");
+        return (hostGeneration, snapshotToken, recordId, fieldId, valueOffset, maxChunkBytes);
+    }
+
+    public static byte[] EncodeSnapshotValueChunkResponse(FldProviderSnapshotValueChunk? chunk)
+    {
+        if (chunk is null)
+            return new byte[SnapshotValueChunkResponseHeaderBytes];
+        if ((ulong)chunk.ValueOffset + (uint)chunk.ValueChunk.Length > chunk.ValueLength ||
+            chunk.ValueChunk.Length > MaxSnapshotValueChunkBytes)
+            throw new InvalidDataException("FLD snapshot value-chunk response fields are invalid.");
+        byte[] response = new byte[checked(SnapshotValueChunkResponseHeaderBytes + chunk.ValueChunk.Length)];
+        response[0] = 1;
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(1), chunk.ValueLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(5), chunk.ValueOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(9), checked((uint)chunk.ValueChunk.Length));
+        chunk.ValueChunk.CopyTo(response, SnapshotValueChunkResponseHeaderBytes);
+        return response;
+    }
+
+    public static FldProviderSnapshotValueChunk? DecodeSnapshotValueChunkResponse(ReadOnlyMemory<byte> response)
+    {
+        ReadOnlySpan<byte> span = response.Span;
+        if (span.Length < SnapshotValueChunkResponseHeaderBytes || span[0] > 1)
+            throw new InvalidDataException("FLD snapshot value-chunk response is truncated or invalid.");
+        uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(span[1..]);
+        uint valueOffset = BinaryPrimitives.ReadUInt32LittleEndian(span[5..]);
+        uint chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(span[9..]);
+        if (chunkLength != (uint)(span.Length - SnapshotValueChunkResponseHeaderBytes) ||
+            chunkLength > MaxSnapshotValueChunkBytes ||
+            (ulong)valueOffset + chunkLength > valueLength)
+            throw new InvalidDataException("FLD snapshot value-chunk response length is invalid.");
+        if (span[0] == 0)
+        {
+            if (valueLength != 0 || valueOffset != 0 || chunkLength != 0)
+                throw new InvalidDataException("Missing FLD snapshot value must have an empty response.");
+            return null;
+        }
+        return new FldProviderSnapshotValueChunk(
+            valueLength, valueOffset, span.Slice(SnapshotValueChunkResponseHeaderBytes, (int)chunkLength).ToArray());
+    }
+
+    public static byte[] EncodeSnapshotReleasePayload(FldDatabaseIpcSnapshotHandle handle)
+    {
+        ValidateSnapshotHandle(handle);
+        byte[] payload = new byte[SnapshotReleasePayloadBytes];
+        WriteGuid(handle.HostGeneration, payload);
+        WriteGuid(handle.SnapshotToken, payload.AsSpan(16));
+        return payload;
+    }
+
+    public static (Guid HostGeneration, Guid SnapshotToken) DecodeSnapshotReleasePayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != SnapshotReleasePayloadBytes)
+            throw new InvalidDataException("FLD snapshot release request length is invalid.");
+        Guid hostGeneration = ReadGuid(payload.Span);
+        Guid snapshotToken = ReadGuid(payload.Span[16..]);
+        if (hostGeneration == Guid.Empty || snapshotToken == Guid.Empty)
+            throw new InvalidDataException("FLD snapshot release request fields are invalid.");
+        return (hostGeneration, snapshotToken);
+    }
+
+    public static byte[] EncodeSnapshotReleaseResponse(bool released) => [released ? (byte)1 : (byte)0];
+
+    public static bool DecodeSnapshotReleaseResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != 1 || response.Span[0] > 1)
+            throw new InvalidDataException("FLD snapshot release response is invalid.");
+        return response.Span[0] == 1;
+    }
+
+    private static void ValidateSnapshotHandle(FldDatabaseIpcSnapshotHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        if (handle.HostGeneration == Guid.Empty || handle.SnapshotToken == Guid.Empty)
+            throw new ArgumentException("Snapshot handle identity must be non-empty.", nameof(handle));
+    }
+
+    private static void WriteGuid(Guid value, Span<byte> destination)
+    {
+        if (destination.Length < 16) throw new ArgumentException("GUID destination is too small.", nameof(destination));
+        value.TryWriteBytes(destination[..16], bigEndian: true, out _);
+    }
+
+    private static Guid ReadGuid(ReadOnlySpan<byte> source)
+    {
+        if (source.Length < 16) throw new ArgumentException("GUID source is too small.", nameof(source));
+        return new Guid(source[..16], bigEndian: true);
     }
 
     private static void ValidateMutation(FldDatabaseIpcMutation mutation)
