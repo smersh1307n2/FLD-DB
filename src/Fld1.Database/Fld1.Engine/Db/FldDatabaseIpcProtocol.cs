@@ -25,6 +25,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReadCurrentMetadata = 0x210F;
     public const ushort ReadCurrentValueChunk = 0x2110;
     public const ushort AppendLocalProviderBatchAutoSequence = 0x2111;
+    public const ushort GetLocalAuthor = 0x2112;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -268,6 +269,27 @@ public static class FldDatabaseIpcProtocol
             totalLength,
             valueOffset,
             span.Slice(OutboxChunkResponseHeaderBytes, (int)chunkLength).ToArray());
+    }
+
+    public static byte[] EncodeLocalAuthorResponse(ReadOnlySpan<byte> localAuthor)
+    {
+        if (localAuthor.Length != 16 || IsZeroIdentifier(localAuthor))
+            throw new ArgumentException("FLD LocalAuthor must be a nonzero 16-byte identifier.", nameof(localAuthor));
+        return localAuthor.ToArray();
+    }
+
+    public static byte[] DecodeLocalAuthorResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != 16 || IsZeroIdentifier(response.Span))
+            throw new InvalidDataException("FLD LocalAuthor response must be a nonzero 16-byte identifier.");
+        return response.ToArray();
+    }
+
+    private static bool IsZeroIdentifier(ReadOnlySpan<byte> value)
+    {
+        byte aggregate = 0;
+        foreach (byte part in value) aggregate |= part;
+        return aggregate == 0;
     }
 
     public const int MaxCurrentValueChunkBytes = StorageIpcProtocol.MaxPayloadBytes - 13;

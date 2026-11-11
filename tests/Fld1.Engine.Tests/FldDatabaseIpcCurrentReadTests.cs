@@ -18,6 +18,7 @@ public sealed class FldDatabaseIpcCurrentReadTests
             await using var c=await FldDatabaseIpcClient.ConnectToDatabaseAsync(root,clientId,TimeSpan.FromSeconds(10));
             var first=new FldLocalProviderMutation(record,7,value1,change1,9,1234,5,3);
             await c.AppendLocalProviderBatchAsync(Guid.NewGuid(),1,[first]);
+            Assert.Equal(author, await c.GetLocalAuthorAsync());
             var m=await c.ReadCurrentMetadataAsync(record,7);Assert.NotNull(m);Assert.Equal((uint)value1.Length,m.ValueLength);
             Assert.Equal(1234ul,m.HlcWall);Assert.Equal(5u,m.HlcLogical);Assert.Equal(author,m.AuthorNodeId);Assert.Equal((ushort)3,m.KeyEpoch);
             Assert.False(m.IsTombstone);Assert.Equal(change1,m.ChangeId);Assert.Equal(9u,m.OriginAuthorEpoch);Assert.Equal(0ul,m.OriginSequence);

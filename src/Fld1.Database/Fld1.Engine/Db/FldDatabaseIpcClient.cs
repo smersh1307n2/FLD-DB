@@ -69,6 +69,15 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return response.Span[0] == 1;
     }
 
+    /// <summary>Reads the authoritative LocalAuthor identity configured by the Database Host.</summary>
+    public async Task<byte[]> GetLocalAuthorAsync(CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.GetLocalAuthor,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeLocalAuthorResponse(response);
+    }
+
     public async Task<FldDatabaseIpcCurrentMetadata?> ReadCurrentMetadataAsync(ReadOnlyMemory<byte> recordId,ushort fieldId,CancellationToken cancellationToken=default)
     {
         byte[] p=FldDatabaseIpcProtocol.EncodeReadCurrentMetadataPayload(recordId.Span,fieldId);
