@@ -711,22 +711,10 @@ public sealed partial class FldDatabase : IDisposable
         foreach (FldLocalProviderMutation mutation in mutations)
         {
             ArgumentNullException.ThrowIfNull(mutation);
-            if (mutation.RecordId is null || mutation.RecordId.Length != 16 ||
-                mutation.ChangeId is null || mutation.ChangeId.Length != 16 ||
-                mutation.Value is null)
-                throw new ArgumentException("Provider RecordId and ChangeId must be 16 bytes.", nameof(mutations));
-            if (mutation.RecordId.All(value => value == 0) ||
-                mutation.ChangeId.All(value => value == 0))
-                throw new ArgumentException("Provider RecordId and ChangeId must be nonzero.", nameof(mutations));
+            mutation.Validate();
+
             if (!seenChangeIds.Add(Convert.ToHexString(mutation.ChangeId)))
                 throw new ArgumentException("A provider operation cannot reuse a ChangeId.", nameof(mutations));
-            if (mutation.OriginAuthorEpoch == 0 || mutation.Wall == 0)
-                throw new ArgumentException("Provider draft requires a nonzero author epoch and HLC wall.", nameof(mutations));
-            if (mutation.IsTombstone && mutation.Value.Length != 0)
-                throw new ArgumentException("Provider field tombstone payload must be empty.", nameof(mutations));
-            if (mutation.Value.Length > WalConstants.MaxValLen)
-                throw new ArgumentOutOfRangeException(nameof(mutations), "Provider value exceeds the WAL value limit.");
-
             string fieldKey = Convert.ToHexString(mutation.RecordId) + ":" +
                 mutation.FieldId.ToString(System.Globalization.CultureInfo.InvariantCulture);
             if (!seenFields.Add(fieldKey))
@@ -742,6 +730,9 @@ public sealed partial class FldDatabase : IDisposable
                 return prior!;
 
             EnsureNextLocalOperationSequence(receipt.ClientId, receipt.ClientSequence);
+            if (_dirty.Count != 0)
+                throw new InvalidOperationException(
+                    "Identity-preserving provider IPC requires a clean commit boundary; unrelated uncommitted field writes are present.");
             foreach (FldLocalProviderMutation mutation in mutations)
             {
                 PutWithIdentity(
