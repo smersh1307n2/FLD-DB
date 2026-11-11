@@ -15,6 +15,8 @@ public sealed class FldDatabaseIpcHostProcessTests
         const uint namespaceId = 0x432;
         Guid clientId = Guid.NewGuid();
         Guid firstOperation = Guid.NewGuid();
+        FldDatabaseIpcOutboxLease firstOutboxLease = default;
+        FldDatabaseIpcOutboxLease secondOutboxLease = default;
         byte[] recordId = FldDatabase.NewRecordId();
         byte[] value = "durable-database-host"u8.ToArray();
         Process? firstHost = null;
@@ -36,6 +38,8 @@ public sealed class FldDatabaseIpcHostProcessTests
                     [new FldDatabaseIpcMutation(recordId, 1, 0, false, value)]);
                 Assert.Equal(1ul, first.CommitSeq);
                 Assert.False(first.IsDuplicate);
+                firstOutboxLease = await client.AcquireOutboxLeaseAsync();
+                Assert.Equal(1ul, firstOutboxLease.Epoch);
             }
 
             competingHost = StartHost(root, namespaceId);
@@ -65,6 +69,18 @@ public sealed class FldDatabaseIpcHostProcessTests
                 Assert.True(read.Found);
                 Assert.Equal(value, read.Value);
                 Assert.True(await client.AcknowledgeThroughAsync(2));
+
+                secondOutboxLease = await client.AcquireOutboxLeaseAsync();
+                Assert.Equal(checked(firstOutboxLease.Epoch + 1), secondOutboxLease.Epoch);
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                    client.ReadOutboxEntryChunkAsync(firstOutboxLease, afterSequence: 0));
+                FldDatabaseIpcOutboxEntryChunk? firstOutboxEntry =
+                    await client.ReadOutboxEntryChunkAsync(secondOutboxLease, afterSequence: 0);
+                Assert.NotNull(firstOutboxEntry);
+                Assert.Equal(1ul, firstOutboxEntry.OutboxSeq);
+                Assert.True(await client.AcknowledgeOutboxThroughAsync(
+                    secondOutboxLease, firstOutboxEntry.OutboxSeq));
+                Assert.True(await client.ReleaseOutboxLeaseAsync(secondOutboxLease));
             }
 
             await StopHostAsync(secondHost);
@@ -83,6 +99,18 @@ public sealed class FldDatabaseIpcHostProcessTests
                     Guid.NewGuid(), 3,
                     [new FldDatabaseIpcMutation(recordId, 2, 0, false, "next"u8.ToArray())]);
                 Assert.Equal(4ul, next.CommitSeq);
+
+                FldDatabaseIpcOutboxLease thirdOutboxLease = await client.AcquireOutboxLeaseAsync();
+                Assert.Equal(checked(secondOutboxLease.Epoch + 1), thirdOutboxLease.Epoch);
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                    client.ReadOutboxEntryChunkAsync(secondOutboxLease, afterSequence: 1));
+                FldDatabaseIpcOutboxEntryChunk? nextOutboxEntry =
+                    await client.ReadOutboxEntryChunkAsync(thirdOutboxLease, afterSequence: 1);
+                Assert.NotNull(nextOutboxEntry);
+                Assert.Equal(2ul, nextOutboxEntry.OutboxSeq);
+                Assert.True(await client.AcknowledgeOutboxThroughAsync(
+                    thirdOutboxLease, nextOutboxEntry.OutboxSeq));
+                Assert.True(await client.ReleaseOutboxLeaseAsync(thirdOutboxLease));
             }
 
             await StopHostAsync(thirdHost);
@@ -93,7 +121,8 @@ public sealed class FldDatabaseIpcHostProcessTests
             Assert.Equal(value, firstValue);
             Assert.True(recovered.TryGetBytes(recordId, 2, out byte[]? secondValue));
             Assert.Equal("next"u8.ToArray(), secondValue);
-            Assert.Equal(2, recovered.ReadOutboxBatch(0, 10).Count);
+            Assert.Equal(2ul, recovered.GetOutboxWatermark());
+            Assert.Empty(recovered.ReadOutboxBatch(0, 10));
         }
         finally
         {
