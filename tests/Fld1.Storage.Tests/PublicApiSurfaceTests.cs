@@ -26,12 +26,15 @@ public sealed class PublicApiSurfaceTests
             "Fld1.Storage.Engine.StoragePartitionLease",
             "Fld1.Storage.Engine.StorageSnapshot",
             "Fld1.Storage.Engine.StorageSnapshot+PrefixCursor",
-            "Fld1.Storage.Engine.StorageWriteBatch"
+            "Fld1.Storage.Engine.StorageWriteBatch",
+            "Fld1.Storage.Ipc.StorageIpcFrame",
+            "Fld1.Storage.Ipc.StorageIpcFrameType",
+            "Fld1.Storage.Ipc.StorageIpcProtocol"
         };
 
         Assert.Equal(expected.OrderBy(name => name, StringComparer.Ordinal), actual);
         Assert.All(typeof(StorageDatabase).Assembly.GetExportedTypes(), type =>
-            Assert.Equal("Fld1.Storage.Engine", type.Namespace));
+            Assert.Contains(type.Namespace, new[] { "Fld1.Storage.Engine", "Fld1.Storage.Ipc" }));
         Assert.DoesNotContain(actual, name =>
             name.Contains(".Wal.", StringComparison.Ordinal) ||
             name.Contains(".Integrity.", StringComparison.Ordinal) ||
