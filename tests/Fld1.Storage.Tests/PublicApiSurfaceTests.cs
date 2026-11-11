@@ -29,7 +29,12 @@ public sealed class PublicApiSurfaceTests
             "Fld1.Storage.Engine.StorageWriteBatch",
             "Fld1.Storage.Ipc.StorageIpcFrame",
             "Fld1.Storage.Ipc.StorageIpcFrameType",
-            "Fld1.Storage.Ipc.StorageIpcProtocol"
+            "Fld1.Storage.Ipc.StorageIpcProtocol",
+            "Fld1.Storage.Ipc.StorageIpcClientConnection",
+            "Fld1.Storage.Ipc.StorageIpcRemoteException",
+            "Fld1.Storage.Ipc.StorageIpcRequestContext",
+            "Fld1.Storage.Ipc.StorageIpcRequestHandler",
+            "Fld1.Storage.Ipc.StorageIpcServer"
         };
 
         Assert.Equal(expected.OrderBy(name => name, StringComparer.Ordinal), actual);
