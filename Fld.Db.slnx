@@ -5,6 +5,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Fld1.Storage/Fld1.Storage.csproj" />
+    <Project Path="src/Fld1.Storage.Host/Fld1.Storage.Host.csproj" />
     <Project Path="src/Fld1.Database/Fld1.Database.csproj" />
   </Folder>
   <Folder Name="/tests/">
