@@ -100,6 +100,9 @@ public sealed class FldDatabaseIpcOutboxTests
                 secondLease, afterSequence: 0, maxChunkBytes: chunkSize);
             Assert.NotNull(secondRead);
             Assert.Equal(1ul, secondRead.OutboxSeq);
+            Assert.Equal((uint)FldDatabaseIpcProtocol.MaxOutboxChunkBytes,
+                (uint)secondRead.ValueChunk.Length);
+            Assert.False(secondRead.IsComplete);
 
             Assert.True(await secondClient.AcknowledgeOutboxThroughAsync(secondLease, 1));
             Assert.Equal(1ul, database.GetOutboxWatermark());
