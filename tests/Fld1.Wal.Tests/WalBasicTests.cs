@@ -370,6 +370,7 @@ public class WalBasicTests : IDisposable
             [
                 new WalLocalOperationReceipt
                 {
+                    NamespaceId = 0,
                     ClientId = new byte[16],
                     OperationId = Id(0x33),
                     Fingerprint = new byte[32],
