@@ -113,7 +113,7 @@ public sealed class FldDatabaseProcessOwnershipTests
         byte[] author = Enumerable.Repeat((byte)0x91, 16).ToArray();
         byte[] recordId = FldDatabase.NewRecordId();
         using var db = FldDatabase.Open(directory, namespaceId, author);
-        db.Put(recordId, 7, "single-owner-durable"u8, wall: 91, logical: 0, authorNodeId: author);
+        db.Put(recordId, 7, "single-owner-durable"u8, keyEpoch: 0);
         db.Commit();
 
         File.WriteAllText(ownerPidPath, Environment.ProcessId.ToString(
