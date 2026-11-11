@@ -385,6 +385,27 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Local_operation_ack_codec_roundtrips_and_rejects_invalid_watermarks()
+    {
+        var acknowledgement = new WalLocalOperationAck
+        {
+            NamespaceId = 0x1234,
+            ClientId = Id(0x45),
+            AcknowledgedThroughSequence = 99
+        };
+
+        byte[] encoded = WalLocalOperationAckCodec.Encode(acknowledgement);
+        WalLocalOperationAck decoded = WalLocalOperationAckCodec.Decode(encoded);
+        Assert.Equal(acknowledgement.NamespaceId, decoded.NamespaceId);
+        Assert.Equal(acknowledgement.ClientId, decoded.ClientId);
+        Assert.Equal(acknowledgement.AcknowledgedThroughSequence, decoded.AcknowledgedThroughSequence);
+
+        byte[] invalid = encoded.ToArray();
+        BinaryPrimitives.WriteUInt64LittleEndian(invalid.AsSpan(22), 0);
+        Assert.Throws<InvalidDataException>(() => WalLocalOperationAckCodec.Decode(invalid));
+    }
+
+    [Fact]
     public void Torn_tail_truncates()
     {
         var path = PathOf("torn.log");
