@@ -37,6 +37,7 @@ public sealed record FldDatabaseIpcMutation(
     byte[] Value);
 
 public sealed record FldDatabaseIpcWriteResult(ulong CommitSeq, bool IsDuplicate, int MutationCount);
+public sealed record FldDatabaseIpcAutoSequenceWriteResult(ulong CommitSeq, ulong ClientSequence, bool IsDuplicate, int MutationCount);
 public sealed record FldDatabaseIpcCurrentMetadata(uint ValueLength, ulong HlcWall, uint HlcLogical, byte[] AuthorNodeId, ushort KeyEpoch, bool IsTombstone, byte[] ChangeId, uint OriginAuthorEpoch, ulong OriginSequence);
 public enum FldDatabaseIpcCurrentReadStatus : byte { Missing = 0, Changed = 1, Data = 2 }
 public sealed record FldDatabaseIpcCurrentValueChunk(FldDatabaseIpcCurrentReadStatus Status, uint ValueLength, uint ValueOffset, byte[] ValueChunk)
@@ -82,6 +83,7 @@ public static class FldDatabaseIpcProtocol
     private const int MutationHeaderBytes = 25;
     private const int ReadPayloadBytes = 26;
     private const int ResultHeaderBytes = 13;
+    private const int AutoSequenceResultHeaderBytes = 21;
     private const int MaxMutationCount = 4096;
     private const int OutboxChunkRequestBytes = 32;
     private const int OutboxChunkResponseHeaderBytes = 94;
@@ -520,6 +522,43 @@ public static class FldDatabaseIpcProtocol
         BinaryPrimitives.WriteUInt32LittleEndian(encoded.AsSpan(9), (uint)result.Result.Length);
         result.Result.CopyTo(encoded, ResultHeaderBytes);
         return encoded;
+    }
+
+    public static byte[] EncodeAutoSequenceCommitResult(FldLocalOperationCommitResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (result.CommitSeq == 0 || result.ClientSequence == 0)
+            throw new InvalidDataException("FLD auto-sequence commit result requires durable commit and client sequences.");
+
+        byte[] encoded = new byte[checked(AutoSequenceResultHeaderBytes + result.Result.Length)];
+        BinaryPrimitives.WriteUInt64LittleEndian(encoded, result.CommitSeq);
+        BinaryPrimitives.WriteUInt64LittleEndian(encoded.AsSpan(8), result.ClientSequence);
+        encoded[16] = result.IsDuplicate ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteUInt32LittleEndian(encoded.AsSpan(17), (uint)result.Result.Length);
+        result.Result.CopyTo(encoded, AutoSequenceResultHeaderBytes);
+        return encoded;
+    }
+
+    public static FldDatabaseIpcAutoSequenceWriteResult DecodeAutoSequenceWriteResult(
+        ReadOnlyMemory<byte> encoded)
+    {
+        ReadOnlySpan<byte> span = encoded.Span;
+        if (span.Length < AutoSequenceResultHeaderBytes)
+            throw new InvalidDataException("FLD IPC auto-sequence result is truncated.");
+
+        ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(span);
+        ulong clientSequence = BinaryPrimitives.ReadUInt64LittleEndian(span[8..]);
+        byte duplicate = span[16];
+        uint rawLength = BinaryPrimitives.ReadUInt32LittleEndian(span[17..]);
+        if (commitSeq == 0 || clientSequence == 0 || duplicate > 1 ||
+            rawLength != (uint)(span.Length - AutoSequenceResultHeaderBytes))
+            throw new InvalidDataException("FLD IPC auto-sequence result identity, flags or length are invalid.");
+
+        FldDatabaseIpcWriteResult write = DecodeWriteResult(
+            commitSeq, duplicate == 1,
+            span.Slice(AutoSequenceResultHeaderBytes, (int)rawLength));
+        return new FldDatabaseIpcAutoSequenceWriteResult(
+            commitSeq, clientSequence, duplicate == 1, write.MutationCount);
     }
 
     public static (ulong CommitSeq, bool IsDuplicate, byte[] Result) DecodeCommitResult(ReadOnlyMemory<byte> encoded)
