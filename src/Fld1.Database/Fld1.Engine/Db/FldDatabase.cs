@@ -2143,7 +2143,8 @@ public sealed partial class FldDatabase : IDisposable
                     || prior.CursorEnd != batch.CursorEnd
                     || !prior.BatchDigest.AsSpan().SequenceEqual(batch.BatchDigest)
                     || !prior.RecordsRoot.AsSpan().SequenceEqual(batch.RecordsRoot)
-                    || !prior.PreviousBatchDigest.AsSpan().SequenceEqual(batch.PreviousBatchDigest))
+                    || !prior.PreviousBatchDigest.AsSpan().SequenceEqual(batch.PreviousBatchDigest)
+                    || !prior.ProtocolStateDelta.AsSpan().SequenceEqual(batch.ProtocolStateDelta))
                     throw new InvalidDataException("Conflicting metadata for an already committed remote batch.");
 
                 return new RemoteBatchReceipt
