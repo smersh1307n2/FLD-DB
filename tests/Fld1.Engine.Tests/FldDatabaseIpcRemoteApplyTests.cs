@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Fld1.Engine.Db;
 using Fld1.Engine.Sync;
 using Fld1.Storage.Ipc;
@@ -33,6 +34,11 @@ public sealed class FldDatabaseIpcRemoteApplyTests
 
         Assert.Throws<InvalidDataException>(() =>
             FldDatabaseIpcRemoteApplyProtocol.DecodeRequest(encoded.Concat(new byte[] { 0 }).ToArray()));
+
+        byte[] invalidRelayIndex = encoded.ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(invalidRelayIndex.AsSpan(invalidRelayIndex.Length - 4), 99);
+        Assert.Throws<InvalidDataException>(() =>
+            FldDatabaseIpcRemoteApplyProtocol.DecodeRequest(invalidRelayIndex));
     }
 
     [Fact]
