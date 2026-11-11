@@ -56,6 +56,33 @@ db.ScanRecord(rec, (fieldId, value) => { /* ... */ });
 
 Durability: **Commit** = WAL fsync (manifest watermark deferred). **Checkpoint** = immutable run + manifest.
 
+## Local Database Host and IPC client
+
+`Fld1.Database.Host` is the single-owner process for a FLD namespace. It owns the `FldDatabase` instance and exposes the first Database IPC operations over the local named-pipe / Unix-domain-socket transport implemented by `Fld1.Storage`. It is a separate executable, not a third runtime DLL:
+
+- `Fld1.Storage.dll` remains domain-neutral; `Fld1.Storage.Host` remains Storage-only and does not load Database.
+- `Fld1.Database.dll` contains the FLD field database and references Storage.
+- `Fld1.Database.Host` references Database and owns one namespace/partition while it is running.
+
+Start a Host after building the solution:
+
+```bash
+dotnet build Fld.Db.slnx -c Release
+dotnet run --project src/Fld1.Database.Host/Fld1.Database.Host.csproj -c Release -- /data/mydb 0
+```
+
+The arguments are the database root and decimal namespace id; an optional third argument is the 16-byte local author id encoded as 32 hexadecimal characters. The current Host publishes the partition-0 endpoint in the database root. A second Host cannot own the same database namespace concurrently. Clients must use the same normalized root and partition when discovering that endpoint.
+
+A client keeps one stable `Guid` ClientId across reconnects. Before sending an operation, it must durably retain the `OperationId` and the next contiguous nonzero `ClientSequence`; an ambiguous timeout is retried with the exact same identity and request bytes. A successful response is persisted by the client before it advances the contiguous acknowledgement watermark with `AcknowledgeThroughAsync`. Acknowledged results are retired and late retries are rejected.
+
+The current `FldDatabaseIpcClient` surface is deliberately narrow:
+
+- `WriteBatchAsync` applies all field mutations and its operation receipt in one GROUP_COMMIT/WAL transaction. Deletes carry no value.
+- `ReadFieldAsync` stores the exact read result as a receipt-only operation, so a lost response can be replayed without re-reading a changed value.
+- `AcknowledgeThroughAsync` retires a contiguous prefix of the client's operation receipts after the client has persisted those results.
+
+A receipt-only read does not create an Outbox entry. A write batch creates the ordinary local field changes and Outbox entries exactly once. Outbox delivery/ACK, snapshots, paged reads, remote APPLY and subscriptions are not yet part of this first Database IPC facade; they remain later facade work. See [the Database IPC contract](docs/FLD-DATABASE-IPC.md) for wire and retry details.
+
 ## Build
 
 ```bash
