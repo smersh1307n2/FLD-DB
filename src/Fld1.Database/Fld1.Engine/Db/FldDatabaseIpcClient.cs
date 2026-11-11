@@ -1,4 +1,5 @@
 using Fld1.Storage.Ipc;
+using Fld1.Engine.Sync;
 
 namespace Fld1.Engine.Db;
 
@@ -179,6 +180,24 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
             Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReleaseSnapshot,
             payload, cancellationToken).ConfigureAwait(false);
         return FldDatabaseIpcProtocol.DecodeSnapshotReleaseResponse(response);
+    }
+
+    /// <summary>
+    /// Atomically applies one contextual remote batch. Retry with the same batch identity;
+    /// ApplyJournal, rather than the IPC operation id, is the durable deduplication authority.
+    /// </summary>
+    public async Task<RemoteBatchReceipt> ApplyRemoteBatchAsync(
+        Guid operationId,
+        RemoteBatchCommit batch,
+        CancellationToken cancellationToken = default)
+    {
+        if (operationId == Guid.Empty)
+            throw new ArgumentException("Remote APPLY IPC operation id must be nonzero.", nameof(operationId));
+        byte[] payload = FldDatabaseIpcRemoteApplyProtocol.EncodeRequest(batch);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            operationId, FldDatabaseIpcOperationCodes.ApplyRemoteBatch, payload, cancellationToken)
+            .ConfigureAwait(false);
+        return FldDatabaseIpcRemoteApplyProtocol.DecodeReceipt(response);
     }
 
     private async Task<ReadOnlyMemory<byte>> SendAsync(
