@@ -17,7 +17,7 @@ public static class StorageIpcProtocol
 
     public static async ValueTask WriteAsync(
         Stream stream,
-        in StorageIpcFrame frame,
+        StorageIpcFrame frame,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
