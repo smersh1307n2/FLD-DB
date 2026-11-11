@@ -11,7 +11,7 @@ public sealed class FldDatabaseProcessOwnershipTests
     {
         const uint namespaceId = 91;
         byte[] author = Enumerable.Repeat((byte)0x91, 16).ToArray();
-        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] recordId = Enumerable.Repeat((byte)0x92, 16).ToArray();
         string directory = Path.Combine(Path.GetTempPath(), "fld-owner-" + Guid.NewGuid().ToString("N"));
         string readyPath = Path.Combine(directory, "owner-ready");
         string ownerPidPath = Path.Combine(directory, "owner-pid");
@@ -111,7 +111,7 @@ public sealed class FldDatabaseProcessOwnershipTests
 
         const uint namespaceId = 91;
         byte[] author = Enumerable.Repeat((byte)0x91, 16).ToArray();
-        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] recordId = Enumerable.Repeat((byte)0x92, 16).ToArray();
         using var db = FldDatabase.Open(directory, namespaceId, author);
         db.Put(recordId, 7, "single-owner-durable"u8, keyEpoch: 0);
         db.Commit();
