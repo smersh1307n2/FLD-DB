@@ -2607,7 +2607,8 @@ public sealed partial class FldDatabase : IDisposable
             {
                 try
                 {
-                    _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq));
+                    _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq,
+                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts)));
                     _manifestDirty = false;
                 }
                 catch { /* best-effort on dispose */ }
