@@ -322,6 +322,7 @@ public class WalBasicTests : IDisposable
     {
         var receipt = new WalLocalOperationReceipt
         {
+            NamespaceId = 0,
             ClientId = Id(0x31),
             OperationId = Id(0x32),
             Fingerprint = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray(),
