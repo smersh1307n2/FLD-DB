@@ -25,6 +25,35 @@ public sealed record FldProviderSnapshotPage(
     bool HasMore,
     IReadOnlyList<FldProviderSnapshotEntry> Entries);
 
+public sealed record FldProviderSnapshotEntryMetadata(
+    byte[] RecordId,
+    ushort FieldId,
+    uint ValueLength,
+    ulong HlcWall,
+    uint HlcLogical,
+    byte[] AuthorNodeId,
+    ushort KeyEpoch,
+    bool IsTombstone,
+    byte[] ChangeId,
+    uint OriginAuthorEpoch,
+    ulong OriginSequence,
+    bool IsRecordTombstone);
+
+/// <summary>A bounded metadata-only page from an immutable provider snapshot.</summary>
+public sealed record FldProviderSnapshotMetadataPage(
+    int NextIndex,
+    bool HasMore,
+    IReadOnlyList<FldProviderSnapshotEntryMetadata> Entries);
+
+/// <summary>One bounded value slice from an immutable provider snapshot.</summary>
+public sealed record FldProviderSnapshotValueChunk(
+    uint ValueLength,
+    uint ValueOffset,
+    byte[] ValueChunk)
+{
+    public bool IsComplete => (ulong)ValueOffset + (uint)ValueChunk.Length == ValueLength;
+}
+
 /// <summary>
 /// Immutable, ordered FLD current-state view for BIN-SYNC provider snapshots.
 /// The snapshot retains immutable Run buffers referenced by a durable generation
@@ -45,7 +74,9 @@ public sealed class FldProviderSnapshot : IDisposable
     private ushort[]? _currentFieldIds;
     private int _fieldIndex;
     private int _lastPageStart = -1;
-    private FldProviderSnapshotPage? _lastPage;
+    private int _lastPageLimit;
+    private bool _lastPageIncludesValues;
+    private object? _lastPage;
     private bool _disposed;
 
     internal FldProviderSnapshot(
@@ -104,31 +135,111 @@ public sealed class FldProviderSnapshot : IDisposable
         lock (_gate)
         {
             EnsureOpen();
-            if (afterIndex == _lastPageStart) return _lastPage!;
+            if (afterIndex == _lastPageStart && _lastPageLimit == limit &&
+                _lastPageIncludesValues && _lastPage is FldProviderSnapshotPage cached)
+                return cached;
             if (afterIndex < _nextIndex)
                 ResetCursor();
 
             while (_nextIndex < afterIndex)
             {
-                if (!TryReadNextEntry(out _))
+                if (!TryReadNextEntry(includeValues: true, out _, out _, out _))
                     throw new ArgumentOutOfRangeException(nameof(afterIndex));
             }
 
             int start = _nextIndex;
             var entries = new List<FldProviderSnapshotEntry>(limit);
-            while (entries.Count < limit && TryReadNextEntry(out FldProviderSnapshotEntry? entry))
+            while (entries.Count < limit &&
+                   TryReadNextEntry(includeValues: true, out FldProviderSnapshotEntry? entry, out _, out _))
                 entries.Add(entry!);
 
             bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
                 || _recordIndex < _recordIds!.Length;
             var page = new FldProviderSnapshotPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
+            _lastPageLimit = limit;
+            _lastPageIncludesValues = true;
             _lastPage = page;
             return page;
         }
     }
 
-    private bool TryReadNextEntry(out FldProviderSnapshotEntry? entry)
+    /// <summary>
+    /// Reads a bounded page of snapshot metadata without copying field values.
+    /// Values are retrieved separately with ReadValueChunk so a page cannot exceed
+    /// the IPC frame limit merely because it contains several large fields.
+    /// </summary>
+    public FldProviderSnapshotMetadataPage ReadMetadataPage(int afterIndex, int limit = 256)
+    {
+        if (afterIndex < 0) throw new ArgumentOutOfRangeException(nameof(afterIndex));
+        if (limit <= 0 || limit > 4096) throw new ArgumentOutOfRangeException(nameof(limit));
+        lock (_gate)
+        {
+            EnsureOpen();
+            if (afterIndex == _lastPageStart && _lastPageLimit == limit &&
+                !_lastPageIncludesValues && _lastPage is FldProviderSnapshotMetadataPage cached)
+                return cached;
+            if (afterIndex < _nextIndex)
+                ResetCursor();
+
+            while (_nextIndex < afterIndex)
+            {
+                if (!TryReadNextEntry(includeValues: false, out _, out _, out _))
+                    throw new ArgumentOutOfRangeException(nameof(afterIndex));
+            }
+
+            int start = _nextIndex;
+            var entries = new List<FldProviderSnapshotEntryMetadata>(limit);
+            while (entries.Count < limit &&
+                   TryReadNextEntry(includeValues: false, out _, out FldProviderSnapshotEntryMetadata? metadata, out _))
+                entries.Add(metadata!);
+
+            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
+                || _recordIndex < _recordIds!.Length;
+            var page = new FldProviderSnapshotMetadataPage(_nextIndex, hasMore, entries);
+            _lastPageStart = start;
+            _lastPageLimit = limit;
+            _lastPageIncludesValues = false;
+            _lastPage = page;
+            return page;
+        }
+    }
+
+    /// <summary>
+    /// Copies only the requested value slice from the immutable snapshot generation.
+    /// The RecordId/FieldId pair is resolved against the pinned Runs and overlay;
+    /// no mutable current-database state is consulted.
+    /// </summary>
+    public FldProviderSnapshotValueChunk? ReadValueChunk(
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        uint valueOffset,
+        uint maxChunkBytes)
+    {
+        if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes.", nameof(recordId));
+        if (maxChunkBytes == 0 || maxChunkBytes > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(maxChunkBytes));
+        lock (_gate)
+        {
+            EnsureOpen();
+            if (!TryResolve(recordId.ToArray(), fieldId, includeValues: false,
+                    out _, out _, out ReadOnlyMemory<byte> value))
+                return null;
+            uint valueLength = checked((uint)value.Length);
+            if (valueOffset > valueLength)
+                throw new ArgumentOutOfRangeException(nameof(valueOffset));
+            int offset = checked((int)valueOffset);
+            int length = Math.Min(checked((int)maxChunkBytes), value.Length - offset);
+            return new FldProviderSnapshotValueChunk(
+                valueLength, valueOffset, value.Slice(offset, length).ToArray());
+        }
+    }
+
+    private bool TryReadNextEntry(
+        bool includeValues,
+        out FldProviderSnapshotEntry? entry,
+        out FldProviderSnapshotEntryMetadata? metadata,
+        out ReadOnlyMemory<byte> resolvedValue)
     {
         EnsureOpen();
         while (true)
@@ -138,6 +249,8 @@ public sealed class FldProviderSnapshot : IDisposable
                 if (!TryLoadNextRecord())
                 {
                     entry = null;
+                    metadata = null;
+                    resolvedValue = ReadOnlyMemory<byte>.Empty;
                     return false;
                 }
                 if (_currentFieldIds!.Length == 0)
@@ -145,7 +258,8 @@ public sealed class FldProviderSnapshot : IDisposable
             }
 
             ushort fieldId = _currentFieldIds![_fieldIndex++];
-            if (!TryResolve(_currentRecordId!, fieldId, out entry))
+            if (!TryResolve(_currentRecordId!, fieldId, includeValues,
+                    out entry, out metadata, out resolvedValue))
                 continue;
             _nextIndex = checked(_nextIndex + 1);
             return true;
@@ -160,6 +274,8 @@ public sealed class FldProviderSnapshot : IDisposable
         _currentFieldIds = null;
         _fieldIndex = 0;
         _lastPageStart = -1;
+        _lastPageLimit = 0;
+        _lastPageIncludesValues = false;
         _lastPage = null;
     }
 
@@ -210,15 +326,21 @@ public sealed class FldProviderSnapshot : IDisposable
         return true;
     }
 
-    private bool TryResolve(byte[] recordId, ushort fieldId, out FldProviderSnapshotEntry? entry)
+    private bool TryResolve(
+        byte[] recordId,
+        ushort fieldId,
+        bool includeValues,
+        out FldProviderSnapshotEntry? entry,
+        out FldProviderSnapshotEntryMetadata? metadata,
+        out ReadOnlyMemory<byte> resolvedValue)
     {
         EnsureOpen();
         bool have = false;
         ulong bestWall = 0;
         uint bestLogical = 0;
-        byte[]? bestAuthor = null;
-        byte[]? bestValue = null;
-        byte[]? bestChangeId = null;
+        ReadOnlyMemory<byte> bestAuthor = ReadOnlyMemory<byte>.Empty;
+        ReadOnlyMemory<byte> bestValue = ReadOnlyMemory<byte>.Empty;
+        ReadOnlyMemory<byte> bestChangeId = ReadOnlyMemory<byte>.Empty;
         uint bestOriginEpoch = 0;
         ulong bestOriginSequence = 0;
         ushort bestKeyEpoch = 0;
@@ -243,17 +365,16 @@ public sealed class FldProviderSnapshot : IDisposable
         {
             if (!run.TryGetField(recordId, fieldId, out RunFieldState state) || !state.Found)
                 continue;
-            byte[] author = state.AuthorNodeId.ToArray();
             if (!have || FieldResolver.IsNewer(
-                    state.Wall, state.Logical, author,
-                    bestWall, bestLogical, bestAuthor ?? ReadOnlySpan<byte>.Empty))
+                    state.Wall, state.Logical, state.AuthorNodeId.Span,
+                    bestWall, bestLogical, bestAuthor.Span))
             {
                 have = true;
                 bestWall = state.Wall;
                 bestLogical = state.Logical;
-                bestAuthor = author;
-                bestValue = state.IsTombstone ? Array.Empty<byte>() : state.Value.ToArray();
-                bestChangeId = state.ChangeId.ToArray();
+                bestAuthor = state.AuthorNodeId;
+                bestValue = state.Value;
+                bestChangeId = state.ChangeId;
                 bestOriginEpoch = state.OriginAuthorEpoch;
                 bestOriginSequence = state.OriginSequence;
                 bestKeyEpoch = state.KeyEpoch;
@@ -264,36 +385,68 @@ public sealed class FldProviderSnapshot : IDisposable
         if (!have)
         {
             entry = null;
+            metadata = null;
+            resolvedValue = ReadOnlyMemory<byte>.Empty;
             return false;
         }
 
         bool recordTombstone = false;
         if (fieldId == FldLifecycle.FieldId)
         {
-            if (bestTombstone || bestValue is null)
+            if (bestTombstone || bestValue.IsEmpty)
                 throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
-            if (bestValue.AsSpan().SequenceEqual(FldLifecycle.AliveValue))
+            if (bestValue.Span.SequenceEqual(FldLifecycle.AliveValue))
             {
                 entry = null;
+                metadata = null;
+                resolvedValue = ReadOnlyMemory<byte>.Empty;
                 return false;
             }
-            if (!bestValue.AsSpan().SequenceEqual(FldLifecycle.DeadValue))
+            if (!bestValue.Span.SequenceEqual(FldLifecycle.DeadValue))
                 throw new InvalidDataException("FLD lifecycle value is neither Alive nor Dead.");
             recordTombstone = true;
         }
-        entry = new FldProviderSnapshotEntry(
-            recordId.ToArray(),
-            fieldId,
-            recordTombstone || bestTombstone ? Array.Empty<byte>() : bestValue?.ToArray() ?? Array.Empty<byte>(),
-            bestWall,
-            bestLogical,
-            bestAuthor?.ToArray() ?? Array.Empty<byte>(),
-            recordTombstone ? (ushort)0 : bestKeyEpoch,
-            bestTombstone,
-            bestChangeId?.ToArray() ?? Array.Empty<byte>(),
-            bestOriginEpoch,
-            bestOriginSequence,
-            recordTombstone);
+
+        resolvedValue = recordTombstone || bestTombstone
+            ? ReadOnlyMemory<byte>.Empty
+            : bestValue;
+        byte[] ownedRecordId = recordId.ToArray();
+        byte[] ownedAuthor = bestAuthor.ToArray();
+        byte[] ownedChangeId = bestChangeId.ToArray();
+        if (includeValues)
+        {
+            entry = new FldProviderSnapshotEntry(
+                ownedRecordId,
+                fieldId,
+                resolvedValue.ToArray(),
+                bestWall,
+                bestLogical,
+                ownedAuthor,
+                recordTombstone ? (ushort)0 : bestKeyEpoch,
+                bestTombstone,
+                ownedChangeId,
+                bestOriginEpoch,
+                bestOriginSequence,
+                recordTombstone);
+            metadata = null;
+        }
+        else
+        {
+            entry = null;
+            metadata = new FldProviderSnapshotEntryMetadata(
+                ownedRecordId,
+                fieldId,
+                checked((uint)resolvedValue.Length),
+                bestWall,
+                bestLogical,
+                ownedAuthor,
+                recordTombstone ? (ushort)0 : bestKeyEpoch,
+                bestTombstone,
+                ownedChangeId,
+                bestOriginEpoch,
+                bestOriginSequence,
+                recordTombstone);
+        }
         return true;
     }
 
