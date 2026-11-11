@@ -89,7 +89,14 @@ public sealed class StorageIpcServer
         }
         finally
         {
-            await Task.WhenAll(clients).ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(clients).ConfigureAwait(false);
+            }
+            finally
+            {
+                _clientSlots.Dispose();
+            }
         }
     }
 
