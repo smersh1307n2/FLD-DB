@@ -72,9 +72,9 @@ This ADR is a C-pass implementation decision, not a claim that any of these code
 
 The Database IPC facade exposes the existing generation-pinned provider snapshot; it does not create a second snapshot engine or copy the whole namespace per client.
 
-- OpenSnapshot creates one durable provider snapshot. The operation is idempotent within one host generation by (ClientId, OperationId).
+- OpenSnapshot creates one durable provider snapshot. An uncertain open retry returns the same live handle within one host generation by (ClientId, OperationId); callers use a fresh operation id after releasing that handle.
 - The returned opaque handle contains HostGeneration, SnapshotToken, SourceFeedWatermark and RecordCount. The token maps to the underlying FldProviderSnapshot.Generation.
-- Every page, value-chunk and release request carries the handle. The dispatcher binds it to the authenticated IPC ClientId and its own process-lifetime HostGeneration. A different client cannot use the handle.
+- Every page, value-chunk and release request carries the handle. The dispatcher binds it to the connection-stable IPC ClientId from the transport request context and its own process-lifetime HostGeneration. A different client cannot use the handle.
 - HostGeneration is stable across client reconnects to the same dispatcher and changes when the Database host process/dispatcher restarts. SessionGeneration is per connection and is deliberately not used as the snapshot lifetime.
 - Host restart invalidates IPC handles; they are not restored. Each IPC snapshot writes an atomic ipc.handle descriptor (SnapshotGeneration, ClientId, HostGeneration) before the provider manifest is published. After acquiring the exclusive Database root lease, the host creates its new dispatcher generation and calls PruneStaleIpcProviderSnapshots before publishing the IPC endpoint. This removes only stale IPC-owned generations and incomplete unpublished directories; non-IPC provider snapshots, including BIN-SYNC FULL_REPLACE generations, are preserved.
 - Graceful dispatcher disposal releases every active IPC snapshot. Abrupt process termination leaves the durable provider manifest in place until the next host acquires the root lease and prunes stale generations.
