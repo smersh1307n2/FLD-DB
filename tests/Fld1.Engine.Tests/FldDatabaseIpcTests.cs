@@ -96,6 +96,7 @@ public sealed class FldDatabaseIpcTests
             shutdown.Cancel();
             try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            database.Dispose();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }
