@@ -73,7 +73,9 @@ The current branch already exposes immutable provider snapshots through operatio
 
 The returned handle binds HostGeneration and SnapshotToken; every page, value-chunk and release request must present both. Handles are client-bound, host-generation-bound and capped at 64 per Host / 4 per Client. Host disposal releases every remaining handle. Metadata pages are bounded to 256 entries; values are read separately in bounded chunks. The immutable snapshot generation and its source-feed watermark are captured at open, so page traversal cannot drift as live writes arrive.
 
-The host creates the snapshot from its persisted provider-snapshot mechanism; IPC does not expose raw FldDatabase or borrowed storage views. Consumers must release handles in finally and discard handles after a Host-generation change.
+The host creates the snapshot from its provider-snapshot mechanism; IPC does not expose raw FldDatabase or borrowed storage views. Consumers must release handles in finally and discard handles after a Host-generation change.
+
+**Important lifetime boundary:** the IPC handle and the `(ClientId, OpenOperationId) → SnapshotToken` replay map are owned by the live `FldDatabaseIpcDispatcher`, not by a durable IPC handle registry. Dispatcher disposal releases all remaining handles and clears the replay map; a new dispatcher receives a new HostGeneration. Therefore a handle is reconnect-safe only while the same Host generation remains alive. It is not a restart-resumable token, and replaying the same OpenOperationId after Host restart can open a new snapshot at a new feed watermark. The client must detect HostGeneration changes, discard the old token/cursor, and restart snapshot enumeration from a newly opened snapshot. Do not advertise IPC snapshot open as exactly-once across Host restart. This is distinct from durable local write receipts, which are stored in FLD WAL and survive Host restart.
 
 ## Provider current-state reads and feed watermark (snapshot API; implemented)
 
@@ -118,8 +120,8 @@ Implemented in the current facade:
 - identity-preserving local provider draft batches with stable ChangeId/HLC/OriginAuthorEpoch and atomic Outbox + receipt commit;
 - receipt-backed ReadField;
 - lease-fenced Outbox acquisition, bounded entry chunks, durable Outbox high-watermark query, Outbox ACK and release;
-- immutable persisted provider snapshots over IPC: idempotent open, bounded metadata pages, bounded value chunks, client/Host-generation fencing and release;
-- retry and recovery across Host restart, including Outbox lease epoch fencing;
+- immutable provider snapshots over IPC: idempotent open within one live Host generation, bounded metadata pages/value chunks, client/Host-generation fencing and release (handles are not restart-resumable);
+- retry/recovery across Host restart for durable local write receipts and Outbox lease epoch fencing; IPC snapshot handles themselves are invalidated on Host restart;
 - single-owner Host endpoint publication.
 
 Not exposed by this facade yet:
