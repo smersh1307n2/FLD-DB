@@ -48,11 +48,21 @@ public sealed class WalProvenance
     public required byte IsFirst { get; init; }
 }
 
+/// <summary>Stable idempotency receipt for one local Database IPC operation.</summary>
+public sealed class WalLocalOperationReceipt
+{
+    public required byte[] ClientId { get; init; } // 16, stable across reconnects
+    public required byte[] OperationId { get; init; } // 16, independent of transport RequestId
+    public required byte[] Fingerprint { get; init; } // 32, canonical request digest
+    public required byte[] Result { get; init; } // bounded opaque response
+}
+
 public sealed class GroupCommitPayload
 {
     public required List<WalMutation> Mutations { get; init; }
     public required List<WalResult> Results { get; init; }
     public required List<WalProvenance> Provenance { get; init; }
+    public List<WalLocalOperationReceipt> LocalOperationReceipts { get; init; } = [];
 }
 
 /// <summary>
@@ -69,12 +79,14 @@ public static class GroupCommitCodec
             throw new ArgumentException("ResultsCount limit");
         if (p.Provenance.Count > WalConstants.MaxProvenance)
             throw new ArgumentException("ProvenanceCount limit");
+        if (p.LocalOperationReceipts.Count > WalConstants.MaxResults)
+            throw new ArgumentException("LocalOperationReceiptCount limit");
 
         using var ms = new MemoryStream();
         WriteU32(ms, (uint)p.Mutations.Count);
         WriteU32(ms, (uint)p.Results.Count);
         WriteU32(ms, (uint)p.Provenance.Count);
-        WriteU32(ms, 3); // v3 adds immutable OperationOrigin to every field mutation
+        WriteU32(ms, 4); // v4 adds stable local-operation receipts
 
         Span<byte> zeroChangeId = stackalloc byte[16];
         zeroChangeId.Clear();
@@ -141,6 +153,17 @@ public static class GroupCommitCodec
             ms.WriteByte(0);
         }
 
+        WriteU32(ms, (uint)p.LocalOperationReceipts.Count);
+        foreach (var receipt in p.LocalOperationReceipts)
+        {
+            ValidateReceipt(receipt, nameof(p));
+            ms.Write(receipt.ClientId);
+            ms.Write(receipt.OperationId);
+            ms.Write(receipt.Fingerprint);
+            WriteU32(ms, (uint)receipt.Result.Length);
+            ms.Write(receipt.Result);
+        }
+
         var bytes = ms.ToArray();
         if (bytes.Length > WalConstants.MaxPayloadLen)
             throw new ArgumentException("payload > 16 MB");
@@ -154,7 +177,7 @@ public static class GroupCommitCodec
         uint resCount = ReadU32(payload, ref pos);
         uint provCount = ReadU32(payload, ref pos);
         uint bodyVer = ReadU32(payload, ref pos);
-        if (bodyVer is not (1 or 2 or 3))
+        if (bodyVer is not (1 or 2 or 3 or 4))
             throw new InvalidDataException($"unsupported GROUP_COMMIT body ver={bodyVer}");
         if (mutCount > WalConstants.MaxMutations || resCount > WalConstants.MaxResults
             || provCount > WalConstants.MaxProvenance)
@@ -237,13 +260,67 @@ public static class GroupCommitCodec
             });
         }
 
+        var localReceipts = new List<WalLocalOperationReceipt>();
+        if (bodyVer >= 4)
+        {
+            uint receiptCount = ReadU32(payload, ref pos);
+            if (receiptCount > WalConstants.MaxResults)
+                throw new InvalidDataException("local operation receipt count limit");
+            localReceipts = new List<WalLocalOperationReceipt>((int)receiptCount);
+            for (uint i = 0; i < receiptCount; i++)
+            {
+                byte[] clientId = ReadBytes(payload, ref pos, 16);
+                byte[] operationId = ReadBytes(payload, ref pos, 16);
+                byte[] fingerprint = ReadBytes(payload, ref pos, 32);
+                uint resultLength = ReadU32(payload, ref pos);
+                if (resultLength > WalConstants.MaxValLen)
+                    throw new InvalidDataException("local operation receipt result length limit");
+                var receipt = new WalLocalOperationReceipt
+                {
+                    ClientId = clientId,
+                    OperationId = operationId,
+                    Fingerprint = fingerprint,
+                    Result = ReadBytes(payload, ref pos, (int)resultLength)
+                };
+                try { ValidateReceipt(receipt, "payload"); }
+                catch (ArgumentException exception)
+                {
+                    throw new InvalidDataException("invalid local operation receipt", exception);
+                }
+                localReceipts.Add(receipt);
+            }
+        }
+
         if (pos != payload.Length)
             throw new InvalidDataException($"trailing bytes pos={pos} len={payload.Length}");
 
         return new GroupCommitPayload
         {
-            Mutations = mutations, Results = results, Provenance = provenance
+            Mutations = mutations,
+            Results = results,
+            Provenance = provenance,
+            LocalOperationReceipts = localReceipts
         };
+    }
+
+    private static void ValidateReceipt(WalLocalOperationReceipt receipt, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        if (receipt.ClientId.Length != 16 || IsZero(receipt.ClientId))
+            throw new ArgumentException("Receipt ClientId must be a nonzero 16-byte identifier.", parameterName);
+        if (receipt.OperationId.Length != 16 || IsZero(receipt.OperationId))
+            throw new ArgumentException("Receipt OperationId must be a nonzero 16-byte identifier.", parameterName);
+        if (receipt.Fingerprint.Length != 32)
+            throw new ArgumentException("Receipt Fingerprint must be exactly 32 bytes.", parameterName);
+        if (receipt.Result.Length > WalConstants.MaxValLen)
+            throw new ArgumentException("Receipt result exceeds the WAL value limit.", parameterName);
+    }
+
+    private static bool IsZero(ReadOnlySpan<byte> value)
+    {
+        byte aggregate = 0;
+        foreach (byte part in value) aggregate |= part;
+        return aggregate == 0;
     }
 
     private static void WriteU16(Stream s, ushort v)
