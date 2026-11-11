@@ -89,8 +89,9 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         uint maxChunkBytes = 256 * 1024,
         CancellationToken cancellationToken = default)
     {
+        ulong requestCursor = entrySequence == 0 ? afterSequence : entrySequence - 1;
         byte[] payload = FldDatabaseIpcProtocol.EncodeReadOutboxEntryChunkPayload(
-            lease, afterSequence, entrySequence, valueOffset, maxChunkBytes);
+            lease, requestCursor, entrySequence, valueOffset, maxChunkBytes);
         ReadOnlyMemory<byte> response = await SendAsync(
             Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReadOutboxEntryChunk,
             payload, cancellationToken).ConfigureAwait(false);
