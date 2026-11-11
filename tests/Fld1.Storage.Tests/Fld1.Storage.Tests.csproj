@@ -15,5 +15,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Fld1.Storage/Fld1.Storage.csproj" />
+    <ProjectReference Include="../../src/Fld1.Storage.Host/Fld1.Storage.Host.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>
