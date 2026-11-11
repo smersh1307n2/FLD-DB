@@ -222,7 +222,7 @@ public sealed class FldProviderSnapshot : IDisposable
         lock (_gate)
         {
             EnsureOpen();
-            if (!TryResolve(recordId.ToArray(), fieldId, includeValues: false,
+            if (!TryResolve(recordId.ToArray(), fieldId, includeValues: false, includeMetadata: false,
                     out _, out _, out ReadOnlyMemory<byte> value))
                 return null;
             uint valueLength = checked((uint)value.Length);
@@ -258,7 +258,7 @@ public sealed class FldProviderSnapshot : IDisposable
             }
 
             ushort fieldId = _currentFieldIds![_fieldIndex++];
-            if (!TryResolve(_currentRecordId!, fieldId, includeValues,
+            if (!TryResolve(_currentRecordId!, fieldId, includeValues, includeMetadata: !includeValues,
                     out entry, out metadata, out resolvedValue))
                 continue;
             _nextIndex = checked(_nextIndex + 1);
@@ -330,6 +330,7 @@ public sealed class FldProviderSnapshot : IDisposable
         byte[] recordId,
         ushort fieldId,
         bool includeValues,
+        bool includeMetadata,
         out FldProviderSnapshotEntry? entry,
         out FldProviderSnapshotEntryMetadata? metadata,
         out ReadOnlyMemory<byte> resolvedValue)
@@ -430,7 +431,7 @@ public sealed class FldProviderSnapshot : IDisposable
                 recordTombstone);
             metadata = null;
         }
-        else
+        else if (includeMetadata)
         {
             entry = null;
             metadata = new FldProviderSnapshotEntryMetadata(
@@ -446,6 +447,11 @@ public sealed class FldProviderSnapshot : IDisposable
                 bestOriginEpoch,
                 bestOriginSequence,
                 recordTombstone);
+        }
+        else
+        {
+            entry = null;
+            metadata = null;
         }
         return true;
     }
