@@ -67,3 +67,21 @@ A later optimization may replace the run index with a generic Storage page curso
 - [ ] Exact-head build plus crash/restart, mixed-v1/v2, cutover and identity-retention T-pass.
 
 This ADR is a C-pass implementation decision, not a claim that any of these code gates have already passed.
+
+## 6. IPC snapshot handle contract — 2026-11-11
+
+The Database IPC facade exposes the existing generation-pinned provider snapshot; it does not create a second snapshot engine or copy the whole namespace per client.
+
+- OpenSnapshot creates one durable provider snapshot. The operation is idempotent within one host generation by (ClientId, OperationId).
+- The returned opaque handle contains HostGeneration, SnapshotToken, SourceFeedWatermark and RecordCount. The token maps to the underlying FldProviderSnapshot.Generation.
+- Every page, value-chunk and release request carries the handle. The dispatcher binds it to the authenticated IPC ClientId and its own process-lifetime HostGeneration. A different client cannot use the handle.
+- HostGeneration is stable across client reconnects to the same dispatcher and changes when the Database host process/dispatcher restarts. SessionGeneration is per connection and is deliberately not used as the snapshot lifetime.
+- Host restart invalidates IPC handles; they are not restored. The host acquires the exclusive Database root lease, then calls PruneProviderSnapshotsExcept before publishing the IPC endpoint. This removes snapshot pins left by a crashed host. A host that also owns other durable snapshot consumers must pass the union of their recovered active generations instead of an empty set; pruning an empty set is valid only for the standalone IPC host.
+- Graceful dispatcher disposal releases every active IPC snapshot. Abrupt process termination leaves the durable provider manifest in place until the next host acquires the root lease and prunes stale generations.
+- Snapshot pages are metadata-only and capped at 256 entries. Field values are fetched separately by (RecordId, FieldId, ValueOffset) in bounded chunks. This keeps page responses independent of value size and never materializes a page's full value payloads.
+- The provider cursor retry cache is keyed by (afterIndex, limit, includeValues). A retry of the same page is byte-identical; a different page limit recomputes from the requested absolute entry offset.
+- Limits are four active snapshots per client and 64 per dispatcher. Release is idempotent. The first implementation deliberately has no idle timeout; clients must release handles, and the host restart is the crash-recovery boundary.
+- The public API remains in Fld1.Database.dll; no third FLD runtime DLL and no FLD-to-BIN-SYNC dependency are introduced.
+
+Required IPC tests: metadata-only pages, chunk boundaries, same-cursor/different-limit retry, snapshot stability across writes/checkpoint/compaction, open-operation retry, cross-client rejection, same-client reconnect, idempotent release, and host-restart invalidation/pruning.
+
