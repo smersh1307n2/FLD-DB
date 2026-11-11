@@ -389,7 +389,8 @@ public static class ManifestCodec
                 || receipt.Fingerprint.Length != 32 || receipt.CommitSeq == 0
                 || receipt.Result.Length > 4 * 1024 * 1024)
                 throw new InvalidDataException("invalid LocalOperationReceiptEntry");
-            string key = Convert.ToHexString(receipt.ClientId) + Convert.ToHexString(receipt.OperationId);
+            string key = receipt.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ":" + Convert.ToHexString(receipt.ClientId) + Convert.ToHexString(receipt.OperationId);
             if (!operationReceiptKeys.Add(key))
                 throw new InvalidDataException("duplicate LocalOperationReceiptEntry");
         }
