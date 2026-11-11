@@ -49,6 +49,8 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | AppendLocalProviderBatchAutoSequence | 0x2111 | Versioned identity-preserving local provider batch with ClientSequence = 0; Host allocates the next contiguous sequence under the commit lock and returns it with CommitSeq, duplicate flag and mutation count |
 | GetLocalAuthor | 0x2113 | empty payload; response is the authoritative nonzero LocalAuthor (16 bytes) configured by the Database Host |
 | CommitPublishedOrigins | 0x2114 | Versioned bounded list of RecordId/FieldId/ChangeId/OriginAuthorEpoch/OriginSequence stamps; identity-only and idempotent |
+| TryGetMetadataStoreOwnedPublicationCutover | 0x2115 | empty payload; returns Exists (u8) + NodeOutboxHighWatermark (u64) |
+| EnableMetadataStoreOwnedPublication | 0x2116 | NodeOutboxHighWatermark (u64); immutable durable cutover, empty response |
 | ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
 | ReadCurrentValueChunk | 0x2110 | RecordId (16 bytes), FieldId (u16), expected ChangeId (16 bytes), ValueOffset (u32), MaxChunkBytes (u32); returns Data, Missing or Changed plus one bounded value slice |
 
@@ -118,6 +120,12 @@ This variant closes the response-loss window without asking an async provider to
 
 The operation does not append an Outbox row, change field value/HLC, or create a second pending journal. It updates only the current-state identity projection. The IPC call itself is asynchronous and is exposed by the sample's `IAsyncProviderPublishedOriginStore` capability. This operation alone does not create a cross-store transaction with BIN-SYNC Metadata Store; the async composed commit barrier remains a separate coordinator gate.
 
+### Metadata-Store-owned publication cutover (0x2115–0x2116; implemented)
+
+The cutover marker is stored durably in the FLD storage-core keyspace under a namespace-scoped key. It is an immutable single watermark, not a second operation journal. `TryGetMetadataStoreOwnedPublicationCutover` returns whether the marker exists and the Node Outbox high-watermark captured by the coordinator. `EnableMetadataStoreOwnedPublication` is idempotent for the same watermark and rejects a conflicting value.
+
+The Host permits first-time enablement only when the FLD local draft horizon is empty and the provider Outbox high-watermark equals its acknowledged-through cursor. This prevents switching publication authority while local changes remain unpublished. The marker survives Host restart and is exposed through the sample `IAsyncProviderPublicationMode` capability. It does not implement author-epoch closure, FULL_REPLACE, GC, or a cross-store transaction; those remain separate capabilities.
+
 ### Host identity discovery (0x2113; implemented)
 
 GetLocalAuthor returns the Database Host's configured nonzero LocalAuthor identity. An IPC-backed provider must compare it with the BIN-SYNC local replica identity before accepting local drafts. The Host remains authoritative when writing provider mutations; the IPC caller cannot select or override LocalAuthor.
@@ -148,6 +156,7 @@ Implemented in the current facade:
 - identity-preserving local provider draft batches with stable ChangeId/HLC/OriginAuthorEpoch and atomic Outbox + receipt commit, including Host-assigned receipt sequencing for retry-safe async callers;
 - authoritative Host LocalAuthor discovery for IPC client identity validation;
 - idempotent ChangeId-bound publication-origin stamping in the current-state projection;
+- immutable namespace-scoped Metadata-Store-owned publication cutover, guarded by an empty local draft horizon and fully acknowledged provider Outbox;
 - receipt-backed ReadField;
 - lease-fenced Outbox acquisition, bounded entry chunks, durable Outbox high-watermark query, Outbox ACK and release;
 - immutable provider snapshots over IPC: idempotent open within one live Host generation, bounded metadata pages/value chunks, client/Host-generation fencing and release (handles are not restart-resumable);
@@ -157,9 +166,9 @@ Implemented in the current facade:
 
 Not exposed by this facade yet:
 
-- author-epoch/publication-mode operations, FULL_REPLACE and snapshot-state capability operations;
+- author-epoch closure, FULL_REPLACE and snapshot-state capability operations;
 - subscriptions or streaming change feeds;
 - multi-entry Outbox aggregation beyond the one-entry chunk cursor;
-- a complete asynchronous synchronization coordinator and cross-call commit-lease composition. The sample async provider and contextual remote-apply adapter are implemented in BIN-SYNC, but optional publication cutover, author-epoch closure, snapshot-state, FULL_REPLACE and GC capabilities remain unavailable.
+- a complete asynchronous synchronization coordinator and cross-call commit-lease composition. The sample async provider and contextual remote-apply adapter are implemented in BIN-SYNC, but author-epoch closure, snapshot-state, FULL_REPLACE and GC capabilities remain unavailable.
 
 Do not emulate remote APPLY or missing provider capabilities by issuing separate Put/Commit requests: that would lose remote authorship/causality and expose intermediate state. They require explicit facade operations and their own durable contracts. The synchronous BIN-SYNC IDataProvider contract must not call this async client through sync-over-async; a separate async provider/coordinator boundary is required before production process isolation.
