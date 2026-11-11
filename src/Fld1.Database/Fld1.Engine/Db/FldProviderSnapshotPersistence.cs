@@ -14,6 +14,11 @@ public sealed partial class FldDatabase
     private const int ProviderSnapshotHeaderSize = 40;
     private const string ProviderSnapshotManifestName = "snapshot.manifest";
     private const string ProviderSnapshotOverlayName = "overlay.fld1";
+    private const string ProviderSnapshotIpcDescriptorName = "ipc.handle";
+    private const uint ProviderSnapshotIpcDescriptorMagic = 0x31435049; // "IPC1"
+    private const ushort ProviderSnapshotIpcDescriptorVersion = 1;
+    private const int ProviderSnapshotIpcDescriptorPayloadSize = 56;
+    private const int ProviderSnapshotIpcDescriptorSize = 88;
 
     private sealed record ProviderSnapshotManifest(
         Guid Generation,
@@ -22,8 +27,18 @@ public sealed partial class FldDatabase
         ulong[] RunIds,
         byte[]? OverlayHash);
 
-    private FldProviderSnapshot OpenProviderSnapshotPersisted()
+    private sealed record ProviderSnapshotIpcDescriptor(
+        Guid Generation,
+        Guid ClientId,
+        Guid HostGeneration);
+
+    private FldProviderSnapshot OpenProviderSnapshotPersisted(
+        Guid? ipcClientId = null,
+        Guid? ipcHostGeneration = null)
     {
+        if (ipcClientId.HasValue != ipcHostGeneration.HasValue ||
+            (ipcClientId.HasValue && (ipcClientId.Value == Guid.Empty || ipcHostGeneration!.Value == Guid.Empty)))
+            throw new ArgumentException("IPC snapshot ownership requires nonzero client and host-generation ids.");
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)
         {
@@ -35,6 +50,10 @@ public sealed partial class FldDatabase
 
             try
             {
+                if (ipcClientId.HasValue)
+                    WriteProviderSnapshotIpcDescriptor(
+                        snapshotDirectory, generation, ipcClientId.Value, ipcHostGeneration!.Value);
+
                 ulong[] runIds = new ulong[_runs.Count];
                 var readers = new List<RunReader>(_runs.Count + 1);
                 for (int i = 0; i < _runs.Count; i++)
@@ -311,6 +330,75 @@ public sealed partial class FldDatabase
     /// Removes provider snapshot generations not referenced by durable sender progress.
     /// Call only after the host has recovered the active FULL_REPLACE token set.
     /// </summary>
+    /// <summary>
+    /// Removes IPC-owned snapshot generations from older host generations and incomplete
+    /// unpublished snapshot directories. Non-IPC provider snapshots are preserved.
+    /// Call only after acquiring the exclusive Database root lease.
+    /// </summary>
+    public void PruneStaleIpcProviderSnapshots(Guid currentHostGeneration)
+    {
+        if (currentHostGeneration == Guid.Empty)
+            throw new ArgumentException("Current host generation is required.", nameof(currentHostGeneration));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            string root = Path.Combine(_dbDir, "snapshots");
+            if (!Directory.Exists(root)) return;
+            foreach (string directory in Directory.EnumerateDirectories(root))
+            {
+                string name = Path.GetFileName(directory);
+                string manifestPath = Path.Combine(directory, ProviderSnapshotManifestName);
+                string descriptorPath = Path.Combine(directory, ProviderSnapshotIpcDescriptorName);
+                bool hasManifest = File.Exists(manifestPath);
+                bool hasIpcDescriptor = File.Exists(descriptorPath);
+
+                // The manifest is the final publication step. A directory without it
+                // cannot have been returned as a valid provider snapshot generation.
+                if (!hasManifest)
+                {
+                    DeleteProviderSnapshotDirectory(directory);
+                    continue;
+                }
+
+                // Preserve durable snapshots owned by non-IPC providers (for example
+                // BIN-SYNC FULL_REPLACE). Only IPC-marked generations are host-scoped.
+                if (!hasIpcDescriptor)
+                    continue;
+
+                bool keep = false;
+                try
+                {
+                    if (Guid.TryParseExact(name, "N", out Guid directoryGeneration))
+                    {
+                        ProviderSnapshotIpcDescriptor descriptor =
+                            DecodeProviderSnapshotIpcDescriptor(File.ReadAllBytes(descriptorPath));
+                        keep = descriptor.Generation == directoryGeneration &&
+                            descriptor.HostGeneration == currentHostGeneration;
+                    }
+                }
+                catch
+                {
+                    // An invalid IPC descriptor cannot identify a resumable handle.
+                    keep = false;
+                }
+
+                if (!keep)
+                    DeleteProviderSnapshotDirectory(directory);
+            }
+            GcOrphanRuns();
+        }
+    }
+
+    private void DeleteProviderSnapshotDirectory(string directory)
+    {
+        string name = Path.GetFileName(directory);
+        if (Guid.TryParseExact(name, "N", out Guid generation) &&
+            _providerSnapshots.Remove(generation, out FldProviderSnapshot? snapshot))
+            snapshot.Dispose();
+        Directory.Delete(directory, recursive: true);
+        StorageDirectorySync.Flush(Path.GetDirectoryName(directory)!);
+    }
+
     public void PruneProviderSnapshotsExcept(IReadOnlySet<Guid> activeGenerations)
     {
         ArgumentNullException.ThrowIfNull(activeGenerations);
@@ -481,6 +569,66 @@ public sealed partial class FldDatabase
             stream.Flush(flushToDisk: true);
         }
         StorageDirectorySync.Flush(Path.GetDirectoryName(path)!);
+    }
+
+    private static void WriteProviderSnapshotIpcDescriptor(
+        string directory,
+        Guid generation,
+        Guid clientId,
+        Guid hostGeneration)
+    {
+        byte[] bytes = EncodeProviderSnapshotIpcDescriptor(generation, clientId, hostGeneration);
+        string path = Path.Combine(directory, ProviderSnapshotIpcDescriptorName);
+        string temporaryPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            WriteDurableSnapshotFile(temporaryPath, bytes);
+            File.Move(temporaryPath, path, overwrite: true);
+            StorageDirectorySync.Flush(directory);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+                File.Delete(temporaryPath);
+        }
+    }
+
+    private static byte[] EncodeProviderSnapshotIpcDescriptor(
+        Guid generation,
+        Guid clientId,
+        Guid hostGeneration)
+    {
+        if (generation == Guid.Empty || clientId == Guid.Empty || hostGeneration == Guid.Empty)
+            throw new ArgumentException("IPC snapshot descriptor identities must be nonzero.");
+        byte[] bytes = new byte[ProviderSnapshotIpcDescriptorSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, ProviderSnapshotIpcDescriptorMagic);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), ProviderSnapshotIpcDescriptorVersion);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6), 0);
+        generation.TryWriteBytes(bytes.AsSpan(8, 16), bigEndian: true, out _);
+        clientId.TryWriteBytes(bytes.AsSpan(24, 16), bigEndian: true, out _);
+        hostGeneration.TryWriteBytes(bytes.AsSpan(40, 16), bigEndian: true, out _);
+        SHA256.HashData(bytes.AsSpan(0, ProviderSnapshotIpcDescriptorPayloadSize))
+            .CopyTo(bytes.AsSpan(ProviderSnapshotIpcDescriptorPayloadSize, 32));
+        return bytes;
+    }
+
+    private static ProviderSnapshotIpcDescriptor DecodeProviderSnapshotIpcDescriptor(byte[] bytes)
+    {
+        if (bytes.Length != ProviderSnapshotIpcDescriptorSize ||
+            BinaryPrimitives.ReadUInt32LittleEndian(bytes) != ProviderSnapshotIpcDescriptorMagic ||
+            BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4)) != ProviderSnapshotIpcDescriptorVersion ||
+            BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(6)) != 0)
+            throw new InvalidDataException("IPC provider snapshot descriptor header is invalid.");
+        byte[] expectedHash = SHA256.HashData(bytes.AsSpan(0, ProviderSnapshotIpcDescriptorPayloadSize));
+        if (!CryptographicOperations.FixedTimeEquals(
+                expectedHash, bytes.AsSpan(ProviderSnapshotIpcDescriptorPayloadSize, 32)))
+            throw new InvalidDataException("IPC provider snapshot descriptor digest is invalid.");
+        Guid generation = new(bytes.AsSpan(8, 16), bigEndian: true);
+        Guid clientId = new(bytes.AsSpan(24, 16), bigEndian: true);
+        Guid hostGeneration = new(bytes.AsSpan(40, 16), bigEndian: true);
+        if (generation == Guid.Empty || clientId == Guid.Empty || hostGeneration == Guid.Empty)
+            throw new InvalidDataException("IPC provider snapshot descriptor identities are invalid.");
+        return new ProviderSnapshotIpcDescriptor(generation, clientId, hostGeneration);
     }
 
     private static void WriteProviderSnapshotManifest(string directory, byte[] bytes)
