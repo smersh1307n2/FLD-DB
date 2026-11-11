@@ -155,9 +155,14 @@ public static class GroupCommitCodec
         }
 
         WriteU32(ms, (uint)p.LocalOperationReceipts.Count);
+        var receiptKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var receipt in p.LocalOperationReceipts)
         {
             ValidateReceipt(receipt, nameof(p));
+            string key = receipt.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ":" + Convert.ToHexString(receipt.ClientId) + Convert.ToHexString(receipt.OperationId);
+            if (!receiptKeys.Add(key))
+                throw new ArgumentException("Duplicate local operation receipt identity.", nameof(p));
             WriteU16(ms, receipt.NamespaceId);
             ms.Write(receipt.ClientId);
             ms.Write(receipt.OperationId);
@@ -291,6 +296,13 @@ public static class GroupCommitCodec
                 {
                     throw new InvalidDataException("invalid local operation receipt", exception);
                 }
+                string key = namespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + ":" + Convert.ToHexString(clientId) + Convert.ToHexString(operationId);
+                if (localReceipts.Any(item =>
+                    item.NamespaceId == namespaceId
+                    && item.ClientId.AsSpan().SequenceEqual(clientId)
+                    && item.OperationId.AsSpan().SequenceEqual(operationId)))
+                    throw new InvalidDataException("duplicate local operation receipt identity");
                 localReceipts.Add(receipt);
             }
         }
@@ -310,6 +322,10 @@ public static class GroupCommitCodec
     private static void ValidateReceipt(WalLocalOperationReceipt receipt, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(receipt);
+        ArgumentNullException.ThrowIfNull(receipt.ClientId);
+        ArgumentNullException.ThrowIfNull(receipt.OperationId);
+        ArgumentNullException.ThrowIfNull(receipt.Fingerprint);
+        ArgumentNullException.ThrowIfNull(receipt.Result);
         if (receipt.ClientId.Length != 16 || IsZero(receipt.ClientId))
             throw new ArgumentException("Receipt ClientId must be a nonzero 16-byte identifier.", parameterName);
         if (receipt.OperationId.Length != 16 || IsZero(receipt.OperationId))
