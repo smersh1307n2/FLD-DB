@@ -159,6 +159,137 @@ public sealed class FldDatabaseIpcHostProcessTests
         }
     }
 
+    [Fact]
+    public async Task Separate_host_process_serializes_concurrent_provider_clients_and_replays_batches_after_restart()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-provider-host-process-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x433;
+        Guid clientAId = Guid.NewGuid();
+        Guid clientBId = Guid.NewGuid();
+        Guid operationA = Guid.NewGuid();
+        Guid operationB = Guid.NewGuid();
+        byte[] recordA = FldDatabase.NewRecordId();
+        byte[] recordB = FldDatabase.NewRecordId();
+        byte[] changeA = Id(0x71);
+        byte[] changeB = Id(0x72);
+        byte[] valueA = "provider-client-a"u8.ToArray();
+        byte[] valueB = "provider-client-b"u8.ToArray();
+        var mutationA = new FldLocalProviderMutation(
+            recordA, 0x0441, valueA, changeA, 7, 223456, 3);
+        var mutationB = new FldLocalProviderMutation(
+            recordB, 0x0442, valueB, changeB, 7, 223457, 4);
+
+        Process? firstHost = null;
+        Process? secondHost = null;
+        FldDatabaseIpcOutboxLease firstLease = default;
+        try
+        {
+            firstHost = StartHost(root, namespaceId);
+            StorageIpcEndpointInfo firstEndpoint =
+                await WaitForEndpointAsync(root, firstHost, TimeSpan.FromSeconds(45));
+
+            Task<FldDatabaseIpcClient> connectA = FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientAId, TimeSpan.FromSeconds(10));
+            Task<FldDatabaseIpcClient> connectB = FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientBId, TimeSpan.FromSeconds(10));
+            await using (FldDatabaseIpcClient clientA = await connectA)
+            await using (FldDatabaseIpcClient clientB = await connectB)
+            {
+                Task<FldDatabaseIpcWriteResult> writeA = clientA.AppendLocalProviderBatchAsync(
+                    operationA, 1, [mutationA]);
+                Task<FldDatabaseIpcWriteResult> writeB = clientB.AppendLocalProviderBatchAsync(
+                    operationB, 1, [mutationB]);
+                FldDatabaseIpcWriteResult[] writes = await Task.WhenAll(writeA, writeB)
+                    .WaitAsync(TimeSpan.FromSeconds(20));
+
+                Assert.All(writes, result => Assert.False(result.IsDuplicate));
+                Assert.Equal(new ulong[] { 1, 2 }, writes.Select(result => result.CommitSeq).Order().ToArray());
+
+                firstLease = await clientA.AcquireOutboxLeaseAsync();
+                Assert.Equal(1ul, firstLease.Epoch);
+                FldDatabaseIpcOutboxEntryChunk? firstEntry =
+                    await clientA.ReadOutboxEntryChunkAsync(firstLease, afterSequence: 0);
+                Assert.NotNull(firstEntry);
+                FldDatabaseIpcOutboxEntryChunk? secondEntry =
+                    await clientA.ReadOutboxEntryChunkAsync(firstLease, afterSequence: firstEntry.OutboxSeq);
+                Assert.NotNull(secondEntry);
+                Assert.Null(await clientA.ReadOutboxEntryChunkAsync(
+                    firstLease, afterSequence: secondEntry.OutboxSeq));
+                Assert.Contains(new[] { firstEntry.ChangeId, secondEntry.ChangeId },
+                    item => item.AsSpan().SequenceEqual(changeA));
+                Assert.Contains(new[] { firstEntry.ChangeId, secondEntry.ChangeId },
+                    item => item.AsSpan().SequenceEqual(changeB));
+            }
+
+            await StopHostAsync(firstHost);
+            firstHost = null;
+            secondHost = StartHost(root, namespaceId);
+            await WaitForEndpointAsync(root, secondHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
+
+            await using (FldDatabaseIpcClient clientA = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientAId, TimeSpan.FromSeconds(10)))
+            await using (FldDatabaseIpcClient clientB = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientBId, TimeSpan.FromSeconds(10)))
+            {
+                Task<FldDatabaseIpcWriteResult> replayA = clientA.AppendLocalProviderBatchAsync(
+                    operationA, 1, [mutationA]);
+                Task<FldDatabaseIpcWriteResult> replayB = clientB.AppendLocalProviderBatchAsync(
+                    operationB, 1, [mutationB]);
+                FldDatabaseIpcWriteResult[] replays = await Task.WhenAll(replayA, replayB)
+                    .WaitAsync(TimeSpan.FromSeconds(20));
+
+                Assert.All(replays, result => Assert.True(result.IsDuplicate));
+                Assert.Equal(new ulong[] { 1, 2 }, replays.Select(result => result.CommitSeq).Order().ToArray());
+
+                FldDatabaseIpcOutboxLease recoveredLease = await clientA.AcquireOutboxLeaseAsync();
+                Assert.Equal(checked(firstLease.Epoch + 2), recoveredLease.Epoch);
+                FldDatabaseIpcOutboxEntryChunk? firstRecovered =
+                    await clientA.ReadOutboxEntryChunkAsync(recoveredLease, afterSequence: 0);
+                Assert.NotNull(firstRecovered);
+                FldDatabaseIpcOutboxEntryChunk? secondRecovered =
+                    await clientA.ReadOutboxEntryChunkAsync(recoveredLease, afterSequence: firstRecovered.OutboxSeq);
+                Assert.NotNull(secondRecovered);
+                Assert.Null(await clientA.ReadOutboxEntryChunkAsync(
+                    recoveredLease, afterSequence: secondRecovered.OutboxSeq));
+                Assert.Contains(new[] { firstRecovered.ChangeId, secondRecovered.ChangeId },
+                    item => item.AsSpan().SequenceEqual(changeA));
+                Assert.Contains(new[] { firstRecovered.ChangeId, secondRecovered.ChangeId },
+                    item => item.AsSpan().SequenceEqual(changeB));
+                Assert.True(await clientA.ReleaseOutboxLeaseAsync(recoveredLease));
+            }
+
+            await StopHostAsync(secondHost);
+            secondHost = null;
+
+            using var recoveredDatabase = FldDatabase.Open(root, namespaceId);
+            Assert.Equal(2ul, recoveredDatabase.GetOutboxWatermark());
+            Assert.Equal(2, recoveredDatabase.ReadOutboxBatch(0, 10).Count);
+            Assert.True(recoveredDatabase.TryResolve(recordA, 0x0441, out FieldResolver.Resolved resolvedA));
+            Assert.Equal(changeA, resolvedA.ChangeId);
+            Assert.Equal(7u, resolvedA.OriginAuthorEpoch);
+            Assert.Equal(0ul, resolvedA.OriginSequence);
+            Assert.Equal(223456ul, resolvedA.Wall);
+            Assert.True(recoveredDatabase.TryResolve(recordB, 0x0442, out FieldResolver.Resolved resolvedB));
+            Assert.Equal(changeB, resolvedB.ChangeId);
+            Assert.Equal(7u, resolvedB.OriginAuthorEpoch);
+            Assert.Equal(0ul, resolvedB.OriginSequence);
+            Assert.Equal(223457ul, resolvedB.Wall);
+        }
+        finally
+        {
+            if (firstHost is not null) await StopHostAsync(firstHost);
+            if (secondHost is not null) await StopHostAsync(secondHost);
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    private static byte[] Id(byte value)
+    {
+        byte[] id = new byte[16];
+        id[15] = value;
+        return id;
+    }
+
     private static Process StartHost(string root, uint namespaceId)
     {
         string repositoryRoot = FindRepositoryRoot();
