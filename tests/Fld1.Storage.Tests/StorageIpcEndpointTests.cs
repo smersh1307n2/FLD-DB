@@ -16,7 +16,7 @@ public sealed class StorageIpcEndpointTests
 
         Assert.Equal(first, same);
         Assert.NotEqual(first, otherPartition);
-        Assert.StartsWith("fld1-", first, StringComparison.Ordinal);
+        Assert.True(first.StartsWith("fld1-", StringComparison.Ordinal));
     }
 
     [Fact]
