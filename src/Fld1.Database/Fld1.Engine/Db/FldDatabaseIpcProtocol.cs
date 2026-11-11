@@ -536,10 +536,13 @@ public static class FldDatabaseIpcProtocol
         {
             ArgumentNullException.ThrowIfNull(entry);
             if (entry.RecordId is null || entry.RecordId.Length != 16 ||
+                entry.RecordId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
                 entry.AuthorNodeId is null || entry.ChangeId is null ||
                 (entry.AuthorNodeId.Length is not (0 or 16)) ||
-                (entry.ChangeId.Length is not (0 or 16)))
-                throw new InvalidDataException("FLD snapshot page entry identity fields are invalid.");
+                (entry.ChangeId.Length is not (0 or 16)) ||
+                ((entry.IsTombstone || entry.IsRecordTombstone) && entry.ValueLength != 0) ||
+                (entry.IsRecordTombstone && (entry.IsTombstone || entry.KeyEpoch != 0)))
+                throw new InvalidDataException("FLD snapshot page entry identity or tombstone fields are invalid.");
             entry.RecordId.CopyTo(response, offset);
             offset += 16;
             BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(offset), entry.FieldId);
@@ -612,8 +615,10 @@ public static class FldDatabaseIpcProtocol
             offset += 8;
             bool isTombstone = (flags & 1) != 0;
             bool isRecordTombstone = (flags & 2) != 0;
-            if (isRecordTombstone && valueLength != 0)
-                throw new InvalidDataException("FLD record tombstone snapshot entry cannot carry a value.");
+            if (recordId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                ((isTombstone || isRecordTombstone) && valueLength != 0) ||
+                (isRecordTombstone && (isTombstone || keyEpoch != 0)))
+                throw new InvalidDataException("FLD snapshot tombstone entry fields are invalid.");
             entries[i] = new FldProviderSnapshotEntryMetadata(
                 recordId,
                 fieldId,
