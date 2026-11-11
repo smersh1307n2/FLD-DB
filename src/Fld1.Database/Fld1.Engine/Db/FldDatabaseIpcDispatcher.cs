@@ -80,6 +80,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleAppendLocalProviderBatchAutoSequence(clientId, operationId, operation),
             FldDatabaseIpcOperationCodes.GetLocalAuthor => HandleGetLocalAuthor(operation.Payload),
             FldDatabaseIpcOperationCodes.CommitPublishedOrigins => HandleCommitPublishedOrigins(operation.Payload),
+            FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover =>
+                HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
+            FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication =>
+                HandleEnableMetadataStoreOwnedPublication(operation.Payload),
             FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
                 HandleGetOutboxHighWatermark(operation.Payload),
             FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
@@ -141,6 +145,21 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         bool acknowledged = _database.AcknowledgeLocalOperationReceipts(clientId, throughSequence);
         return [acknowledged ? (byte)1 : (byte)0];
     }
+    private byte[] HandleTryGetMetadataStoreOwnedPublicationCutover(ReadOnlyMemory<byte> payload)
+    {
+        if (!payload.IsEmpty)
+            throw new InvalidDataException("FLD publication cutover query must have an empty payload.");
+        bool exists = _database.TryGetMetadataStoreOwnedPublicationCutover(out ulong watermark);
+        return FldDatabaseIpcPublicationModeProtocol.EncodeTryGetResult(exists, watermark);
+    }
+
+    private byte[] HandleEnableMetadataStoreOwnedPublication(ReadOnlyMemory<byte> payload)
+    {
+        ulong watermark = FldDatabaseIpcPublicationModeProtocol.DecodeEnableRequest(payload);
+        _database.EnableMetadataStoreOwnedPublication(watermark);
+        return Array.Empty<byte>();
+    }
+
     private byte[] HandleCommitPublishedOrigins(ReadOnlyMemory<byte> payload)
     {
         IReadOnlyList<FldPublishedOrigin> origins =

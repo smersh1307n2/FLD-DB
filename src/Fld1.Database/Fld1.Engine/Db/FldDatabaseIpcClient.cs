@@ -83,6 +83,29 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcPublishedOriginProtocol.DecodeResult(response);
     }
 
+    /// <summary>Read the immutable Metadata-Store-owned publication cutover for this database namespace.</summary>
+    public async Task<(bool Exists, ulong NodeOutboxHighWatermark)> TryGetMetadataStoreOwnedPublicationCutoverAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcPublicationModeProtocol.DecodeTryGetResult(response);
+    }
+
+    /// <summary>Enable the immutable Metadata-Store-owned publication cutover.</summary>
+    public async Task EnableMetadataStoreOwnedPublicationAsync(
+        ulong nodeOutboxHighWatermark,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcPublicationModeProtocol.EncodeEnableRequest(nodeOutboxHighWatermark);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("FLD publication cutover acknowledgement must be empty.");
+    }
+
     /// <summary>Reads the authoritative LocalAuthor identity configured by the Database Host.</summary>
     public async Task<byte[]> GetLocalAuthorAsync(CancellationToken cancellationToken = default)
     {

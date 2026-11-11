@@ -249,6 +249,57 @@ public sealed class FldDatabaseIpcLocalProviderTests
         }
     }
 
+    [Fact]
+    public async Task Publication_cutover_ipc_is_immutable_and_persisted_by_namespace()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-publication-cutover-ipc-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x733;
+        byte[] localAuthor = Id(0x43);
+        Guid ownerId = Guid.NewGuid();
+        Guid clientId = Guid.NewGuid();
+
+        using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+        using var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+        Task serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+            await using var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10));
+
+            var missing = await client.TryGetMetadataStoreOwnedPublicationCutoverAsync();
+            Assert.False(missing.Exists);
+            Assert.Equal(0UL, missing.NodeOutboxHighWatermark);
+
+            await client.EnableMetadataStoreOwnedPublicationAsync(55);
+            var enabled = await client.TryGetMetadataStoreOwnedPublicationCutoverAsync();
+            Assert.True(enabled.Exists);
+            Assert.Equal(55UL, enabled.NodeOutboxHighWatermark);
+
+            await client.EnableMetadataStoreOwnedPublicationAsync(55);
+            await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                client.EnableMetadataStoreOwnedPublicationAsync(56));
+
+            Assert.True(database.TryGetMetadataStoreOwnedPublicationCutover(out ulong persisted));
+            Assert.Equal(55UL, persisted);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     private static FldLocalProviderMutation Mutation()
         => new(
             FldDatabase.NewRecordId(),

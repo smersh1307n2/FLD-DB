@@ -27,6 +27,8 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort AppendLocalProviderBatchAutoSequence = 0x2111;
     public const ushort GetLocalAuthor = 0x2113;
     public const ushort CommitPublishedOrigins = 0x2114;
+    public const ushort TryGetMetadataStoreOwnedPublicationCutover = 0x2115;
+    public const ushort EnableMetadataStoreOwnedPublication = 0x2116;
 }
 
 public sealed record FldDatabaseIpcMutation(
