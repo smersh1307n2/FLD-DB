@@ -737,11 +737,13 @@ public sealed partial class FldDatabase : IDisposable
                 return true;
             }
 
-            LocalOperationClientState state = GetOrCreateLocalOperationClientState(clientId);
-            if (clientSequence <= state.AcknowledgedThroughSequence)
-                throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
-            if (clientSequence <= state.LastCommittedSequence)
-                throw new InvalidDataException("A committed local operation receipt is missing inside the active retry window.");
+            if (_localOperationClients.TryGetValue(LocalOperationClientKey(clientId), out LocalOperationClientState? state))
+            {
+                if (clientSequence <= state.AcknowledgedThroughSequence)
+                    throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
+                if (clientSequence <= state.LastCommittedSequence)
+                    throw new InvalidDataException("A committed local operation receipt is missing inside the active retry window.");
+            }
 
             result = null;
             return false;
@@ -1240,7 +1242,8 @@ public sealed partial class FldDatabase : IDisposable
                     SeqHi = seqHi
                 });
                 return CloneManifest(m, runs: runs, lastFlushed: seqHi,
-                    localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts));
+                    localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
+                localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients));
             });
 
             try
@@ -2836,7 +2839,8 @@ public sealed partial class FldDatabase : IDisposable
                 try
                 {
                     _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq,
-                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts)));
+                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
+                        localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients)));
                     _manifestDirty = false;
                 }
                 catch { /* best-effort on dispose */ }
