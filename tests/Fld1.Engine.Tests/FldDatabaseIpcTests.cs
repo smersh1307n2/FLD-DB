@@ -75,6 +75,7 @@ public sealed class FldDatabaseIpcTests
             await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
 
+            dispatcher.Dispose();
             database.Dispose();
             using var reopened = FldDatabase.Open(root, namespaceId, localAuthor);
             byte[] firstFingerprint = FldDatabaseIpcProtocol.ComputeFingerprint(
@@ -96,6 +97,7 @@ public sealed class FldDatabaseIpcTests
             shutdown.Cancel();
             try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
             database.Dispose();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
@@ -187,6 +189,7 @@ public sealed class FldDatabaseIpcTests
             shutdown.Cancel();
             try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
             database.Dispose();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
@@ -269,6 +272,7 @@ public sealed class FldDatabaseIpcTests
             shutdown.Cancel();
             try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
             database.Dispose();
             try { Directory.Delete(root, recursive: true); } catch { }
         }
