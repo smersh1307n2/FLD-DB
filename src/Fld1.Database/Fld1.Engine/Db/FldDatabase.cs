@@ -1770,7 +1770,8 @@ public sealed partial class FldDatabase : IDisposable
             EnsureHealthy();
             if (!_manifestDirty) return;
             _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq,
-                localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts)));
+                localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
+                localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients)));
             _manifestDirty = false;
         }
     }
