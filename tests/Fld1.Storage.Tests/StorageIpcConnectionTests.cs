@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Pipes;
 using Fld1.Storage.Ipc;
 using Xunit;
@@ -218,6 +219,38 @@ public sealed class StorageIpcConnectionTests
             Assert.True(response is null || transportFailure is not null,
                 "A previous connection generation must be rejected on a reconnected client.");
             Assert.Equal(0, Volatile.Read(ref handlerCalls));
+        }
+        finally
+        {
+            serverCancellation.Cancel();
+            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
+    public async Task Local_pipe_handler_receives_strictly_increasing_per_session_request_ids()
+    {
+        string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
+        using var serverCancellation = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            pipeName,
+            (context, payload, cancellationToken) =>
+            {
+                byte[] response = new byte[8];
+                BinaryPrimitives.WriteUInt64LittleEndian(response, context.RequestId);
+                return ValueTask.FromResult<ReadOnlyMemory<byte>>(response);
+            });
+        Task serverTask = server.RunAsync(serverCancellation.Token);
+
+        try
+        {
+            await using var client = await StorageIpcClientConnection.ConnectAsync(
+                pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+            ReadOnlyMemory<byte> first = await client.RequestAsync("one"u8.ToArray());
+            ReadOnlyMemory<byte> second = await client.RequestAsync("two"u8.ToArray());
+
+            Assert.Equal(1UL, BinaryPrimitives.ReadUInt64LittleEndian(first.Span));
+            Assert.Equal(2UL, BinaryPrimitives.ReadUInt64LittleEndian(second.Span));
         }
         finally
         {
