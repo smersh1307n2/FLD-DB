@@ -74,6 +74,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleReleaseSnapshot(context.ClientId, operation.Payload),
             FldDatabaseIpcOperationCodes.ApplyRemoteBatch =>
                 HandleApplyRemoteBatch(operation.Payload),
+            FldDatabaseIpcOperationCodes.AppendLocalProviderBatch =>
+                HandleAppendLocalProviderBatch(clientId, operationId, operation),
             _ => throw new NotSupportedException($"Unsupported FLD Database IPC operation code {operation.OperationCode}.")
         };
         return ValueTask.FromResult<ReadOnlyMemory<byte>>(response);
@@ -180,6 +182,28 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         ulong leaseEpoch = FldDatabaseIpcProtocol.DecodeOutboxLeasePayload(payload);
         _database.ReleaseOutboxLease(new OutboxLease(leaseEpoch, clientId.ToArray()));
         return FldDatabaseIpcProtocol.EncodeOutboxBooleanResponse(true);
+    }
+
+    private byte[] HandleAppendLocalProviderBatch(
+        ReadOnlySpan<byte> clientId,
+        ReadOnlySpan<byte> operationId,
+        StorageIpcOperationEnvelope operation)
+    {
+        (ulong sequence, IReadOnlyList<FldLocalProviderMutation> mutations) =
+            FldDatabaseIpcLocalProviderProtocol.DecodeRequest(operation.Payload);
+        byte[] fingerprint = FldDatabaseIpcProtocol.ComputeFingerprint(
+            operation.OperationCode, operation.Payload.Span);
+        var receipt = new FldLocalOperationReceipt
+        {
+            ClientId = clientId.ToArray(),
+            OperationId = operationId.ToArray(),
+            ClientSequence = sequence,
+            Fingerprint = fingerprint,
+            Result = FldDatabaseIpcProtocol.EncodeWriteResult(mutations.Count)
+        };
+        FldLocalOperationCommitResult committed =
+            _database.ApplyLocalProviderOperation(mutations, receipt);
+        return FldDatabaseIpcProtocol.EncodeCommitResult(committed);
     }
 
     private byte[] HandleApplyRemoteBatch(ReadOnlyMemory<byte> payload)
