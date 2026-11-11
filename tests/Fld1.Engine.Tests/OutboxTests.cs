@@ -143,6 +143,14 @@ public class OutboxTests : IDisposable
 
         using (var db = FldDatabase.Open(_dir))
         {
+            Assert.Throws<InvalidOperationException>(() => db.CommitWithReceipt(new FldLocalOperationReceipt
+            {
+                ClientId = clientId,
+                OperationId = operation1,
+                ClientSequence = 2,
+                Fingerprint = fingerprint1,
+                Result = "one"u8.ToArray()
+            }));
             db.Put(FldDatabase.NewRecordId(), 1, "first"u8);
             db.CommitWithReceipt(first);
             db.Put(FldDatabase.NewRecordId(), 1, "second"u8);
