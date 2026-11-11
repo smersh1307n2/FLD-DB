@@ -87,6 +87,10 @@ public sealed class StorageIpcOperationLedger
         out byte[]? existingResult)
     {
         ArgumentNullException.ThrowIfNull(batch);
+        if (!batch.IsBoundTo(_database))
+            throw new ArgumentException(
+                "Operation result and data mutations must use a batch from the ledger's exact StorageDatabase.",
+                nameof(batch));
         ValidateIdentity(clientId, operationId, fingerprint);
         if (result.Length > MaxResultBytes)
             throw new ArgumentOutOfRangeException(nameof(result));
