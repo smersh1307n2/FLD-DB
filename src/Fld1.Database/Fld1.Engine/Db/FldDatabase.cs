@@ -687,6 +687,81 @@ public sealed partial class FldDatabase : IDisposable
     /// in one GROUP_COMMIT WAL record. Call TryGetLocalOperationReceipt before staging
     /// mutations when retrying an operation.
     /// </summary>
+    /// <summary>
+    /// Atomically applies a field batch and its local IPC receipt under the database
+    /// commit lock. An exact retry is detected before staging and has no Outbox side effect.
+    /// </summary>
+    public FldLocalOperationCommitResult ApplyLocalOperation(
+        FldWriteBatch batch,
+        FldLocalOperationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        ArgumentNullException.ThrowIfNull(receipt);
+        ValidateLocalOperationReceipt(receipt);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (TryGetLocalOperationReceipt(
+                receipt.ClientId, receipt.OperationId, receipt.ClientSequence,
+                receipt.Fingerprint, out FldLocalOperationCommitResult? prior))
+                return prior!;
+
+            EnsureNextLocalOperationSequence(receipt.ClientId, receipt.ClientSequence);
+            Apply(batch);
+            return CommitWithReceipt(receipt);
+        }
+    }
+
+    /// <summary>
+    /// Reads one field and commits its encoded result as a receipt-only operation under
+    /// the same lock, making a lost read response replayable.
+    /// </summary>
+    public FldLocalOperationCommitResult ReadFieldWithReceipt(
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        ReadOnlySpan<byte> clientId,
+        ReadOnlySpan<byte> operationId,
+        ulong clientSequence,
+        ReadOnlySpan<byte> fingerprint)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ValidateOperationIdentity(clientId, operationId, fingerprint);
+        if (clientSequence == 0)
+            throw new ArgumentOutOfRangeException(nameof(clientSequence));
+        if (recordId.Length != 16)
+            throw new ArgumentException("RecordId must be 16 bytes.", nameof(recordId));
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (TryGetLocalOperationReceipt(
+                clientId, operationId, clientSequence, fingerprint,
+                out FldLocalOperationCommitResult? prior))
+                return prior!;
+
+            EnsureNextLocalOperationSequence(clientId, clientSequence);
+            bool found = TryGetBytes(recordId, fieldId, out byte[]? value);
+            int valueLength = found ? value!.Length : 0;
+            if (valueLength > WalConstants.MaxValLen - 18)
+                throw new InvalidDataException("Field value is too large to retain as a replayable IPC result.");
+
+            byte[] response = new byte[5 + valueLength];
+            response[0] = found ? (byte)1 : (byte)0;
+            BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(1), (uint)valueLength);
+            if (found)
+                value!.CopyTo(response, 5);
+
+            return CommitWithReceipt(new FldLocalOperationReceipt
+            {
+                ClientId = clientId.ToArray(),
+                OperationId = operationId.ToArray(),
+                ClientSequence = clientSequence,
+                Fingerprint = fingerprint.ToArray(),
+                Result = response
+            });
+        }
+    }
+
     public FldLocalOperationCommitResult CommitWithReceipt(FldLocalOperationReceipt receipt)
     {
         ArgumentNullException.ThrowIfNull(receipt);
@@ -827,19 +902,7 @@ public sealed partial class FldDatabase : IDisposable
                     };
                 }
 
-                string clientKey = LocalOperationClientKey(operationReceipt.ClientId);
-                ulong lastCommittedSequence = 0;
-                ulong acknowledgedThroughSequence = 0;
-                if (_localOperationClients.TryGetValue(clientKey, out LocalOperationClientState? clientState))
-                {
-                    lastCommittedSequence = clientState.LastCommittedSequence;
-                    acknowledgedThroughSequence = clientState.AcknowledgedThroughSequence;
-                }
-                if (operationReceipt.ClientSequence <= acknowledgedThroughSequence)
-                    throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
-                if (operationReceipt.ClientSequence != checked(lastCommittedSequence + 1))
-                    throw new InvalidOperationException(
-                        $"Expected ClientSequence {lastCommittedSequence + 1}, received {operationReceipt.ClientSequence}.");
+                EnsureNextLocalOperationSequence(operationReceipt.ClientId, operationReceipt.ClientSequence);
             }
 
             if (_dirty.Count == 0 && operationReceipt is null)
@@ -989,6 +1052,8 @@ public sealed partial class FldDatabase : IDisposable
     private static void ValidateLocalOperationReceipt(FldLocalOperationReceipt receipt)
     {
         ValidateOperationIdentity(receipt.ClientId, receipt.OperationId, receipt.Fingerprint);
+        if (receipt.ClientSequence == 0)
+            throw new ArgumentOutOfRangeException(nameof(receipt), "ClientSequence must be nonzero.");
         ArgumentNullException.ThrowIfNull(receipt.Result);
         if (receipt.Result.Length > WalConstants.MaxValLen)
             throw new ArgumentOutOfRangeException(nameof(receipt), "Local operation result exceeds the 4 MiB WAL limit.");
@@ -1043,6 +1108,22 @@ public sealed partial class FldDatabase : IDisposable
             CommitSeq = receipt.CommitSeq,
             Result = receipt.Result.ToArray()
         });
+    }
+
+    private void EnsureNextLocalOperationSequence(ReadOnlySpan<byte> clientId, ulong clientSequence)
+    {
+        ulong lastCommittedSequence = 0;
+        ulong acknowledgedThroughSequence = 0;
+        if (_localOperationClients.TryGetValue(LocalOperationClientKey(clientId), out LocalOperationClientState? state))
+        {
+            lastCommittedSequence = state.LastCommittedSequence;
+            acknowledgedThroughSequence = state.AcknowledgedThroughSequence;
+        }
+        if (clientSequence <= acknowledgedThroughSequence)
+            throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
+        if (clientSequence != checked(lastCommittedSequence + 1))
+            throw new InvalidOperationException(
+                $"Expected ClientSequence {lastCommittedSequence + 1}, received {clientSequence}.");
     }
 
     private LocalOperationClientState GetOrCreateLocalOperationClientState(ReadOnlySpan<byte> clientId)
