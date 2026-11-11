@@ -43,6 +43,7 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ReleaseSnapshot | 0x210B | HostGeneration (16 B), SnapshotToken (16 B) |
 | ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (implemented in the current branch) |
 | AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
+| GetOutboxHighWatermark | 0x210E | empty payload; response is durable Outbox HighWatermark (u64) |
 
 Each write mutation is RecordId (16 bytes), FieldId (u16), KeyEpoch (u16), kind (u8: 0=Put, 1=Delete), value length (u32), then value bytes. A Delete must have a zero value length. A batch is one atomic Database operation and must contain at least one mutation. The frame limit is enforced before sending and while decoding; malformed lengths, trailing bytes, invalid mutation kinds and zero identifiers are rejected.
 
@@ -108,13 +109,14 @@ Implemented in the current facade:
 - atomic WriteBatch with durable local operation receipt and contiguous-prefix receipt acknowledgement;
 - identity-preserving local provider draft batches with stable ChangeId/HLC/OriginAuthorEpoch and atomic Outbox + receipt commit;
 - receipt-backed ReadField;
-- lease-fenced Outbox acquisition, bounded entry chunks, Outbox ACK and release;
+- lease-fenced Outbox acquisition, bounded entry chunks, durable Outbox high-watermark query, Outbox ACK and release;
 - immutable persisted provider snapshots over IPC: idempotent open, bounded metadata pages, bounded value chunks, client/Host-generation fencing and release;
 - retry and recovery across Host restart, including Outbox lease epoch fencing;
 - single-owner Host endpoint publication.
 
 Not exposed by this facade yet:
 
+- provider-current metadata reads with complete field identity/version metadata (the ordinary ReadField receipt is value-only; immutable snapshot pages remain the supported metadata read path);
 - subscriptions or streaming change feeds;
 - multi-entry Outbox aggregation beyond the one-entry chunk cursor;
 - a complete asynchronous IDataProvider / remote-apply coordinator surface, including provider-current metadata reads, published-origin stamping and cross-call commit-lease composition.
