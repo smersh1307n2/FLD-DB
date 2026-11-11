@@ -41,7 +41,7 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ReadSnapshotPage | 0x2109 | HostGeneration (16 B), SnapshotToken (16 B), AfterIndex (i32), Limit (u16) |
 | ReadSnapshotValueChunk | 0x210A | HostGeneration (16 B), SnapshotToken (16 B), RecordId (16 B), FieldId (u16), ValueOffset (u32), MaxChunkBytes (u32) |
 | ReleaseSnapshot | 0x210B | HostGeneration (16 B), SnapshotToken (16 B) |
-| ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (planned, not implemented) |
+| ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (implemented in the current branch) |
 
 Each write mutation is RecordId (16 bytes), FieldId (u16), KeyEpoch (u16), kind (u8: 0=Put, 1=Delete), value length (u32), then value bytes. A Delete must have a zero value length. A batch is one atomic Database operation and must contain at least one mutation. The frame limit is enforced before sending and while decoding; malformed lengths, trailing bytes, invalid mutation kinds and zero identifiers are rejected.
 
@@ -73,22 +73,22 @@ The returned handle binds HostGeneration and SnapshotToken; every page, value-ch
 
 The host creates the snapshot from its persisted provider-snapshot mechanism; IPC does not expose raw FldDatabase or borrowed storage views. Consumers must release handles in finally and discard handles after a Host-generation change.
 
-## Contextual remote APPLY IPC (planned: 0x210C; not implemented)
+## Contextual remote APPLY IPC (0x210C; implemented)
 
-The next Database facade operation must expose the existing FldDatabase.ApplyRemoteBatch(RemoteBatchCommit) transaction without translating it into local WriteBatch operations. Local writes and remote applies have different authorship, Outbox and durability semantics.
+The Database facade exposes the existing FldDatabase.ApplyRemoteBatch(RemoteBatchCommit) transaction without translating it into local WriteBatch operations. Local writes and remote applies have different authorship, Outbox and durability semantics.
 
 The request is a bounded, versioned serialization of the complete RemoteBatchCommit:
 
 - sender peer (16 B), sender transport epoch (u32), namespace id (u16);
 - issuer node id (16 B), issuer epoch (u32), batch id (16 B);
-- cursor start/end (u64 each), previous batch digest, batch digest and records root (32 B each);
+- cursor start/end (u64 each), previous batch digest, batch digest and records root (16 B each, matching RemoteBatchCommit identity widths);
 - opaque ProtocolStateDelta (u32 length + bytes);
 - Writes (u32 count; each entry is RecordId (16 B), FieldId (u16), Wall (u64), Logical (u32), AuthorNodeId (16 B), ChangeId (16 B), KeyEpoch (u16), tombstone flag (u8), OriginAuthorEpoch (u32), OriginSequence (u64), value length (u32), value bytes);
 - RelayWrites as a bounded list of u32 indices into Writes, not duplicated field payloads. The decoder must reject duplicate/out-of-range indices and the constructor must still enforce exact subset semantics.
 
 The response returns CommitSeq (u64), CursorStart/End (u64 each), BatchId (16 B), AppliedCount (u32), IsDuplicate (u8) and the exact opaque ProtocolStateDelta (u32 length + bytes). A duplicate batch returns the original durable receipt/delta; conflicting metadata for an already committed issuer/epoch/namespace/batch id fails closed.
 
-The operation must call ApplyRemoteBatch exactly once. That method owns the atomic WAL APPLY_COMMIT, apply-journal materialization, protocol delta, relay journal and overlay update. It must not create local-author Outbox entries, local IPC operation receipts, or a second pending journal. The IPC envelope OperationId is transport/request correlation only; durable remote idempotency remains (NamespaceId, IssuerNodeId, IssuerEpoch, BatchId) as enforced by ApplyJournal.
+The dispatcher calls ApplyRemoteBatch exactly once. That method owns the atomic WAL APPLY_COMMIT, apply-journal materialization, protocol delta, relay journal and overlay update. It must not create local-author Outbox entries, local IPC operation receipts, or a second pending journal. The IPC envelope OperationId is transport/request correlation only; durable remote idempotency remains (NamespaceId, IssuerNodeId, IssuerEpoch, BatchId) as enforced by ApplyJournal.
 
 The full encoded request and response must fit the Storage IPC frame limit before allocation/transmission. Reject oversized batches before copying; do not silently split one atomic remote batch across IPC calls. If a valid BIN-SYNC batch cannot fit, define an explicit future streaming/staging transaction with begin/chunk/commit/abort and crash cleanup; never approximate it with several independent APPLY commits. The host must verify namespace equality and all RemoteBatchCommit invariants before WAL mutation.
 
@@ -105,7 +105,7 @@ Implemented in the current facade:
 
 Not exposed by this facade yet:
 
-- contextual remote APPLY (planned as 0x210C above);
+- contextual remote APPLY (0x210C): versioned, bounded codec and client/dispatcher route to the existing atomic ApplyRemoteBatch WAL transaction;
 - subscriptions or streaming change feeds;
 - multi-entry Outbox aggregation beyond the one-entry chunk cursor.
 
