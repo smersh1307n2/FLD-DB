@@ -78,6 +78,15 @@ public sealed class FldDatabaseIpcRemoteApplyTests
             Assert.Equal(first.CommitSeq, retry.CommitSeq);
             Assert.Equal(first.ProtocolStateDelta, retry.ProtocolStateDelta);
 
+            var conflictingDelta = new RemoteBatchCommit(
+                batch.SenderPeer, batch.SenderEpoch, batch.NamespaceId,
+                batch.IssuerNodeId, batch.IssuerEpoch, batch.BatchId,
+                batch.CursorStart, batch.CursorEnd, batch.PreviousBatchDigest,
+                batch.BatchDigest, batch.RecordsRoot, batch.Writes, batch.RelayWrites,
+                new byte[] { 0xFF, 0xEE });
+            await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                client.ApplyRemoteBatchAsync(Guid.NewGuid(), conflictingDelta));
+
             Assert.True(database.TryGetBytes(batch.Writes[0].RecordId, batch.Writes[0].FieldId, out byte[]? firstValue));
             Assert.Equal(batch.Writes[0].Value, firstValue);
             Assert.True(database.TryGetBytes(batch.Writes[1].RecordId, batch.Writes[1].FieldId, out byte[]? secondValue));
