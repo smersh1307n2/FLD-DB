@@ -76,6 +76,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleApplyRemoteBatch(operation.Payload),
             FldDatabaseIpcOperationCodes.AppendLocalProviderBatch =>
                 HandleAppendLocalProviderBatch(clientId, operationId, operation),
+            FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
+                HandleGetOutboxHighWatermark(operation.Payload),
             _ => throw new NotSupportedException($"Unsupported FLD Database IPC operation code {operation.OperationCode}.")
         };
         return ValueTask.FromResult<ReadOnlyMemory<byte>>(response);
@@ -133,6 +135,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         bool acknowledged = _database.AcknowledgeLocalOperationReceipts(clientId, throughSequence);
         return [acknowledged ? (byte)1 : (byte)0];
     }
+    private byte[] HandleGetOutboxHighWatermark(ReadOnlyMemory<byte> payload)
+    {
+        if (!payload.IsEmpty)
+            throw new InvalidDataException("FLD Outbox high-watermark request must be empty.");
+        return FldDatabaseIpcProtocol.EncodeOutboxHighWatermarkResponse(
+            _database.GetOutboxHighWatermark());
+    }
+
     private byte[] HandleAcquireOutboxLease(
         ReadOnlySpan<byte> clientId,
         ReadOnlyMemory<byte> payload)
