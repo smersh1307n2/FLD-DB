@@ -21,7 +21,14 @@ public static class FldDatabaseIpcRemoteApplyProtocol
     public static byte[] EncodeRequest(RemoteBatchCommit batch)
     {
         ArgumentNullException.ThrowIfNull(batch);
-        using var stream = new MemoryStream();
+        long encodedLength = FixedHeaderBytes + (long)batch.ProtocolStateDelta.Length +
+            (long)batch.RelayWrites.Count * sizeof(uint);
+        foreach (RemoteFieldWrite write in batch.Writes)
+            encodedLength += FieldHeaderBytes + (long)write.Value.Length;
+        if (encodedLength > MaximumPayloadBytes)
+            throw new ArgumentOutOfRangeException(nameof(batch),
+                $"Remote APPLY request exceeds the {MaximumPayloadBytes:N0}-byte IPC payload limit.");
+        using var stream = new MemoryStream(checked((int)encodedLength));
         using var writer = new BinaryWriter(stream);
         writer.Write(Version);
         writer.Write(batch.SenderPeer);
@@ -129,7 +136,10 @@ public static class FldDatabaseIpcRemoteApplyProtocol
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(receipt.BatchId);
         ArgumentNullException.ThrowIfNull(receipt.ProtocolStateDelta);
-        if (receipt.BatchId.Length != 16 ||
+        if (receipt.CommitSeq == 0 || receipt.CursorStart == 0 ||
+            receipt.CursorEnd < receipt.CursorStart || receipt.BatchId.Length != 16 ||
+            IsZero(receipt.BatchId) || receipt.AppliedCount < 0 ||
+            receipt.AppliedCount > MaximumOperations ||
             receipt.ProtocolStateDelta.Length > MaximumPayloadBytes - ReceiptHeaderBytes)
             throw new InvalidDataException("Remote APPLY receipt fields exceed protocol bounds.");
 
@@ -155,16 +165,21 @@ public static class FldDatabaseIpcRemoteApplyProtocol
         uint deltaLength = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(45, 4));
         if (deltaLength != (uint)(span.Length - ReceiptHeaderBytes))
             throw new InvalidDataException("Remote APPLY receipt delta length is invalid.");
+        ulong commitSeq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(0, 8));
+        ulong cursorStart = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8, 8));
+        ulong cursorEnd = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(16, 8));
+        byte[] batchId = span.Slice(24, 16).ToArray();
         uint appliedCount = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(40, 4));
-        if (appliedCount > MaximumOperations)
-            throw new InvalidDataException("Remote APPLY receipt applied count is invalid.");
+        if (commitSeq == 0 || cursorStart == 0 || cursorEnd < cursorStart ||
+            IsZero(batchId) || appliedCount > MaximumOperations)
+            throw new InvalidDataException("Remote APPLY receipt identity or applied count is invalid.");
 
         return new RemoteBatchReceipt
         {
-            CommitSeq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(0, 8)),
-            CursorStart = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8, 8)),
-            CursorEnd = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(16, 8)),
-            BatchId = span.Slice(24, 16).ToArray(),
+            CommitSeq = commitSeq,
+            CursorStart = cursorStart,
+            CursorEnd = cursorEnd,
+            BatchId = batchId,
             AppliedCount = checked((int)appliedCount),
             IsDuplicate = span[44] == 1,
             ProtocolStateDelta = span.Slice(ReceiptHeaderBytes).ToArray()
@@ -217,6 +232,13 @@ public static class FldDatabaseIpcRemoteApplyProtocol
         {
             throw new InvalidDataException("Remote APPLY field metadata is invalid.", exception);
         }
+    }
+
+    private static bool IsZero(ReadOnlySpan<byte> value)
+    {
+        byte aggregate = 0;
+        foreach (byte item in value) aggregate |= item;
+        return aggregate == 0;
     }
 
     private static byte[] ReadExact(BinaryReader reader, int length)
