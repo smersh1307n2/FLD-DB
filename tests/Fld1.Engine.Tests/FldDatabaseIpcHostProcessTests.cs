@@ -267,7 +267,7 @@ public sealed class FldDatabaseIpcHostProcessTests
             await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
 
             using var recoveredDatabase = FldDatabase.Open(root, namespaceId);
-            Assert.Equal(2ul, recoveredDatabase.GetOutboxWatermark());
+            Assert.Equal(2ul, recoveredDatabase.GetOutboxHighWatermark());
             Assert.Equal(2, recoveredDatabase.ReadOutboxBatch(0, 10).Count);
             Assert.True(recoveredDatabase.TryResolve(recordA, 0x0441, out var resolvedA));
             Assert.Equal(changeA, resolvedA.ChangeId);
