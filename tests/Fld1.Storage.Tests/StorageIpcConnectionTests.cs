@@ -52,14 +52,14 @@ public sealed class StorageIpcConnectionTests
             pipeName, clientBId, TimeSpan.FromSeconds(10));
         Assert.NotEqual(clientA.SessionGeneration, clientB.SessionGeneration);
 
-        Task<byte[]> requestA = clientA.RequestAsync("alpha"u8.ToArray()).AsTask();
-        Task<byte[]> requestB = clientB.RequestAsync("beta"u8.ToArray()).AsTask();
+        Task<ReadOnlyMemory<byte>> requestA = clientA.RequestAsync("alpha"u8.ToArray()).AsTask();
+        Task<ReadOnlyMemory<byte>> requestB = clientB.RequestAsync("beta"u8.ToArray()).AsTask();
         await Task.WhenAll(requestA, requestB).WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Equal(clientAId, new Guid(requestA.Result.AsSpan(0, 16)));
-        Assert.Equal("alpha"u8.ToArray(), requestA.Result.AsSpan(16).ToArray());
-        Assert.Equal(clientBId, new Guid(requestB.Result.AsSpan(0, 16)));
-        Assert.Equal("beta"u8.ToArray(), requestB.Result.AsSpan(16).ToArray());
+        Assert.Equal(clientAId, new Guid(requestA.Result.Span[..16]));
+        Assert.Equal("alpha"u8.ToArray(), requestA.Result.Span[16..].ToArray());
+        Assert.Equal(clientBId, new Guid(requestB.Result.Span[..16]));
+        Assert.Equal("beta"u8.ToArray(), requestB.Result.Span[16..].ToArray());
 
         await clientA.DisposeAsync();
         await clientB.DisposeAsync();
