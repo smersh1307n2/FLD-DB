@@ -49,6 +49,16 @@ public sealed class ProvenanceIndexEntry
     public required ushort ErrorCode { get; init; }
 }
 
+/// <summary>Checkpointed local IPC idempotency receipt; keyed by ClientId + OperationId.</summary>
+public sealed class LocalOperationReceiptEntry
+{
+    public required byte[] ClientId { get; init; } // 16
+    public required byte[] OperationId { get; init; } // 16
+    public required byte[] Fingerprint { get; init; } // 32
+    public required ulong CommitSeq { get; init; }
+    public required byte[] Result { get; init; }
+}
+
 public sealed class ManifestDocument
 {
     public required ulong Generation { get; init; }
@@ -59,6 +69,7 @@ public sealed class ManifestDocument
     public required List<RetainEntry> Retains { get; init; }
     public required List<ResultClient> ResultClients { get; init; }
     public required List<ProvenanceIndexEntry> ProvenanceIndex { get; init; }
+    public List<LocalOperationReceiptEntry> LocalOperationReceipts { get; init; } = [];
     public required ulong CoordinatorLeaseEpoch { get; init; }
     public required byte[] CoordinatorSessionId { get; init; } // 16, zeros if none
 
@@ -72,6 +83,7 @@ public sealed class ManifestDocument
         Retains = [],
         ResultClients = [],
         ProvenanceIndex = [],
+        LocalOperationReceipts = [],
         CoordinatorLeaseEpoch = 0,
         CoordinatorSessionId = new byte[16]
     };
