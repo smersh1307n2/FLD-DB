@@ -59,8 +59,10 @@ public sealed class StorageIpcOperationDispatcher
         ValidateKey(key);
         if (!_database.TryGet(key, out byte[]? value))
             return new byte[] { 0, 0, 0, 0, 0 };
+        if (value!.Length > StorageIpcProtocol.MaxPayloadBytes - sizeof(byte) - sizeof(uint))
+            throw new InvalidDataException("Storage IPC value exceeds the response frame limit; use a paged read.");
 
-        byte[] response = new byte[checked(sizeof(byte) + sizeof(uint) + value!.Length)];
+        byte[] response = new byte[checked(sizeof(byte) + sizeof(uint) + value.Length)];
         response[0] = 1;
         BinaryPrimitives.WriteUInt32LittleEndian(response.AsSpan(1), (uint)value.Length);
         value.CopyTo(response, 1 + sizeof(uint));
