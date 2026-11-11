@@ -27,6 +27,100 @@ public class OutboxTests : IDisposable
     }
 
     [Fact]
+    public void Local_operation_receipt_is_atomic_idempotent_and_survives_checkpoint_wal_truncation()
+    {
+        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] clientId = new byte[16]; clientId[0] = 0x51;
+        byte[] operationId = new byte[16]; operationId[0] = 0x52;
+        byte[] fingerprint = Enumerable.Range(0, 32).Select(value => (byte)(value + 1)).ToArray();
+        byte[] response = "stable-original-result"u8.ToArray();
+        var receipt = new FldLocalOperationReceipt
+        {
+            ClientId = clientId,
+            OperationId = operationId,
+            Fingerprint = fingerprint,
+            Result = response
+        };
+        var options = new FldOpenOptions
+        {
+            Path = _dir,
+            WalRotateAfterBytes = 1
+        };
+
+        ulong originalCommitSeq;
+        using (var db = FldDatabase.Open(options))
+        {
+            db.Put(recordId, 4, "atomic-field-value"u8);
+            FldLocalOperationCommitResult committed = db.CommitWithReceipt(receipt);
+            originalCommitSeq = committed.CommitSeq;
+            Assert.Equal(1ul, originalCommitSeq);
+            Assert.False(committed.IsDuplicate);
+            Assert.Equal(response, committed.Result);
+            Assert.Single(db.ReadOutboxBatch(0, 10));
+            Assert.True(db.TryGetLocalOperationReceipt(
+                clientId, operationId, fingerprint, out var found));
+            Assert.Equal(originalCommitSeq, found!.CommitSeq);
+            Assert.Equal(response, found.Result);
+
+            // Force the receipt into the manifest before the covered WAL segment is removed.
+            db.Checkpoint();
+        }
+
+        string[] remainingWal = Directory.GetFiles(
+            Path.Combine(_dir, "wal"), "ns_0.*.log");
+        Assert.Single(remainingWal);
+
+        using (var reopened = FldDatabase.Open(options))
+        {
+            Assert.True(reopened.TryGetLocalOperationReceipt(
+                clientId, operationId, fingerprint, out var found));
+            Assert.Equal(originalCommitSeq, found!.CommitSeq);
+            Assert.Equal(response, found.Result);
+
+            FldLocalOperationCommitResult replay = reopened.CommitWithReceipt(receipt);
+            Assert.True(replay.IsDuplicate);
+            Assert.Equal(originalCommitSeq, replay.CommitSeq);
+            Assert.Equal(response, replay.Result);
+            Assert.Empty(reopened.ReadOutboxBatch(1, 10));
+
+            byte[] conflictingFingerprint = fingerprint.ToArray();
+            conflictingFingerprint[0] ^= 0x80;
+            Assert.Throws<InvalidDataException>(() => reopened.TryGetLocalOperationReceipt(
+                clientId, operationId, conflictingFingerprint, out _));
+        }
+    }
+
+    [Fact]
+    public void Local_operation_receipt_can_commit_a_read_only_operation_without_field_mutations()
+    {
+        byte[] clientId = new byte[16]; clientId[0] = 0x61;
+        byte[] operationId = new byte[16]; operationId[0] = 0x62;
+        byte[] fingerprint = new byte[32]; fingerprint[0] = 0x63;
+        byte[] response = "read-result"u8.ToArray();
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            FldLocalOperationCommitResult committed = db.CommitWithReceipt(new FldLocalOperationReceipt
+            {
+                ClientId = clientId,
+                OperationId = operationId,
+                Fingerprint = fingerprint,
+                Result = response
+            });
+            Assert.Equal(1ul, committed.CommitSeq);
+            Assert.Empty(db.ReadOutboxBatch(0, 10));
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            Assert.True(reopened.TryGetLocalOperationReceipt(
+                clientId, operationId, fingerprint, out var replay));
+            Assert.Equal(response, replay!.Result);
+            Assert.Equal(1ul, replay.CommitSeq);
+        }
+    }
+
+    [Fact]
     public void Local_identity_draft_with_unassigned_origin_sequence_survives_wal_recovery()
     {
         var recordId = FldDatabase.NewRecordId();
