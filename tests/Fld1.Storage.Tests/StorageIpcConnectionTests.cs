@@ -157,9 +157,10 @@ public sealed class StorageIpcConnectionTests
     }
 
     [Fact]
-    public async Task Local_pipe_server_rejects_request_from_stale_session_generation()
+    public async Task Local_pipe_server_rejects_request_from_previous_connection_generation()
     {
         string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
+        Guid stableClientId = Guid.NewGuid();
         using var serverCancellation = new CancellationTokenSource();
         int handlerCalls = 0;
         var server = new StorageIpcServer(
@@ -170,31 +171,44 @@ public sealed class StorageIpcConnectionTests
                 return ValueTask.FromResult(payload);
             });
         Task serverTask = server.RunAsync(serverCancellation.Token);
+        ulong previousGeneration;
 
         try
         {
-            await using var pipe = new NamedPipeClientStream(
+            await using (var previousPipe = new NamedPipeClientStream(
+                ".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous))
+            {
+                await previousPipe.ConnectAsync(10_000);
+                await StorageIpcProtocol.WriteAsync(previousPipe,
+                    new StorageIpcFrame(
+                        StorageIpcFrameType.Hello, 0, 0, stableClientId.ToByteArray()));
+                StorageIpcFrame? previousAck = await StorageIpcProtocol.ReadAsync(previousPipe);
+                Assert.NotNull(previousAck);
+                Assert.Equal(StorageIpcFrameType.HelloAck, previousAck.Value.Type);
+                previousGeneration = previousAck.Value.SessionGeneration;
+            }
+
+            await using var currentPipe = new NamedPipeClientStream(
                 ".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            await pipe.ConnectAsync(10_000);
-            byte[] clientId = Guid.NewGuid().ToByteArray();
-            await StorageIpcProtocol.WriteAsync(pipe,
-                new StorageIpcFrame(StorageIpcFrameType.Hello, 0, 0, clientId));
+            await currentPipe.ConnectAsync(10_000);
+            await StorageIpcProtocol.WriteAsync(currentPipe,
+                new StorageIpcFrame(
+                    StorageIpcFrameType.Hello, 0, 0, stableClientId.ToByteArray()));
+            StorageIpcFrame? currentAck = await StorageIpcProtocol.ReadAsync(currentPipe);
+            Assert.NotNull(currentAck);
+            Assert.Equal(StorageIpcFrameType.HelloAck, currentAck.Value.Type);
+            Assert.NotEqual(previousGeneration, currentAck.Value.SessionGeneration);
 
-            StorageIpcFrame? helloAck = await StorageIpcProtocol.ReadAsync(pipe);
-            Assert.NotNull(helloAck);
-            Assert.Equal(StorageIpcFrameType.HelloAck, helloAck.Value.Type);
-            ulong liveGeneration = helloAck.Value.SessionGeneration;
-            ulong staleGeneration = liveGeneration == 1 ? 2UL : liveGeneration - 1;
-
-            await StorageIpcProtocol.WriteAsync(pipe,
-                new StorageIpcFrame(StorageIpcFrameType.Request, 1, staleGeneration, "stale"u8.ToArray()));
+            await StorageIpcProtocol.WriteAsync(currentPipe,
+                new StorageIpcFrame(
+                    StorageIpcFrameType.Request, 1, previousGeneration, "stale-replay"u8.ToArray()));
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             StorageIpcFrame? response = null;
             Exception? transportFailure = null;
             try
             {
-                response = await StorageIpcProtocol.ReadAsync(pipe, timeout.Token);
+                response = await StorageIpcProtocol.ReadAsync(currentPipe, timeout.Token);
             }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException)
             {
@@ -202,7 +216,7 @@ public sealed class StorageIpcConnectionTests
             }
 
             Assert.True(response is null || transportFailure is not null,
-                "The server must close a session that presents a stale generation.");
+                "A previous connection generation must be rejected on a reconnected client.");
             Assert.Equal(0, Volatile.Read(ref handlerCalls));
         }
         finally
