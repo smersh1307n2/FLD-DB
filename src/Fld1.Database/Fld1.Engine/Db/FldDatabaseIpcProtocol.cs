@@ -61,7 +61,7 @@ public static class FldDatabaseIpcProtocol
     private const int MaxMutationCount = 4096;
     private const int OutboxChunkRequestBytes = 32;
     private const int OutboxChunkResponseHeaderBytes = 94;
-    private const int MaxOutboxChunkBytes = StorageIpcProtocol.MaxPayloadBytes - OutboxChunkResponseHeaderBytes;
+    public const int MaxOutboxChunkBytes = StorageIpcProtocol.MaxPayloadBytes - OutboxChunkResponseHeaderBytes;
 
     public static byte[] EncodeOutboxLeaseResponse(ulong leaseEpoch)
     {

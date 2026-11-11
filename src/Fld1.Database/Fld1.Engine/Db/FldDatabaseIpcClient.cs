@@ -86,7 +86,7 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         ulong afterSequence,
         ulong entrySequence = 0,
         uint valueOffset = 0,
-        uint maxChunkBytes = 256 * 1024,
+        uint maxChunkBytes = (uint)FldDatabaseIpcProtocol.MaxOutboxChunkBytes,
         CancellationToken cancellationToken = default)
     {
         ulong requestCursor = entrySequence == 0 ? afterSequence : entrySequence - 1;
