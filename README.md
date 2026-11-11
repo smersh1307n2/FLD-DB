@@ -31,7 +31,7 @@ The cross-repository [sync storage compaction roadmap](docs/SYNC-STORAGE-COMPACT
 | `Fld1.Storage.dll` | Separate generic byte-key/value engine; first runtime assembly |
 | `Fld1.Database.dll` | Second runtime assembly; links Core, Run, WAL, Manifest and Engine source into one deployable database layer |
 | `Fld1.Storage.Host` | Separate Storage-only process; does not load Database |
-| `Fld1.Database.Host` | Separate single-owner Database process; current IPC facade supports atomic WriteBatch, receipt-backed ReadField and receipt ACK |
+| `Fld1.Database.Host` | Separate single-owner Database process; IPC supports atomic WriteBatch, receipt-backed ReadField/ACK and lease-fenced chunked Outbox reads/ACK |
 | Database source areas | Core (Uuid7/HLC/Hash), Run (builder/reader), WAL, Manifest and Engine are physically consolidated under `src/Fld1.Database` while retaining their namespace/folder organization |
 
 ## Simple API
@@ -82,8 +82,9 @@ The current `FldDatabaseIpcClient` surface is deliberately narrow:
 - `WriteBatchAsync` applies all field mutations and its operation receipt in one GROUP_COMMIT/WAL transaction. Deletes carry no value.
 - `ReadFieldAsync` stores the exact read result as a receipt-only operation, so a lost response can be replayed without re-reading a changed value.
 - `AcknowledgeThroughAsync` retires a contiguous prefix of the client's operation receipts after the client has persisted those results.
+- `AcquireOutboxLeaseAsync`, `ReadOutboxEntryChunkAsync`, `AcknowledgeOutboxThroughAsync` and `ReleaseOutboxLeaseAsync` expose the durable, lease-fenced synchronization Outbox. Values are returned in bounded chunks; the default chunk fills the largest legal IPC response to avoid repeated full-record reads.
 
-A receipt-only read does not create an Outbox entry. A write batch creates the ordinary local field changes and Outbox entries exactly once. Outbox delivery/ACK, snapshots, paged reads, remote APPLY and subscriptions are not yet part of this first Database IPC facade; they remain later facade work. See [the Database IPC contract](docs/FLD-DATABASE-IPC.md) for wire and retry details.
+A receipt-only read does not create an Outbox entry. A write batch creates the ordinary local field changes and Outbox entries exactly once. IPC receipt ACK and synchronization Outbox ACK are separate durable watermarks. Stable paged snapshots, contextual remote APPLY and subscriptions/streaming remain later facade work. See [the Database IPC contract](docs/FLD-DATABASE-IPC.md) for wire and retry details.
 
 ## Build
 

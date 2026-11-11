@@ -33,10 +33,24 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ReadField | 0x2101 | ClientSequence (u64), RecordId (16 bytes), FieldId (u16) |
 | WriteBatch | 0x2102 | ClientSequence (u64), mutation count (u32), then mutations |
 | AcknowledgeReceipts | 0x2103 | acknowledged-through ClientSequence (u64) |
+| AcquireOutboxLease | 0x2104 | empty payload; response is LeaseEpoch (u64) |
+| ReadOutboxEntryChunk | 0x2105 | LeaseEpoch (u64), cursor AfterSequence (u64), EntrySequence (u64; zero means next), ValueOffset (u32), MaxChunkBytes (u32) |
+| AcknowledgeOutbox | 0x2106 | LeaseEpoch (u64), through OutboxSeq (u64) |
+| ReleaseOutboxLease | 0x2107 | LeaseEpoch (u64) |
 
 Each write mutation is RecordId (16 bytes), FieldId (u16), KeyEpoch (u16), kind (u8: 0=Put, 1=Delete), value length (u32), then value bytes. A Delete must have a zero value length. A batch is one atomic Database operation and must contain at least one mutation. The frame limit is enforced before sending and while decoding; malformed lengths, trailing bytes, invalid mutation kinds and zero identifiers are rejected.
 
 The canonical request fingerprint includes the operation code and the complete encoded payload. A retry therefore cannot silently change a field value, mutation order, key epoch or ClientSequence while retaining the same operation identity.
+
+## Outbox lease and chunk protocol
+
+The Outbox consumer lease is owned by the IPC ClientId. Acquiring a lease durably increments its epoch and fences every previous token. When a Host reopens an Outbox whose persisted lease still has a nonzero owner, `OutboxLog.Open` advances the epoch and clears that owner before serving clients; the reconnecting consumer must acquire a new lease. Explicit release also advances the epoch and clears ownership. A stale lease is rejected by reads, ACK and release.
+
+`ReadOutboxEntryChunk` returns one entry at a time. With EntrySequence zero, the Host selects the next entry after AfterSequence. For continuation, the client repeats the returned OutboxSeq and supplies the next ValueOffset; the client facade normalizes the cursor to OutboxSeq - 1. The response carries OutboxSeq, CommitSeq, ChangeId, RecordId, FieldId, OpKind, AuthorNodeId, HLC, KeyEpoch, total value length, offset and the copied value chunk. A one-byte status-zero response means no entry remains after the cursor.
+
+The Storage IPC frame is limited to 4 MiB and Outbox values may also reach 4 MiB. The default chunk is therefore the largest response payload that fits after the fixed 94-byte response header. Callers may request smaller chunks, but should prefer the default for throughput: the current synchronous Outbox visitor validates and reads the complete durable record before copying the requested slice. Continuations are bounded and never retain the borrowed `OutboxEntryView` beyond its visitor callback.
+
+The consumer persists the downstream result before calling `AcknowledgeOutboxThroughAsync`. The lease-fenced Outbox ACK advances only the synchronization Outbox watermark; it does not retire local IPC operation receipts. Conversely, `AcknowledgeThroughAsync` does not acknowledge the synchronization Outbox. Keep these two acknowledgements independent.
 
 ## Commit and Outbox semantics
 
@@ -48,20 +62,20 @@ AcknowledgeReceipts advances the client's durable contiguous receipt watermark. 
 
 ## Current facade boundary
 
-Implemented in the first facade:
+Implemented in the current facade:
 
 - atomic WriteBatch with durable operation receipt;
 - receipt-backed ReadField;
 - contiguous-prefix receipt acknowledgement;
-- retry and recovery across Host restart;
+- lease-fenced Outbox acquisition, bounded entry chunks, Outbox ACK and release;
+- retry and recovery across Host restart, including Outbox lease epoch fencing;
 - single-owner Host endpoint publication.
 
 Not exposed by this facade yet:
 
-- pinned/paged snapshots and snapshot release;
-- paged Outbox reads and Outbox acknowledgement;
+- stable pinned/paged Database snapshots and snapshot release;
 - contextual remote APPLY;
 - subscriptions or streaming change feeds;
-- cross-process multi-client scheduling beyond the serialized request path.
+- multi-entry batch aggregation beyond the one-entry chunk cursor.
 
 Do not emulate these missing operations by issuing separate Put/Commit requests: that would expose intermediate overlay state and violate atomic batch semantics. They require explicit facade operations and their own durable contracts.
