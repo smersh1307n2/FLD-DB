@@ -32,7 +32,7 @@ public sealed class FldDatabasePublicationModeTests
                 Assert.Equal(123UL, watermark);
             }
 
-            using (var otherNamespace = FldDatabase.Open(root, namespaceId + 1, Id(0x32)))
+            using (var otherNamespace = FldDatabase.Open(root, namespaceId + 1, Id(0x31)))
             {
                 Assert.False(otherNamespace.TryGetMetadataStoreOwnedPublicationCutover(out ulong missing));
                 Assert.Equal(0UL, missing);
