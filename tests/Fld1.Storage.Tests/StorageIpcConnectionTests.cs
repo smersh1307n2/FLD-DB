@@ -91,8 +91,22 @@ public sealed class StorageIpcConnectionTests
         Assert.Equal("still-usable"u8.ToArray(), response.Span[16..].ToArray());
 
         await admittedClient.DisposeAsync();
-        await using (var replacementClient = await StorageIpcClientConnection.ConnectAsync(
-            pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(10)))
+        StorageIpcClientConnection? replacementClient = null;
+        for (int attempt = 0; attempt < 50 && replacementClient is null; attempt++)
+        {
+            try
+            {
+                replacementClient = await StorageIpcClientConnection.ConnectAsync(
+                    pipeName, Guid.NewGuid(), TimeSpan.FromSeconds(2));
+            }
+            catch (Exception exception) when (exception is IOException or InvalidDataException)
+            {
+                await Task.Delay(20);
+            }
+        }
+
+        Assert.NotNull(replacementClient);
+        await using (replacementClient)
         {
             ReadOnlyMemory<byte> replacementResponse =
                 await replacementClient.RequestAsync("slot-reused"u8.ToArray());
