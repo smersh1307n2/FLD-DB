@@ -90,6 +90,69 @@ public sealed class StorageIpcProtocolTests
     }
 
     [Fact]
+    public void Stable_operation_envelope_round_trips_with_canonical_guid_byte_order()
+    {
+        Guid operationId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+        byte[] payload = "write-field:record-1"u8.ToArray();
+        byte[] encoded = StorageIpcOperationProtocol.Encode(
+            new StorageIpcOperationEnvelope(operationId, 7, payload));
+
+        Assert.Equal(StorageIpcOperationProtocol.HeaderBytes + payload.Length, encoded.Length);
+        Assert.Equal(
+            new byte[] { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF },
+            encoded.AsSpan(8, 16).ToArray());
+
+        StorageIpcOperationEnvelope decoded = StorageIpcOperationProtocol.Decode(encoded);
+        Assert.Equal(operationId, decoded.OperationId);
+        Assert.Equal(7, decoded.OperationCode);
+        Assert.Equal(payload, decoded.Payload.ToArray());
+    }
+
+    [Fact]
+    public void Stable_operation_envelope_rejects_empty_identity_invalid_code_and_bad_lengths()
+    {
+        byte[] payload = "payload"u8.ToArray();
+        Assert.Throws<ArgumentException>(() =>
+            StorageIpcOperationProtocol.Encode(
+                new StorageIpcOperationEnvelope(Guid.Empty, 1, payload)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            StorageIpcOperationProtocol.Encode(
+                new StorageIpcOperationEnvelope(Guid.NewGuid(), 0, payload)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            StorageIpcOperationProtocol.Encode(
+                new StorageIpcOperationEnvelope(
+                    Guid.NewGuid(), 1, new byte[StorageIpcOperationProtocol.MaxPayloadBytes + 1])));
+
+        Assert.Throws<InvalidDataException>(() =>
+            StorageIpcOperationProtocol.Decode(new byte[StorageIpcOperationProtocol.HeaderBytes - 1]));
+
+        byte[] encoded = StorageIpcOperationProtocol.Encode(
+            new StorageIpcOperationEnvelope(Guid.NewGuid(), 1, payload));
+        encoded[0] ^= 0xFF;
+        Assert.Throws<InvalidDataException>(() => StorageIpcOperationProtocol.Decode(encoded));
+    }
+
+    [Fact]
+    public void Stable_operation_envelope_rejects_unknown_version_zero_code_and_trailing_bytes()
+    {
+        byte[] encoded = StorageIpcOperationProtocol.Encode(
+            new StorageIpcOperationEnvelope(Guid.NewGuid(), 1, "x"u8.ToArray()));
+
+        byte[] badVersion = encoded.ToArray();
+        badVersion[4] = 2;
+        Assert.Throws<InvalidDataException>(() => StorageIpcOperationProtocol.Decode(badVersion));
+
+        byte[] zeroCode = encoded.ToArray();
+        zeroCode[6] = 0;
+        zeroCode[7] = 0;
+        Assert.Throws<InvalidDataException>(() => StorageIpcOperationProtocol.Decode(zeroCode));
+
+        byte[] trailing = encoded.Concat(new byte[] { 0 }).ToArray();
+        Assert.Throws<InvalidDataException>(() => StorageIpcOperationProtocol.Decode(trailing));
+    }
+
+    [Fact]
     public void Crc32c_matches_the_castagnoli_check_vector()
     {
         Assert.Equal(0xE3069283u, StorageIpcProtocol.ComputeCrc32C(
