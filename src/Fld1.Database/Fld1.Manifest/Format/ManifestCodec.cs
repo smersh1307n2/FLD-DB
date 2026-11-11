@@ -383,7 +383,8 @@ public static class ManifestCodec
         var operationReceiptKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var receipt in document.LocalOperationReceipts)
         {
-            if (receipt.NamespaceId > 0xFFFF || receipt.ClientId.Length != 16 || IsZero(receipt.ClientId)
+            if (receipt.NamespaceId > 0xFFFF || !namespaces.Contains(receipt.NamespaceId)
+                || receipt.ClientId.Length != 16 || IsZero(receipt.ClientId)
                 || receipt.OperationId.Length != 16 || IsZero(receipt.OperationId)
                 || receipt.Fingerprint.Length != 32 || receipt.CommitSeq == 0
                 || receipt.Result.Length > 4 * 1024 * 1024)
