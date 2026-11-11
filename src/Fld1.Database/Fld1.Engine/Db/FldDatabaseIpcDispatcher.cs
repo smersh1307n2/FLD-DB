@@ -1,5 +1,6 @@
 using Fld1.Engine.Outbox;
 using Fld1.Storage.Ipc;
+using Fld1.Engine.Sync;
 
 namespace Fld1.Engine.Db;
 
@@ -71,6 +72,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleReadSnapshotValueChunk(context.ClientId, operation.Payload),
             FldDatabaseIpcOperationCodes.ReleaseSnapshot =>
                 HandleReleaseSnapshot(context.ClientId, operation.Payload),
+            FldDatabaseIpcOperationCodes.ApplyRemoteBatch =>
+                HandleApplyRemoteBatch(operation.Payload),
             _ => throw new NotSupportedException($"Unsupported FLD Database IPC operation code {operation.OperationCode}.")
         };
         return ValueTask.FromResult<ReadOnlyMemory<byte>>(response);
@@ -177,6 +180,13 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         ulong leaseEpoch = FldDatabaseIpcProtocol.DecodeOutboxLeasePayload(payload);
         _database.ReleaseOutboxLease(new OutboxLease(leaseEpoch, clientId.ToArray()));
         return FldDatabaseIpcProtocol.EncodeOutboxBooleanResponse(true);
+    }
+
+    private byte[] HandleApplyRemoteBatch(ReadOnlyMemory<byte> payload)
+    {
+        RemoteBatchCommit batch = FldDatabaseIpcRemoteApplyProtocol.DecodeRequest(payload);
+        RemoteBatchReceipt receipt = _database.ApplyRemoteBatch(batch);
+        return FldDatabaseIpcRemoteApplyProtocol.EncodeReceipt(receipt);
     }
 
     private byte[] HandleOpenSnapshot(Guid clientId, Guid operationId, ReadOnlyMemory<byte> payload)
