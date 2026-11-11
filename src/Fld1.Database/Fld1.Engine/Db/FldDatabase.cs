@@ -827,13 +827,19 @@ public sealed partial class FldDatabase : IDisposable
                     };
                 }
 
-                LocalOperationClientState clientState =
-                    GetOrCreateLocalOperationClientState(operationReceipt.ClientId);
-                if (operationReceipt.ClientSequence <= clientState.AcknowledgedThroughSequence)
+                string clientKey = LocalOperationClientKey(operationReceipt.ClientId);
+                ulong lastCommittedSequence = 0;
+                ulong acknowledgedThroughSequence = 0;
+                if (_localOperationClients.TryGetValue(clientKey, out LocalOperationClientState? clientState))
+                {
+                    lastCommittedSequence = clientState.LastCommittedSequence;
+                    acknowledgedThroughSequence = clientState.AcknowledgedThroughSequence;
+                }
+                if (operationReceipt.ClientSequence <= acknowledgedThroughSequence)
                     throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
-                if (operationReceipt.ClientSequence != checked(clientState.LastCommittedSequence + 1))
+                if (operationReceipt.ClientSequence != checked(lastCommittedSequence + 1))
                     throw new InvalidOperationException(
-                        $"Expected ClientSequence {clientState.LastCommittedSequence + 1}, received {operationReceipt.ClientSequence}.");
+                        $"Expected ClientSequence {lastCommittedSequence + 1}, received {operationReceipt.ClientSequence}.");
             }
 
             if (_dirty.Count == 0 && operationReceipt is null)
