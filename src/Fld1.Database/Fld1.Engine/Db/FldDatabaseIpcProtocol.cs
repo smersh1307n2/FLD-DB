@@ -22,6 +22,8 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ApplyRemoteBatch = 0x210C;
     public const ushort AppendLocalProviderBatch = 0x210D;
     public const ushort GetOutboxHighWatermark = 0x210E;
+    public const ushort ReadCurrentMetadata = 0x210F;
+    public const ushort ReadCurrentValueChunk = 0x2110;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -32,6 +34,12 @@ public sealed record FldDatabaseIpcMutation(
     byte[] Value);
 
 public sealed record FldDatabaseIpcWriteResult(ulong CommitSeq, bool IsDuplicate, int MutationCount);
+public sealed record FldDatabaseIpcCurrentMetadata(uint ValueLength, ulong HlcWall, uint HlcLogical, byte[] AuthorNodeId, ushort KeyEpoch, bool IsTombstone, byte[] ChangeId, uint OriginAuthorEpoch, ulong OriginSequence);
+public enum FldDatabaseIpcCurrentReadStatus : byte { Missing = 0, Changed = 1, Data = 2 }
+public sealed record FldDatabaseIpcCurrentValueChunk(FldDatabaseIpcCurrentReadStatus Status, uint ValueLength, uint ValueOffset, byte[] ValueChunk)
+{
+    public bool IsComplete => Status == FldDatabaseIpcCurrentReadStatus.Data && (ulong)ValueOffset + (uint)ValueChunk.Length == ValueLength;
+}
 
 public sealed record FldDatabaseIpcReadResult(
     ulong CommitSeq,
@@ -259,6 +267,68 @@ public static class FldDatabaseIpcProtocol
             totalLength,
             valueOffset,
             span.Slice(OutboxChunkResponseHeaderBytes, (int)chunkLength).ToArray());
+    }
+
+    public const int MaxCurrentValueChunkBytes = StorageIpcProtocol.MaxPayloadBytes - 13;
+
+    public static byte[] EncodeReadCurrentMetadataPayload(ReadOnlySpan<byte> recordId, ushort fieldId)
+    {
+        if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes.", nameof(recordId));
+        byte[] payload = new byte[18]; recordId.CopyTo(payload);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(16), fieldId); return payload;
+    }
+    public static (byte[] RecordId, ushort FieldId) DecodeReadCurrentMetadataPayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != 18) throw new InvalidDataException("Current metadata request length is invalid.");
+        return (payload[..16].ToArray(), BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[16..]));
+    }
+    public static byte[] EncodeCurrentMetadataResponse(FldDatabaseIpcCurrentMetadata? m)
+    {
+        byte[] b = new byte[64]; if (m is null) return b;
+        if (m.AuthorNodeId is not { Length: 16 } || m.ChangeId is not { Length: 16 } || (m.IsTombstone && m.ValueLength != 0))
+            throw new ArgumentException("Current metadata is not canonical.", nameof(m));
+        b[0]=1; BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(1),m.ValueLength);
+        BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(5),m.HlcWall); BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(13),m.HlcLogical);
+        m.AuthorNodeId.CopyTo(b,17); BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(33),m.KeyEpoch); b[35]=m.IsTombstone?(byte)1:(byte)0;
+        m.ChangeId.CopyTo(b,36); BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(52),m.OriginAuthorEpoch); BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(56),m.OriginSequence); return b;
+    }
+    public static FldDatabaseIpcCurrentMetadata? DecodeCurrentMetadataResponse(ReadOnlyMemory<byte> p)
+    {
+        if(p.Length!=64 || p.Span[0]>1) throw new InvalidDataException("Current metadata response is invalid.");
+        if(p.Span[0]==0){if(p.Span[1..].IndexOfAnyExcept((byte)0)>=0)throw new InvalidDataException("Missing metadata response contains data.");return null;}
+        ReadOnlySpan<byte>s=p.Span; bool tomb=s[35] switch{0=>false,1=>true,_=>throw new InvalidDataException("Invalid tombstone flag.")};
+        uint len=BinaryPrimitives.ReadUInt32LittleEndian(s[1..]); if(tomb&&len!=0)throw new InvalidDataException("Tombstone has a value.");
+        return new(len,BinaryPrimitives.ReadUInt64LittleEndian(s[5..]),BinaryPrimitives.ReadUInt32LittleEndian(s[13..]),s.Slice(17,16).ToArray(),BinaryPrimitives.ReadUInt16LittleEndian(s[33..]),tomb,s.Slice(36,16).ToArray(),BinaryPrimitives.ReadUInt32LittleEndian(s[52..]),BinaryPrimitives.ReadUInt64LittleEndian(s[56..]));
+    }
+    public static byte[] EncodeReadCurrentValueChunkPayload(ReadOnlySpan<byte> recordId,ushort fieldId,ReadOnlySpan<byte> changeId,uint offset,uint max)
+    {
+        if(recordId.Length!=16)throw new ArgumentException("RecordId must be 16 bytes.",nameof(recordId));
+        if(changeId.Length!=16)throw new ArgumentException("ChangeId must be 16 bytes.",nameof(changeId));
+        if(max is 0 or > MaxCurrentValueChunkBytes)throw new ArgumentOutOfRangeException(nameof(max));
+        byte[] b=new byte[42];recordId.CopyTo(b);BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(16),fieldId);changeId.CopyTo(b.AsSpan(18));
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(34),offset);BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(38),max);return b;
+    }
+    public static (byte[] RecordId,ushort FieldId,byte[] ExpectedChangeId,uint ValueOffset,uint MaxChunkBytes) DecodeReadCurrentValueChunkPayload(ReadOnlyMemory<byte> p)
+    {
+        if(p.Length!=42)throw new InvalidDataException("Current value request length is invalid.");
+        uint max=BinaryPrimitives.ReadUInt32LittleEndian(p.Span[38..]);if(max is 0 or > MaxCurrentValueChunkBytes)throw new InvalidDataException("Current value chunk size is invalid.");
+        return(p[..16].ToArray(),BinaryPrimitives.ReadUInt16LittleEndian(p.Span[16..]),p.Slice(18,16).ToArray(),BinaryPrimitives.ReadUInt32LittleEndian(p.Span[34..]),max);
+    }
+    public static byte[] EncodeCurrentValueChunkResponse(FldDatabaseIpcCurrentValueChunk c)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        if(c.Status!=FldDatabaseIpcCurrentReadStatus.Data&&(c.ValueLength!=0||c.ValueOffset!=0||c.ValueChunk.Length!=0))throw new ArgumentException("Non-data chunk must be empty.",nameof(c));
+        if(c.ValueChunk.Length>MaxCurrentValueChunkBytes||(ulong)c.ValueOffset+(uint)c.ValueChunk.Length>c.ValueLength)throw new ArgumentException("Current value chunk bounds invalid.",nameof(c));
+        byte[] b=new byte[13+c.ValueChunk.Length];b[0]=(byte)c.Status;BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(1),c.ValueLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(5),c.ValueOffset);BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(9),(uint)c.ValueChunk.Length);c.ValueChunk.CopyTo(b,13);return b;
+    }
+    public static FldDatabaseIpcCurrentValueChunk DecodeCurrentValueChunkResponse(ReadOnlyMemory<byte> p)
+    {
+        if(p.Length<13)throw new InvalidDataException("Current value response truncated.");
+        var status=p.Span[0] switch{0=>FldDatabaseIpcCurrentReadStatus.Missing,1=>FldDatabaseIpcCurrentReadStatus.Changed,2=>FldDatabaseIpcCurrentReadStatus.Data,_=>throw new InvalidDataException("Invalid current value status.")};
+        uint len=BinaryPrimitives.ReadUInt32LittleEndian(p.Span[1..]),off=BinaryPrimitives.ReadUInt32LittleEndian(p.Span[5..]),n=BinaryPrimitives.ReadUInt32LittleEndian(p.Span[9..]);
+        if(n!=p.Length-13||(status!=FldDatabaseIpcCurrentReadStatus.Data&&(len!=0||off!=0||n!=0))||(ulong)off+n>len)throw new InvalidDataException("Current value response bounds invalid.");
+        return new(status,len,off,p.Slice(13,checked((int)n)).ToArray());
     }
 
     public static byte[] EncodeOutboxHighWatermarkResponse(ulong highWatermark)

@@ -78,6 +78,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleAppendLocalProviderBatch(clientId, operationId, operation),
             FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
                 HandleGetOutboxHighWatermark(operation.Payload),
+            FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
+            FldDatabaseIpcOperationCodes.ReadCurrentValueChunk => HandleReadCurrentValueChunk(operation.Payload),
             _ => throw new NotSupportedException($"Unsupported FLD Database IPC operation code {operation.OperationCode}.")
         };
         return ValueTask.FromResult<ReadOnlyMemory<byte>>(response);
@@ -135,6 +137,21 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         bool acknowledged = _database.AcknowledgeLocalOperationReceipts(clientId, throughSequence);
         return [acknowledged ? (byte)1 : (byte)0];
     }
+    private byte[] HandleReadCurrentMetadata(ReadOnlyMemory<byte> payload)
+    {
+        var key=FldDatabaseIpcProtocol.DecodeReadCurrentMetadataPayload(payload);
+        FldDatabaseIpcCurrentMetadata? result=null;
+        if(_database.TryReadProviderCurrentMetadata(key.RecordId,key.FieldId,out FldProviderCurrentMetadata? m)&&m is not null)
+            result=new(m.ValueLength,m.HlcWall,m.HlcLogical,m.AuthorNodeId,m.KeyEpoch,m.IsTombstone,m.ChangeId,m.OriginAuthorEpoch,m.OriginSequence);
+        return FldDatabaseIpcProtocol.EncodeCurrentMetadataResponse(result);
+    }
+    private byte[] HandleReadCurrentValueChunk(ReadOnlyMemory<byte> payload)
+    {
+        var q=FldDatabaseIpcProtocol.DecodeReadCurrentValueChunkPayload(payload);
+        var c=_database.ReadProviderCurrentValueChunk(q.RecordId,q.FieldId,q.ExpectedChangeId,q.ValueOffset,q.MaxChunkBytes);
+        return FldDatabaseIpcProtocol.EncodeCurrentValueChunkResponse(new((FldDatabaseIpcCurrentReadStatus)c.Status,c.ValueLength,c.ValueOffset,c.ValueChunk));
+    }
+
     private byte[] HandleGetOutboxHighWatermark(ReadOnlyMemory<byte> payload)
     {
         if (!payload.IsEmpty)

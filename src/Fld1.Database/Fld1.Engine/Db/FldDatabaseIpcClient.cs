@@ -69,6 +69,19 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return response.Span[0] == 1;
     }
 
+    public async Task<FldDatabaseIpcCurrentMetadata?> ReadCurrentMetadataAsync(ReadOnlyMemory<byte> recordId,ushort fieldId,CancellationToken cancellationToken=default)
+    {
+        byte[] p=FldDatabaseIpcProtocol.EncodeReadCurrentMetadataPayload(recordId.Span,fieldId);
+        var r=await SendAsync(Guid.NewGuid(),FldDatabaseIpcOperationCodes.ReadCurrentMetadata,p,cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeCurrentMetadataResponse(r);
+    }
+    public async Task<FldDatabaseIpcCurrentValueChunk> ReadCurrentValueChunkAsync(ReadOnlyMemory<byte> recordId,ushort fieldId,ReadOnlyMemory<byte> expectedChangeId,uint valueOffset=0,uint maxChunkBytes=(uint)FldDatabaseIpcProtocol.MaxCurrentValueChunkBytes,CancellationToken cancellationToken=default)
+    {
+        byte[] p=FldDatabaseIpcProtocol.EncodeReadCurrentValueChunkPayload(recordId.Span,fieldId,expectedChangeId.Span,valueOffset,maxChunkBytes);
+        var r=await SendAsync(Guid.NewGuid(),FldDatabaseIpcOperationCodes.ReadCurrentValueChunk,p,cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeCurrentValueChunkResponse(r);
+    }
+
     /// <summary>Reads the current durable Outbox high watermark without acquiring a consumer lease.</summary>
     public async Task<ulong> GetOutboxHighWatermarkAsync(
         CancellationToken cancellationToken = default)
