@@ -128,6 +128,68 @@ public sealed class FldDatabaseIpcLocalProviderTests
     }
 
     [Fact]
+    public async Task Local_provider_batch_commits_multiple_identity_stamped_fields_in_one_group_commit()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-local-provider-ipc-batch-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x325;
+        byte[] localAuthor = Id(0x41);
+        Guid ownerId = Guid.NewGuid();
+        Guid clientId = Guid.NewGuid();
+        byte[] recordId = FldDatabase.NewRecordId();
+
+        using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+        using var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+        Task serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+            FldLocalProviderMutation first = Mutation() with { RecordId = recordId };
+            FldLocalProviderMutation second = Mutation() with
+            {
+                RecordId = recordId,
+                FieldId = 5,
+                ChangeId = Id(0x75),
+                Value = "second-provider-value"u8.ToArray(),
+                Wall = 123457
+            };
+
+            await using var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10));
+            FldDatabaseIpcWriteResult result = await client.AppendLocalProviderBatchAsync(
+                Guid.NewGuid(), 1, [first, second]);
+
+            Assert.False(result.IsDuplicate);
+            Assert.Equal(1ul, result.CommitSeq);
+            Assert.Equal(2, result.MutationCount);
+            Assert.Equal(2ul, database.GetOutboxHighWatermark());
+            var entries = database.ReadOutboxBatch(0, 10);
+            Assert.Equal(2, entries.Count);
+            Assert.All(entries, entry => Assert.Equal(1ul, entry.CommitSeq));
+            Assert.Equal(new[] { first.ChangeId, second.ChangeId },
+                entries.OrderBy(entry => entry.FieldId).Select(entry => entry.ChangeId).ToArray());
+            Assert.True(database.TryGetBytes(recordId, first.FieldId, out byte[]? firstValue));
+            Assert.Equal(first.Value, firstValue);
+            Assert.True(database.TryGetBytes(recordId, second.FieldId, out byte[]? secondValue));
+            Assert.Equal(second.Value, secondValue);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task Local_provider_ipc_rejects_unrelated_uncommitted_overlay_writes()
     {
         string root = Path.Combine(Path.GetTempPath(), "fld-local-provider-ipc-boundary-" + Guid.NewGuid().ToString("N"));
