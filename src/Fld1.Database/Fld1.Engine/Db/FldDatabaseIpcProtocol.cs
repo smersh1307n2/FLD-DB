@@ -21,6 +21,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReleaseSnapshot = 0x210B;
     public const ushort ApplyRemoteBatch = 0x210C;
     public const ushort AppendLocalProviderBatch = 0x210D;
+    public const ushort GetOutboxHighWatermark = 0x210E;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -258,6 +259,20 @@ public static class FldDatabaseIpcProtocol
             totalLength,
             valueOffset,
             span.Slice(OutboxChunkResponseHeaderBytes, (int)chunkLength).ToArray());
+    }
+
+    public static byte[] EncodeOutboxHighWatermarkResponse(ulong highWatermark)
+    {
+        byte[] response = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(response, highWatermark);
+        return response;
+    }
+
+    public static ulong DecodeOutboxHighWatermarkResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != 8)
+            throw new InvalidDataException("FLD Outbox high-watermark response length is invalid.");
+        return BinaryPrimitives.ReadUInt64LittleEndian(response.Span);
     }
 
     public static byte[] EncodeOutboxBooleanResponse(bool value) => [value ? (byte)1 : (byte)0];
