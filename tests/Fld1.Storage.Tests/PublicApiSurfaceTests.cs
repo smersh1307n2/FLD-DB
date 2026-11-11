@@ -31,6 +31,7 @@ public sealed class PublicApiSurfaceTests
             "Fld1.Storage.Ipc.StorageIpcFrameType",
             "Fld1.Storage.Ipc.StorageIpcOperationEnvelope",
             "Fld1.Storage.Ipc.StorageIpcOperationProtocol",
+            "Fld1.Storage.Ipc.StorageIpcOperationLedger",
             "Fld1.Storage.Ipc.StorageIpcProtocol",
             "Fld1.Storage.Ipc.StorageIpcClientConnection",
             "Fld1.Storage.Ipc.StorageIpcRemoteException",
