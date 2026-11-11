@@ -14,7 +14,7 @@ public static class FldDatabaseIpcRemoteApplyProtocol
     public const byte Version = 1;
     public const int MaximumPayloadBytes = StorageIpcProtocol.MaxPayloadBytes;
     private const int MaximumOperations = RemoteBatchCommit.MaximumOperationsPerBatch;
-    private const int FixedHeaderBytes = 183;
+    private const int FixedHeaderBytes = 135;
     private const int FieldHeaderBytes = 81;
     private const int ReceiptHeaderBytes = 49;
 
@@ -79,9 +79,9 @@ public static class FldDatabaseIpcRemoteApplyProtocol
         byte[] batchId = ReadExact(reader, 16);
         ulong cursorStart = reader.ReadUInt64();
         ulong cursorEnd = reader.ReadUInt64();
-        byte[] previousDigest = ReadExact(reader, 32);
-        byte[] digest = ReadExact(reader, 32);
-        byte[] recordsRoot = ReadExact(reader, 32);
+        byte[] previousDigest = ReadExact(reader, 16);
+        byte[] digest = ReadExact(reader, 16);
+        byte[] recordsRoot = ReadExact(reader, 16);
         uint deltaLength = reader.ReadUInt32();
         uint writeCount = reader.ReadUInt32();
         uint relayCount = reader.ReadUInt32();
