@@ -90,6 +90,19 @@ public static class ManifestCodec
             throw new ArgumentException("CoordinatorSessionId must be 16 bytes");
         ms.Write(doc.CoordinatorSessionId);
 
+        // Optional v1 extension. Older manifests end immediately after CoordinatorSessionId.
+        ms.Write("FLOR"u8);
+        WriteU32(ms, (uint)doc.LocalOperationReceipts.Count);
+        foreach (var receipt in doc.LocalOperationReceipts)
+        {
+            ms.Write(receipt.ClientId);
+            ms.Write(receipt.OperationId);
+            ms.Write(receipt.Fingerprint);
+            WriteU64(ms, receipt.CommitSeq);
+            WriteU32(ms, (uint)receipt.Result.Length);
+            ms.Write(receipt.Result);
+        }
+
         var bytes = ms.ToArray();
         // CRC over body (after Generation+Crc fields)
         uint crc = Hashes.Crc32C(bytes.AsSpan((int)bodyStart));
@@ -191,6 +204,35 @@ public static class ManifestCodec
 
         ulong leaseEpoch = ReadU64(data, ref pos);
         var sessionId = ReadBytes(data, ref pos, 16);
+        var localReceipts = new List<LocalOperationReceiptEntry>();
+        if (pos < data.Length)
+        {
+            if (data.Length - pos < 8 || !data.Slice(pos, 4).SequenceEqual("FLOR"u8))
+                throw new InvalidDataException("unknown manifest extension");
+            pos += 4;
+            int receiptCount = ReadCount(
+                data, ref pos, minimumEntryBytes: 76, maxCount: 1_000_000, "local operation receipt");
+            localReceipts = new List<LocalOperationReceiptEntry>(receiptCount);
+            for (int i = 0; i < receiptCount; i++)
+            {
+                byte[] clientId = ReadBytes(data, ref pos, 16);
+                byte[] operationId = ReadBytes(data, ref pos, 16);
+                byte[] fingerprint = ReadBytes(data, ref pos, 32);
+                ulong commitSeq = ReadU64(data, ref pos);
+                uint resultLength = ReadU32(data, ref pos);
+                if (resultLength > 4 * 1024 * 1024)
+                    throw new InvalidDataException("local operation receipt result exceeds 4 MiB");
+                byte[] result = ReadBytes(data, ref pos, checked((int)resultLength));
+                localReceipts.Add(new LocalOperationReceiptEntry
+                {
+                    ClientId = clientId,
+                    OperationId = operationId,
+                    Fingerprint = fingerprint,
+                    CommitSeq = commitSeq,
+                    Result = result
+                });
+            }
+        }
 
         if (pos != data.Length)
             throw new InvalidDataException($"trailing bytes pos={pos} len={data.Length}");
@@ -205,6 +247,7 @@ public static class ManifestCodec
             Retains = retains,
             ResultClients = clients,
             ProvenanceIndex = prov,
+            LocalOperationReceipts = localReceipts,
             CoordinatorLeaseEpoch = leaseEpoch,
             CoordinatorSessionId = sessionId
         };
@@ -284,6 +327,13 @@ public static class ManifestCodec
             throw new InvalidDataException("manifest is truncated");
     }
 
+    private static bool IsZero(ReadOnlySpan<byte> value)
+    {
+        byte aggregate = 0;
+        foreach (byte part in value) aggregate |= part;
+        return aggregate == 0;
+    }
+
     private static void ValidateDocument(ManifestDocument document)
     {
         var namespaces = new HashSet<uint>();
@@ -325,6 +375,19 @@ public static class ManifestCodec
         {
             if (item.ClientInstanceId.Length != 16 || item.Outcome > ManifestOutcome.Skipped)
                 throw new InvalidDataException("invalid ProvenanceIndexEntry");
+        }
+
+        var operationReceiptKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var receipt in document.LocalOperationReceipts)
+        {
+            if (receipt.ClientId.Length != 16 || IsZero(receipt.ClientId)
+                || receipt.OperationId.Length != 16 || IsZero(receipt.OperationId)
+                || receipt.Fingerprint.Length != 32 || receipt.CommitSeq == 0
+                || receipt.Result.Length > 4 * 1024 * 1024)
+                throw new InvalidDataException("invalid LocalOperationReceiptEntry");
+            string key = Convert.ToHexString(receipt.ClientId) + Convert.ToHexString(receipt.OperationId);
+            if (!operationReceiptKeys.Add(key))
+                throw new InvalidDataException("duplicate LocalOperationReceiptEntry");
         }
 
         if (document.CoordinatorSessionId.Length != 16)
