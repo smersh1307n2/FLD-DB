@@ -24,6 +24,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort GetOutboxHighWatermark = 0x210E;
     public const ushort ReadCurrentMetadata = 0x210F;
     public const ushort ReadCurrentValueChunk = 0x2110;
+    public const ushort AppendLocalProviderBatchAutoSequence = 0x2111;
 }
 
 public sealed record FldDatabaseIpcMutation(

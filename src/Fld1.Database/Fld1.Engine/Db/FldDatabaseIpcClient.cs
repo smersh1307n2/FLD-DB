@@ -226,6 +226,26 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Appends an identity-preserving provider batch with server-assigned contiguous receipt sequence.
+    /// The caller supplies a stable OperationId (normally derived from the mutation ChangeId);
+    /// the same id and exact payload are safe to retry across client and Host restarts.
+    /// </summary>
+    public async Task<FldDatabaseIpcWriteResult> AppendLocalProviderBatchAutoSequenceAsync(
+        Guid operationId,
+        IReadOnlyList<FldLocalProviderMutation> mutations,
+        CancellationToken cancellationToken = default)
+    {
+        if (operationId == Guid.Empty)
+            throw new ArgumentException("Local provider IPC operation id must be nonzero.", nameof(operationId));
+        byte[] payload = FldDatabaseIpcLocalProviderProtocol.EncodeAutoSequenceRequest(mutations);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            operationId, FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence,
+            payload, cancellationToken).ConfigureAwait(false);
+        (ulong commitSeq, bool duplicate, byte[] result) = FldDatabaseIpcProtocol.DecodeCommitResult(response);
+        return FldDatabaseIpcProtocol.DecodeWriteResult(commitSeq, duplicate, result);
+    }
+
+    /// <summary>
     /// Atomically applies one contextual remote batch. Retry with the same batch identity;
     /// ApplyJournal, rather than the IPC operation id, is the durable deduplication authority.
     /// </summary>

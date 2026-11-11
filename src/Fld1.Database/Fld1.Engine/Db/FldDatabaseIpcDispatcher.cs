@@ -76,6 +76,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleApplyRemoteBatch(operation.Payload),
             FldDatabaseIpcOperationCodes.AppendLocalProviderBatch =>
                 HandleAppendLocalProviderBatch(clientId, operationId, operation),
+            FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence =>
+                HandleAppendLocalProviderBatchAutoSequence(clientId, operationId, operation),
             FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
                 HandleGetOutboxHighWatermark(operation.Payload),
             FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
@@ -230,6 +232,21 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         };
         FldLocalOperationCommitResult committed =
             _database.ApplyLocalProviderOperation(mutations, receipt);
+        return FldDatabaseIpcProtocol.EncodeCommitResult(committed);
+    }
+
+    private byte[] HandleAppendLocalProviderBatchAutoSequence(
+        ReadOnlySpan<byte> clientId,
+        ReadOnlySpan<byte> operationId,
+        StorageIpcOperationEnvelope operation)
+    {
+        IReadOnlyList<FldLocalProviderMutation> mutations =
+            FldDatabaseIpcLocalProviderProtocol.DecodeAutoSequenceRequest(operation.Payload);
+        byte[] fingerprint = FldDatabaseIpcProtocol.ComputeFingerprint(
+            operation.OperationCode, operation.Payload.Span);
+        FldLocalOperationCommitResult committed =
+            _database.ApplyLocalProviderOperationWithAutoSequence(
+                mutations, clientId, operationId, fingerprint);
         return FldDatabaseIpcProtocol.EncodeCommitResult(committed);
     }
 

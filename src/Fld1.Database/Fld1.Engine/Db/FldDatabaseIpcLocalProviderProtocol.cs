@@ -12,6 +12,22 @@ public static class FldDatabaseIpcLocalProviderProtocol
     private const int MutationHeaderBytes = 57;
     private const int MaximumMutationCount = 4096;
 
+    public static byte[] EncodeAutoSequenceRequest(IReadOnlyList<FldLocalProviderMutation> mutations)
+    {
+        byte[] payload = EncodeRequest(1, mutations);
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(1), 0);
+        return payload;
+    }
+
+    public static IReadOnlyList<FldLocalProviderMutation> DecodeAutoSequenceRequest(ReadOnlyMemory<byte> payload)
+    {
+        (ulong sequence, IReadOnlyList<FldLocalProviderMutation> mutations) =
+            DecodeRequest(payload, allowZeroSequence: true);
+        if (sequence != 0)
+            throw new InvalidDataException("Auto-sequenced provider request must carry a zero ClientSequence.");
+        return mutations;
+    }
+
     public static byte[] EncodeRequest(
         ulong clientSequence,
         IReadOnlyList<FldLocalProviderMutation> mutations)
@@ -56,7 +72,7 @@ public static class FldDatabaseIpcLocalProviderProtocol
     }
 
     public static (ulong ClientSequence, IReadOnlyList<FldLocalProviderMutation> Mutations)
-        DecodeRequest(ReadOnlyMemory<byte> payload)
+        DecodeRequest(ReadOnlyMemory<byte> payload, bool allowZeroSequence = false)
     {
         if (payload.Length < HeaderBytes || payload.Length > MaximumPayloadBytes)
             throw new InvalidDataException("Local provider IPC request length is invalid.");
@@ -67,7 +83,7 @@ public static class FldDatabaseIpcLocalProviderProtocol
             throw new InvalidDataException("Unsupported local provider IPC version.");
         ulong sequence = reader.ReadUInt64();
         uint count = reader.ReadUInt32();
-        if (sequence == 0 || count is < 1 or > MaximumMutationCount ||
+        if ((sequence == 0 && !allowZeroSequence) || count is < 1 or > MaximumMutationCount ||
             (long)count * MutationHeaderBytes > stream.Length - stream.Position)
             throw new InvalidDataException("Local provider IPC request header is invalid.");
 
