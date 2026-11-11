@@ -44,6 +44,8 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (implemented in the current branch) |
 | AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
 | GetOutboxHighWatermark | 0x210E | empty payload; response is durable Outbox HighWatermark (u64) |
+| ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
+| ReadCurrentValueChunk | 0x2110 | RecordId (16 bytes), FieldId (u16), expected ChangeId (16 bytes), ValueOffset (u32), MaxChunkBytes (u32); returns Data, Missing or Changed plus one bounded value slice |
 
 Each write mutation is RecordId (16 bytes), FieldId (u16), KeyEpoch (u16), kind (u8: 0=Put, 1=Delete), value length (u32), then value bytes. A Delete must have a zero value length. A batch is one atomic Database operation and must contain at least one mutation. The frame limit is enforced before sending and while decoding; malformed lengths, trailing bytes, invalid mutation kinds and zero identifiers are rejected.
 
