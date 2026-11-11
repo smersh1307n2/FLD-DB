@@ -162,7 +162,7 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         byte[] payload = FldDatabaseIpcProtocol.EncodeSnapshotValueChunkPayload(
-            handle, recordId.Span, fieldId, valueOffset, maxChunkBytes);
+            handle, recordId.ToArray(), fieldId, valueOffset, maxChunkBytes);
         ReadOnlyMemory<byte> response = await SendAsync(
             Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReadSnapshotValueChunk,
             payload, cancellationToken).ConfigureAwait(false);
