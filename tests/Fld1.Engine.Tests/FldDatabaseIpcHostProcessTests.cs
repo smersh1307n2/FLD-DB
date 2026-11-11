@@ -71,7 +71,8 @@ public sealed class FldDatabaseIpcHostProcessTests
                 Assert.True(await client.AcknowledgeThroughAsync(2));
 
                 secondOutboxLease = await client.AcquireOutboxLeaseAsync();
-                Assert.Equal(checked(firstOutboxLease.Epoch + 1), secondOutboxLease.Epoch);
+                // Reopening Outbox invalidates a lease left by the previous Host, then acquisition advances once more.
+                Assert.Equal(checked(firstOutboxLease.Epoch + 2), secondOutboxLease.Epoch);
                 await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
                     client.ReadOutboxEntryChunkAsync(firstOutboxLease, afterSequence: 0));
                 FldDatabaseIpcOutboxEntryChunk? firstOutboxEntry =
