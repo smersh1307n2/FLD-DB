@@ -16,5 +16,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Fld1.Database\Fld1.Database.csproj" />
+    <ProjectReference Include="..\..\src\Fld1.Database.Host\Fld1.Database.Host.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>
