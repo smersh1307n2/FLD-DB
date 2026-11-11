@@ -51,6 +51,7 @@ public sealed class WalProvenance
 /// <summary>Stable idempotency receipt for one local Database IPC operation.</summary>
 public sealed class WalLocalOperationReceipt
 {
+    public required ushort NamespaceId { get; init; }
     public required byte[] ClientId { get; init; } // 16, stable across reconnects
     public required byte[] OperationId { get; init; } // 16, independent of transport RequestId
     public required byte[] Fingerprint { get; init; } // 32, canonical request digest
@@ -157,6 +158,7 @@ public static class GroupCommitCodec
         foreach (var receipt in p.LocalOperationReceipts)
         {
             ValidateReceipt(receipt, nameof(p));
+            WriteU16(ms, receipt.NamespaceId);
             ms.Write(receipt.ClientId);
             ms.Write(receipt.OperationId);
             ms.Write(receipt.Fingerprint);
@@ -269,6 +271,7 @@ public static class GroupCommitCodec
             localReceipts = new List<WalLocalOperationReceipt>((int)receiptCount);
             for (uint i = 0; i < receiptCount; i++)
             {
+                ushort namespaceId = ReadU16(payload, ref pos);
                 byte[] clientId = ReadBytes(payload, ref pos, 16);
                 byte[] operationId = ReadBytes(payload, ref pos, 16);
                 byte[] fingerprint = ReadBytes(payload, ref pos, 32);
@@ -277,6 +280,7 @@ public static class GroupCommitCodec
                     throw new InvalidDataException("local operation receipt result length limit");
                 var receipt = new WalLocalOperationReceipt
                 {
+                    NamespaceId = namespaceId,
                     ClientId = clientId,
                     OperationId = operationId,
                     Fingerprint = fingerprint,
