@@ -15,7 +15,7 @@ internal static class Program
 
         string root = Path.GetFullPath(args[0]);
         byte[]? localAuthor = null;
-        if (args.Length == 3)
+        if (args.Length >= 3)
         {
             try { localAuthor = Convert.FromHexString(args[2]); }
             catch (FormatException)
