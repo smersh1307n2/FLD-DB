@@ -78,7 +78,7 @@ The host creates the snapshot from its persisted provider-snapshot mechanism; IP
 
 The generic WriteBatch operation is intended for ordinary local database writes; it generates local HLC and ChangeId inside FLD. A BIN-SYNC provider draft must instead preserve the caller's stable ChangeId, HLC and active OriginAuthorEpoch. AppendLocalProviderBatch provides that separate atomic boundary.
 
-The payload begins with ClientSequence (u64) and mutation count (u32). Each mutation is RecordId (16 B), FieldId (u16), KeyEpoch (u16), IsTombstone (u8), OriginAuthorEpoch (u32), Wall (u64), Logical (u32), ChangeId (16 B), ValueLength (u32), Value bytes. All integers are little-endian. OriginAuthorEpoch and Wall must be nonzero; ChangeId and RecordId must be nonzero; tombstones have an empty value; duplicate RecordId/FieldId pairs and duplicate ChangeIds in one operation are rejected. OriginSequence is deliberately not transmitted: it remains zero until the BIN-SYNC publication freeze assigns the immutable origin sequence.
+The versioned payload begins with Version (u8 = 1), ClientSequence (u64) and mutation count (u32). Each mutation is RecordId (16 B), FieldId (u16), KeyEpoch (u16), IsTombstone (u8), OriginAuthorEpoch (u32), Wall (u64), Logical (u32), ChangeId (16 B), ValueLength (u32), Value bytes. All integers are little-endian. OriginAuthorEpoch and Wall must be nonzero; ChangeId and RecordId must be nonzero; tombstones have an empty value; duplicate RecordId/FieldId pairs and duplicate ChangeIds in one operation are rejected. OriginSequence is deliberately not transmitted: it remains zero until the BIN-SYNC publication freeze assigns the immutable origin sequence.
 
 The Host supplies its own LocalAuthorNodeId to PutWithIdentity; the IPC caller cannot choose the author identity. The operation commits all mutations and the ordinary local Outbox entries together with one durable local IPC receipt in one WAL GROUP_COMMIT. An exact retry returns the original CommitSeq/result and does not append a second Outbox entry. The receipt sequence remains contiguous per ClientId and is acknowledged independently from the Outbox.
 
@@ -115,8 +115,8 @@ Implemented in the current facade:
 
 Not exposed by this facade yet:
 
-- contextual remote APPLY (0x210C): versioned, bounded codec and client/dispatcher route to the existing atomic ApplyRemoteBatch WAL transaction;
 - subscriptions or streaming change feeds;
-- multi-entry Outbox aggregation beyond the one-entry chunk cursor.
+- multi-entry Outbox aggregation beyond the one-entry chunk cursor;
+- a complete asynchronous IDataProvider / remote-apply coordinator surface, including provider-current metadata reads, published-origin stamping and cross-call commit-lease composition.
 
-Do not emulate remote APPLY or missing streaming operations by issuing separate Put/Commit requests: that would lose remote authorship/causality and expose intermediate state. They require explicit facade operations and their own durable contracts.
+Do not emulate remote APPLY or missing provider capabilities by issuing separate Put/Commit requests: that would lose remote authorship/causality and expose intermediate state. They require explicit facade operations and their own durable contracts. The synchronous BIN-SYNC IDataProvider contract must not call this async client through sync-over-async; a separate async provider/coordinator boundary is required before production process isolation.
