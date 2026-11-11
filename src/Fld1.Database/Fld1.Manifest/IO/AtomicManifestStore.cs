@@ -98,6 +98,7 @@ public sealed class AtomicManifestStore
         Retains = d.Retains,
         ResultClients = d.ResultClients,
         ProvenanceIndex = d.ProvenanceIndex,
+        LocalOperationReceipts = d.LocalOperationReceipts,
         CoordinatorLeaseEpoch = d.CoordinatorLeaseEpoch,
         CoordinatorSessionId = d.CoordinatorSessionId
     };
