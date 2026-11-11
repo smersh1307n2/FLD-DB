@@ -97,7 +97,7 @@ public sealed class FldDatabaseIpcOutboxTests
                 firstClient.ReadOutboxEntryChunkAsync(firstLease, afterSequence: 0));
 
             var secondRead = await secondClient.ReadOutboxEntryChunkAsync(
-                secondLease, afterSequence: 0, maxChunkBytes: chunkSize);
+                secondLease, afterSequence: 0);
             Assert.NotNull(secondRead);
             Assert.Equal(1ul, secondRead.OutboxSeq);
             Assert.Equal((uint)FldDatabaseIpcProtocol.MaxOutboxChunkBytes,
