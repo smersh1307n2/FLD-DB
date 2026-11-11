@@ -42,6 +42,7 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ReadSnapshotValueChunk | 0x210A | HostGeneration (16 B), SnapshotToken (16 B), RecordId (16 B), FieldId (u16), ValueOffset (u32), MaxChunkBytes (u32) |
 | ReleaseSnapshot | 0x210B | HostGeneration (16 B), SnapshotToken (16 B) |
 | ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (implemented in the current branch) |
+| AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
 
 Each write mutation is RecordId (16 bytes), FieldId (u16), KeyEpoch (u16), kind (u8: 0=Put, 1=Delete), value length (u32), then value bytes. A Delete must have a zero value length. A batch is one atomic Database operation and must contain at least one mutation. The frame limit is enforced before sending and while decoding; malformed lengths, trailing bytes, invalid mutation kinds and zero identifiers are rejected.
 
@@ -73,6 +74,14 @@ The returned handle binds HostGeneration and SnapshotToken; every page, value-ch
 
 The host creates the snapshot from its persisted provider-snapshot mechanism; IPC does not expose raw FldDatabase or borrowed storage views. Consumers must release handles in finally and discard handles after a Host-generation change.
 
+## Identity-preserving local provider writes (0x210D; implemented)
+
+The generic WriteBatch operation is intended for ordinary local database writes; it generates local HLC and ChangeId inside FLD. A BIN-SYNC provider draft must instead preserve the caller's stable ChangeId, HLC and active OriginAuthorEpoch. AppendLocalProviderBatch provides that separate atomic boundary.
+
+The payload begins with ClientSequence (u64) and mutation count (u32). Each mutation is RecordId (16 B), FieldId (u16), KeyEpoch (u16), IsTombstone (u8), OriginAuthorEpoch (u32), Wall (u64), Logical (u32), ChangeId (16 B), ValueLength (u32), Value bytes. All integers are little-endian. OriginAuthorEpoch and Wall must be nonzero; ChangeId and RecordId must be nonzero; tombstones have an empty value; duplicate RecordId/FieldId pairs in one operation are rejected. OriginSequence is deliberately not transmitted: it remains zero until the BIN-SYNC publication freeze assigns the immutable origin sequence.
+
+The Host supplies its own LocalAuthorNodeId to PutWithIdentity; the IPC caller cannot choose the author identity. The operation commits all mutations and the ordinary local Outbox entries together with one durable local IPC receipt in one WAL GROUP_COMMIT. An exact retry returns the original CommitSeq/result and does not append a second Outbox entry. The receipt sequence remains contiguous per ClientId and is acknowledged independently from the Outbox.
+
 ## Contextual remote APPLY IPC (0x210C; implemented)
 
 The Database facade exposes the existing FldDatabase.ApplyRemoteBatch(RemoteBatchCommit) transaction without translating it into local WriteBatch operations. Local writes and remote applies have different authorship, Outbox and durability semantics.
@@ -97,6 +106,7 @@ The full encoded request and response must fit the Storage IPC frame limit befor
 Implemented in the current facade:
 
 - atomic WriteBatch with durable local operation receipt and contiguous-prefix receipt acknowledgement;
+- identity-preserving local provider draft batches with stable ChangeId/HLC/OriginAuthorEpoch and atomic Outbox + receipt commit;
 - receipt-backed ReadField;
 - lease-fenced Outbox acquisition, bounded entry chunks, Outbox ACK and release;
 - immutable persisted provider snapshots over IPC: idempotent open, bounded metadata pages, bounded value chunks, client/Host-generation fencing and release;
