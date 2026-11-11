@@ -313,6 +313,18 @@ public sealed class StorageIpcClientConnection : IAsyncDisposable
         }
     }
 
+    /// <summary>Reads the owner-published endpoint record and connects to the named Storage partition.</summary>
+    public static Task<StorageIpcClientConnection> ConnectToDatabaseAsync(
+        string rootDirectory,
+        ulong partitionId,
+        Guid clientId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(rootDirectory, partitionId);
+        return ConnectAsync(endpoint.PipeName, clientId, timeout, cancellationToken);
+    }
+
     public async ValueTask<ReadOnlyMemory<byte>> RequestAsync(
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken = default)
