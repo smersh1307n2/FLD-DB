@@ -136,6 +136,6 @@ Not exposed by this facade yet:
 - durable published-origin stamping, author-epoch/publication-mode operations, FULL_REPLACE and snapshot-state capability operations;
 - subscriptions or streaming change feeds;
 - multi-entry Outbox aggregation beyond the one-entry chunk cursor;
-- a complete asynchronous IDataProvider / remote-apply coordinator surface, including provider-current metadata reads, published-origin stamping and cross-call commit-lease composition.
+- a complete asynchronous IDataProvider / remote-apply coordinator surface, including durable operation identity, published-origin stamping and cross-call commit-lease composition.
 
 Do not emulate remote APPLY or missing provider capabilities by issuing separate Put/Commit requests: that would lose remote authorship/causality and expose intermediate state. They require explicit facade operations and their own durable contracts. The synchronous BIN-SYNC IDataProvider contract must not call this async client through sync-over-async; a separate async provider/coordinator boundary is required before production process isolation.
