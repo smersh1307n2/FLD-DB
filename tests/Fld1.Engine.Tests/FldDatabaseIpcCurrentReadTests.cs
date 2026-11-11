@@ -22,6 +22,19 @@ public sealed class FldDatabaseIpcCurrentReadTests
             var m=await c.ReadCurrentMetadataAsync(record,7);Assert.NotNull(m);Assert.Equal((uint)value1.Length,m.ValueLength);
             Assert.Equal(1234ul,m.HlcWall);Assert.Equal(5u,m.HlcLogical);Assert.Equal(author,m.AuthorNodeId);Assert.Equal((ushort)3,m.KeyEpoch);
             Assert.False(m.IsTombstone);Assert.Equal(change1,m.ChangeId);Assert.Equal(9u,m.OriginAuthorEpoch);Assert.Equal(0ul,m.OriginSequence);
+            var stamp = new FldPublishedOrigin
+            {
+                RecordId = record,
+                FieldId = 7,
+                ChangeId = change1,
+                OriginAuthorEpoch = 9,
+                OriginSequence = 44
+            };
+            Assert.Equal(1, await c.CommitPublishedOriginsAsync([stamp]));
+            Assert.Equal(0, await c.CommitPublishedOriginsAsync([stamp]));
+            var stamped = await c.ReadCurrentMetadataAsync(record, 7);
+            Assert.NotNull(stamped);
+            Assert.Equal(44ul, stamped.OriginSequence);
             var part=await c.ReadCurrentValueChunkAsync(record,7,change1,0,5);Assert.Equal(FldDatabaseIpcCurrentReadStatus.Data,part.Status);Assert.Equal("first"u8.ToArray(),part.ValueChunk);
             byte[] change2=Id(0x72),value2="replacement-value"u8.ToArray();
             await c.AppendLocalProviderBatchAsync(Guid.NewGuid(),2,[new FldLocalProviderMutation(record,7,value2,change2,9,1235,0,3)]);

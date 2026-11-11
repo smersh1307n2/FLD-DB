@@ -69,6 +69,20 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return response.Span[0] == 1;
     }
 
+    /// <summary>Atomically stamps current fields with immutable publication origins.</summary>
+    public async Task<int> CommitPublishedOriginsAsync(
+        IReadOnlyList<FldPublishedOrigin> publishedOrigins,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(publishedOrigins);
+        if (publishedOrigins.Count == 0) return 0;
+        byte[] payload = FldDatabaseIpcPublishedOriginProtocol.EncodeRequest(publishedOrigins);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.CommitPublishedOrigins,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcPublishedOriginProtocol.DecodeResult(response);
+    }
+
     /// <summary>Reads the authoritative LocalAuthor identity configured by the Database Host.</summary>
     public async Task<byte[]> GetLocalAuthorAsync(CancellationToken cancellationToken = default)
     {

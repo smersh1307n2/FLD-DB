@@ -81,6 +81,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence =>
                 HandleAppendLocalProviderBatchAutoSequence(clientId, operationId, operation),
             FldDatabaseIpcOperationCodes.GetLocalAuthor => HandleGetLocalAuthor(operation.Payload),
+            FldDatabaseIpcOperationCodes.CommitPublishedOrigins => HandleCommitPublishedOrigins(operation.Payload),
             FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
                 HandleGetOutboxHighWatermark(operation.Payload),
             FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
@@ -142,6 +143,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         bool acknowledged = _database.AcknowledgeLocalOperationReceipts(clientId, throughSequence);
         return [acknowledged ? (byte)1 : (byte)0];
     }
+    private byte[] HandleCommitPublishedOrigins(ReadOnlyMemory<byte> payload)
+    {
+        IReadOnlyList<FldPublishedOrigin> origins =
+            FldDatabaseIpcPublishedOriginProtocol.DecodeRequest(payload);
+        int committed = _database.CommitPublishedOrigins(origins);
+        return FldDatabaseIpcPublishedOriginProtocol.EncodeResult(committed);
+    }
+
     private byte[] HandleGetLocalAuthor(ReadOnlyMemory<byte> payload)
     {
         if (!payload.IsEmpty)
