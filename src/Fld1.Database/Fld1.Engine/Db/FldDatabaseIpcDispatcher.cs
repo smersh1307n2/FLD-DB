@@ -264,7 +264,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         FldLocalOperationCommitResult committed =
             _database.ApplyLocalProviderOperationWithAutoSequence(
                 mutations, clientId, operationId, fingerprint);
-        return FldDatabaseIpcProtocol.EncodeCommitResult(committed);
+        return FldDatabaseIpcProtocol.EncodeAutoSequenceCommitResult(committed);
     }
 
     private byte[] HandleApplyRemoteBatch(ReadOnlyMemory<byte> payload)
