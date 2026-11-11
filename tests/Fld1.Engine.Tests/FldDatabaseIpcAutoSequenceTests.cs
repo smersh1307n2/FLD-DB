@@ -31,6 +31,60 @@ public sealed class FldDatabaseIpcAutoSequenceTests
     }
 
     [Fact]
+    public void Provider_outbox_ack_retires_receipt_only_after_the_entire_wal_commit_is_covered()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-provider-ack-" + Guid.NewGuid().ToString("N"));
+        const uint ns = 0x533;
+        byte[] author = Id(0x41);
+        Guid clientGuid = Guid.NewGuid();
+        byte[] clientId = new byte[16];
+        clientGuid.TryWriteBytes(clientId, bigEndian: true, out _);
+        byte[] record = FldDatabase.NewRecordId();
+        byte[] firstChange = Id(0x75);
+        byte[] secondChange = Id(0x76);
+        var first = new FldLocalProviderMutation(record, 6, "first"u8.ToArray(), firstChange, 8, 12345, 2, 4);
+        var second = new FldLocalProviderMutation(record, 7, "second"u8.ToArray(), secondChange, 8, 12346, 0, 4);
+        Guid operationGuid = new(firstChange, bigEndian: true);
+        byte[] operationId = new byte[16];
+        operationGuid.TryWriteBytes(operationId, bigEndian: true, out _);
+        byte[] payload = FldDatabaseIpcLocalProviderProtocol.EncodeAutoSequenceRequest([first, second]);
+        byte[] fingerprint = FldDatabaseIpcProtocol.ComputeFingerprint(
+            FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence, payload);
+
+        try
+        {
+            using var db = FldDatabase.Open(root, ns, author);
+            OutboxLease lease = db.AcquireOutboxLease(clientId);
+            try
+            {
+                FldLocalOperationCommitResult committed = db.ApplyLocalProviderOperationWithAutoSequence(
+                    [first, second], clientId, operationId, fingerprint);
+                Assert.False(committed.IsDuplicate);
+                Assert.Equal(2ul, db.GetOutboxHighWatermark());
+
+                db.AcknowledgeProviderOutbox(1, lease);
+                Assert.True(db.TryGetLocalOperationReceipt(
+                    clientId, operationId, 1, fingerprint, out FldLocalOperationCommitResult? pending));
+                Assert.True(pending!.IsDuplicate);
+                Assert.Equal(1ul, db.GetOutboxWatermark());
+
+                db.AcknowledgeProviderOutbox(2, lease);
+                Assert.Equal(2ul, db.GetOutboxWatermark());
+                Assert.Throws<InvalidOperationException>(() =>
+                    db.TryGetLocalOperationReceipt(clientId, operationId, 1, fingerprint, out _));
+            }
+            finally
+            {
+                db.ReleaseOutboxLease(lease);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Auto_sequence_codec_requires_zero_sequence_and_roundtrips_mutations()
     {
         var m=new FldLocalProviderMutation(FldDatabase.NewRecordId(),2,"x"u8.ToArray(),Id(0x33),4,123,0,1);
