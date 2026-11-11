@@ -465,6 +465,24 @@ public static class ManifestCodec
                 throw new InvalidDataException("LocalOperationReceiptEntry is outside its client sequence window.");
         }
 
+        foreach (var client in document.LocalOperationClients)
+        {
+            ulong expectedCount = client.LastCommittedSequence - client.AcknowledgedThroughSequence;
+            ulong[] sequences = document.LocalOperationReceipts
+                .Where(receipt => receipt.NamespaceId == client.NamespaceId
+                    && receipt.ClientId.AsSpan().SequenceEqual(client.ClientId))
+                .Select(receipt => receipt.ClientSequence)
+                .Order()
+                .ToArray();
+            if ((ulong)sequences.Length != expectedCount)
+                throw new InvalidDataException("LocalOperationClientEntry has a gap in its unacknowledged receipt window.");
+            for (int i = 0; i < sequences.Length; i++)
+            {
+                if (sequences[i] != client.AcknowledgedThroughSequence + (ulong)i + 1)
+                    throw new InvalidDataException("LocalOperationClientEntry receipt sequences are not contiguous.");
+            }
+        }
+
         if (document.CoordinatorSessionId.Length != 16)
             throw new InvalidDataException("CoordinatorSessionId must be 16 bytes");
     }
