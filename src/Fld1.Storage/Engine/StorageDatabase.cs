@@ -401,6 +401,9 @@ public sealed class StorageWriteBatch : IDisposable
             new StorageDatabase.StorageMutation(key.ToArray(), Array.Empty<byte>(), true);
     }
 
+    internal bool IsBoundTo(StorageDatabase database)
+        => ReferenceEquals(_database, database);
+
     public ulong Commit()
     {
         EnsureOpen();
