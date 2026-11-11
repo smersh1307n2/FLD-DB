@@ -38,6 +38,7 @@ public sealed partial class FldDatabase
         ulong cursor = acknowledgedOutbox;
         while (cursor < throughSequence)
         {
+            ulong previousCursor = cursor;
             int visited = _outbox.VisitBatch(cursor, 512, lease, (in OutboxEntryView entry) =>
             {
                 if (entry.OutboxSeq > throughSequence)
@@ -46,7 +47,7 @@ public sealed partial class FldDatabase
                 cursor = entry.OutboxSeq;
                 return true;
             });
-            if (visited == 0)
+            if (visited == 0 || cursor == previousCursor)
                 break;
         }
 
@@ -96,4 +97,6 @@ public sealed partial class FldDatabase
 
         if (safeReceiptSequence > state.AcknowledgedThroughSequence)
             AcknowledgeLocalOperationReceipts(state.ClientId, safeReceiptSequence);
-    }}
+    }
+}
+
