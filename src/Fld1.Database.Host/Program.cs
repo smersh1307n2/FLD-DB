@@ -6,10 +6,10 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        if (args.Length is < 2 or > 3
+        if (args.Length is < 2 or > 4
             || !uint.TryParse(args[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint namespaceId))
         {
-            Console.Error.WriteLine("Usage: Fld1.Database.Host <database-root> <namespace-id-decimal> [local-author-hex]");
+            Console.Error.WriteLine("Usage: Fld1.Database.Host <database-root> <namespace-id-decimal> [local-author-hex] [--test-drop-remote-apply-response]");
             return 64;
         }
 
@@ -30,6 +30,14 @@ internal static class Program
             }
         }
 
+        bool dropRemoteApplyResponseForTest = args.Length == 4
+            && string.Equals(args[3], "--test-drop-remote-apply-response", StringComparison.Ordinal);
+        if (args.Length == 4 && !dropRemoteApplyResponseForTest)
+        {
+            Console.Error.WriteLine("Unknown optional Database Host argument.");
+            return 64;
+        }
+
         Directory.CreateDirectory(root);
         try
         {
@@ -47,8 +55,24 @@ internal static class Program
             // The exclusive Database root lease is held; prune only IPC-owned generations
             // from older host generations, preserving durable FULL_REPLACE provider snapshots.
             database.PruneStaleIpcProviderSnapshots(dispatcher.HostGeneration);
+            // Explicit process-test failpoint: terminate only after the durable remote
+            // APPLY handler has returned its receipt, but before StorageIpcServer can
+            // write the response frame. It is opt-in and absent from normal Host runs.
+            async ValueTask<ReadOnlyMemory<byte>> HandleIpcRequestAsync(
+                StorageIpcRequestContext context,
+                ReadOnlyMemory<byte> payload,
+                CancellationToken cancellationToken)
+            {
+                ReadOnlyMemory<byte> response = await dispatcher.HandleAsync(
+                    context, payload, cancellationToken).ConfigureAwait(false);
+                if (dropRemoteApplyResponseForTest &&
+                    StorageIpcOperationProtocol.Decode(payload).OperationCode == 0x210C)
+                    Environment.Exit(86);
+                return response;
+            }
+
             var server = new StorageIpcServer(
-                StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+                StorageIpcEndpoint.ComputePipeName(root, 0), HandleIpcRequestAsync);
             Task serverTask = server.RunAsync(shutdown.Token);
             try
             {
