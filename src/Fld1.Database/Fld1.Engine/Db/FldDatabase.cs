@@ -711,7 +711,8 @@ public sealed partial class FldDatabase : IDisposable
         {
             ArgumentNullException.ThrowIfNull(mutation);
             if (mutation.RecordId is null || mutation.RecordId.Length != 16 ||
-                mutation.ChangeId is null || mutation.ChangeId.Length != 16)
+                mutation.ChangeId is null || mutation.ChangeId.Length != 16 ||
+                mutation.Value is null)
                 throw new ArgumentException("Provider RecordId and ChangeId must be 16 bytes.", nameof(mutations));
             if (mutation.RecordId.All(value => value == 0) ||
                 mutation.ChangeId.All(value => value == 0))
