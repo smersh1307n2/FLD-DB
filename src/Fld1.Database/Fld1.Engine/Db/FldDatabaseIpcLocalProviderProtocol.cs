@@ -6,8 +6,9 @@ namespace Fld1.Engine.Db;
 /// <summary>Bounded codec for identity-preserving local provider draft batches.</summary>
 public static class FldDatabaseIpcLocalProviderProtocol
 {
+    public const byte Version = 1;
     public const int MaximumPayloadBytes = StorageIpcProtocol.MaxPayloadBytes;
-    private const int HeaderBytes = 12;
+    private const int HeaderBytes = 13;
     private const int MutationHeaderBytes = 57;
     private const int MaximumMutationCount = 4096;
 
@@ -34,6 +35,7 @@ public static class FldDatabaseIpcLocalProviderProtocol
 
         using var stream = new MemoryStream(checked((int)length));
         using var writer = new BinaryWriter(stream);
+        writer.Write(Version);
         writer.Write(clientSequence);
         writer.Write(checked((uint)mutations.Count));
         foreach (FldLocalProviderMutation mutation in mutations)
@@ -61,6 +63,8 @@ public static class FldDatabaseIpcLocalProviderProtocol
 
         using var stream = new MemoryStream(payload.ToArray(), writable: false);
         using var reader = new BinaryReader(stream);
+        if (reader.ReadByte() != Version)
+            throw new InvalidDataException("Unsupported local provider IPC version.");
         ulong sequence = reader.ReadUInt64();
         uint count = reader.ReadUInt32();
         if (sequence == 0 || count is < 1 or > MaximumMutationCount ||
