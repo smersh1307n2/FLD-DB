@@ -30,6 +30,8 @@ public sealed class StorageIpcServer
     private readonly string _pipeName;
     private readonly StorageIpcRequestHandler _handler;
     private readonly SemaphoreSlim _clientSlots;
+    private readonly TaskCompletionSource _ready =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _started;
 
     public StorageIpcServer(
@@ -50,6 +52,9 @@ public sealed class StorageIpcServer
 
     public int MaxConcurrentClients { get; }
 
+    /// <summary>Completes when the first named-pipe listener is ready to accept a client.</summary>
+    public Task Ready => _ready.Task;
+
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         if (Interlocked.Exchange(ref _started, 1) != 0)
@@ -69,6 +74,7 @@ public sealed class StorageIpcServer
                     inBufferSize: 64 * 1024,
                     outBufferSize: 64 * 1024);
 
+                _ready.TrySetResult();
                 try
                 {
                     await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -94,8 +100,16 @@ public sealed class StorageIpcServer
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
+        catch (Exception exception)
+        {
+            _ready.TrySetException(exception);
+            throw;
+        }
         finally
         {
+            if (!_ready.Task.IsCompleted)
+                _ready.TrySetCanceled(cancellationToken);
+
             try
             {
                 await Task.WhenAll(clients).ConfigureAwait(false);
