@@ -18,6 +18,8 @@ public sealed class FldLocalOperationReceipt
 public sealed class FldLocalOperationCommitResult
 {
     public required ulong CommitSeq { get; init; }
+    /// <summary>Durable per-client receipt sequence; zero when the operation has no receipt.</summary>
+    public ulong ClientSequence { get; init; }
     public required byte[] Result { get; init; }
     public required bool IsDuplicate { get; init; }
 }
