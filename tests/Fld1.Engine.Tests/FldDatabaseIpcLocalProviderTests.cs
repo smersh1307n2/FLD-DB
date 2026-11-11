@@ -29,6 +29,11 @@ public sealed class FldDatabaseIpcLocalProviderTests
 
         Assert.Throws<InvalidDataException>(() =>
             FldDatabaseIpcLocalProviderProtocol.DecodeRequest(encoded.Concat(new byte[] { 0 }).ToArray()));
+
+        byte[] unsupportedVersion = encoded.ToArray();
+        unsupportedVersion[0] = byte.MaxValue;
+        Assert.Throws<InvalidDataException>(() =>
+            FldDatabaseIpcLocalProviderProtocol.DecodeRequest(unsupportedVersion));
     }
 
     [Fact]
