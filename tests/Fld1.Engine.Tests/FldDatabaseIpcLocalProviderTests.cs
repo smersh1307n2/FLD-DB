@@ -171,8 +171,8 @@ public sealed class FldDatabaseIpcLocalProviderTests
             var entries = database.ReadOutboxBatch(0, 10);
             Assert.Equal(2, entries.Count);
             Assert.All(entries, entry => Assert.Equal(1ul, entry.CommitSeq));
-            Assert.Equal(new[] { first.ChangeId, second.ChangeId },
-                entries.OrderBy(entry => entry.FieldId).Select(entry => entry.ChangeId).ToArray());
+            Assert.Equal(first.ChangeId, entries[0].ChangeId);
+            Assert.Equal(second.ChangeId, entries[1].ChangeId);
             Assert.True(database.TryGetBytes(recordId, first.FieldId, out byte[]? firstValue));
             Assert.Equal(first.Value, firstValue);
             Assert.True(database.TryGetBytes(recordId, second.FieldId, out byte[]? secondValue));
