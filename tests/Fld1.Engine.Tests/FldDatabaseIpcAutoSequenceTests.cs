@@ -19,14 +19,14 @@ public sealed class FldDatabaseIpcAutoSequenceTests
             var mutation=new FldLocalProviderMutation(record,6,value,change,8,12345,2,4);
             Guid operationId=new(change,bigEndian:true);
             var first=await client.AppendLocalProviderBatchAutoSequenceAsync(operationId,[mutation]);
-            Assert.False(first.IsDuplicate);Assert.Equal(1,first.MutationCount);
+            Assert.False(first.IsDuplicate);Assert.Equal(1,first.MutationCount);Assert.Equal(1ul,first.ClientSequence);
             var retry=await client.AppendLocalProviderBatchAutoSequenceAsync(operationId,[mutation]);
-            Assert.True(retry.IsDuplicate);Assert.Equal(first.CommitSeq,retry.CommitSeq);
+            Assert.True(retry.IsDuplicate);Assert.Equal(first.CommitSeq,retry.CommitSeq);Assert.Equal(first.ClientSequence,retry.ClientSequence);
             Assert.Equal(1ul,db.GetOutboxHighWatermark());
             var row=Assert.Single(db.ReadOutboxBatch(0,10));Assert.Equal(change,row.ChangeId);
             var secondMutation=new FldLocalProviderMutation(record,7,"second"u8.ToArray(),Id(0x76),8,12346,0,4);
             var second=await client.AppendLocalProviderBatchAutoSequenceAsync(Guid.NewGuid(),[secondMutation]);
-            Assert.False(second.IsDuplicate);Assert.Equal(2ul,db.GetOutboxHighWatermark());
+            Assert.False(second.IsDuplicate);Assert.Equal(2ul,second.ClientSequence);Assert.Equal(2ul,db.GetOutboxHighWatermark());
         }finally{shutdown.Cancel();try{await task.WaitAsync(TimeSpan.FromSeconds(10));}catch{}StorageIpcEndpoint.DeleteIfOwned(root,0,owner);dispatcher.Dispose();db.Dispose();try{Directory.Delete(root,true);}catch{}}
     }
 
