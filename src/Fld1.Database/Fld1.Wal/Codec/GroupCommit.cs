@@ -274,6 +274,7 @@ public static class GroupCommitCodec
             if (receiptCount > WalConstants.MaxResults)
                 throw new InvalidDataException("local operation receipt count limit");
             localReceipts = new List<WalLocalOperationReceipt>((int)receiptCount);
+            var decodedReceiptKeys = new HashSet<string>(StringComparer.Ordinal);
             for (uint i = 0; i < receiptCount; i++)
             {
                 ushort namespaceId = ReadU16(payload, ref pos);
@@ -298,10 +299,7 @@ public static class GroupCommitCodec
                 }
                 string key = namespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
                     + ":" + Convert.ToHexString(clientId) + Convert.ToHexString(operationId);
-                if (localReceipts.Any(item =>
-                    item.NamespaceId == namespaceId
-                    && item.ClientId.AsSpan().SequenceEqual(clientId)
-                    && item.OperationId.AsSpan().SequenceEqual(operationId)))
+                if (!decodedReceiptKeys.Add(key))
                     throw new InvalidDataException("duplicate local operation receipt identity");
                 localReceipts.Add(receipt);
             }
