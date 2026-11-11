@@ -19,7 +19,7 @@ public sealed record StorageIpcEndpointInfo(
 public static class StorageIpcEndpoint
 {
     public const ushort CurrentProtocolVersion = 1;
-    public const string EndpointFileName = ".fld1-storage-ipc.endpoint";
+    public const string EndpointFilePrefix = ".fld1-storage-ipc-";
 
     public static string ComputePipeName(string rootDirectory, ulong partitionId)
     {
@@ -37,10 +37,11 @@ public static class StorageIpcEndpoint
         return "fld1-" + Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant();
     }
 
-    public static string GetEndpointFilePath(string rootDirectory)
+    public static string GetEndpointFilePath(string rootDirectory, ulong partitionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
-        return Path.Combine(Path.GetFullPath(rootDirectory), EndpointFileName);
+        string fileName = $"{EndpointFilePrefix}{partitionId:X16}.endpoint";
+        return Path.Combine(Path.GetFullPath(rootDirectory), fileName);
     }
 
     public static StorageIpcEndpointInfo Create(
@@ -72,7 +73,7 @@ public static class StorageIpcEndpoint
         Validate(rootDirectory, endpoint, endpoint.PartitionId);
         Directory.CreateDirectory(Path.GetFullPath(rootDirectory));
 
-        string path = GetEndpointFilePath(rootDirectory);
+        string path = GetEndpointFilePath(rootDirectory, endpoint.PartitionId);
         string temporary = path + ".tmp." + Guid.NewGuid().ToString("N");
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(endpoint);
         try
@@ -94,7 +95,7 @@ public static class StorageIpcEndpoint
 
     public static StorageIpcEndpointInfo Read(string rootDirectory, ulong partitionId)
     {
-        string path = GetEndpointFilePath(rootDirectory);
+        string path = GetEndpointFilePath(rootDirectory, partitionId);
         if (!File.Exists(path))
             throw new FileNotFoundException("Storage IPC Host endpoint has not been published.", path);
 
@@ -115,12 +116,12 @@ public static class StorageIpcEndpoint
     }
 
     /// <summary>Deletes the discovery file only if it is still owned by this Host instance.</summary>
-    public static bool DeleteIfOwned(string rootDirectory, Guid ownerId)
+    public static bool DeleteIfOwned(string rootDirectory, ulong partitionId, Guid ownerId)
     {
         if (ownerId == Guid.Empty)
             throw new ArgumentException("Storage IPC Host owner id must be non-empty.", nameof(ownerId));
 
-        string path = GetEndpointFilePath(rootDirectory);
+        string path = GetEndpointFilePath(rootDirectory, partitionId);
         if (!File.Exists(path))
             return false;
 
