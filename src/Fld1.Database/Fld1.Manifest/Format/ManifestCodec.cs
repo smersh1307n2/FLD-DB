@@ -440,7 +440,7 @@ public static class ManifestCodec
                 throw new InvalidDataException("duplicate LocalOperationReceiptEntry");
         }
 
-        var operationClientKeys = new HashSet<string>(StringComparer.Ordinal);
+        var operationClientsByKey = new Dictionary<string, LocalOperationClientEntry>(StringComparer.Ordinal);
         foreach (var client in document.LocalOperationClients)
         {
             if (client.NamespaceId > 0xFFFF || !namespaces.Contains(client.NamespaceId)
@@ -450,40 +450,41 @@ public static class ManifestCodec
                 throw new InvalidDataException("invalid LocalOperationClientEntry");
             string key = client.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 + ":" + Convert.ToHexString(client.ClientId);
-            if (!operationClientKeys.Add(key))
+            if (!operationClientsByKey.TryAdd(key, client))
                 throw new InvalidDataException("duplicate LocalOperationClientEntry");
         }
 
+        var receiptSequencesByClient = new Dictionary<string, List<ulong>>(StringComparer.Ordinal);
         foreach (var receipt in document.LocalOperationReceipts)
         {
-            LocalOperationClientEntry? client = document.LocalOperationClients.FirstOrDefault(
-                item => item.NamespaceId == receipt.NamespaceId
-                    && item.ClientId.AsSpan().SequenceEqual(receipt.ClientId));
-            if (client is null
+            string key = receipt.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + ":" + Convert.ToHexString(receipt.ClientId);
+            if (!operationClientsByKey.TryGetValue(key, out LocalOperationClientEntry? client)
                 || receipt.ClientSequence <= client.AcknowledgedThroughSequence
                 || receipt.ClientSequence > client.LastCommittedSequence)
                 throw new InvalidDataException("LocalOperationReceiptEntry is outside its client sequence window.");
+            if (!receiptSequencesByClient.TryGetValue(key, out List<ulong>? sequences))
+            {
+                sequences = [];
+                receiptSequencesByClient.Add(key, sequences);
+            }
+            sequences.Add(receipt.ClientSequence);
         }
 
-        foreach (var client in document.LocalOperationClients)
+        foreach (var pair in operationClientsByKey)
         {
+            LocalOperationClientEntry client = pair.Value;
             ulong expectedCount = client.LastCommittedSequence - client.AcknowledgedThroughSequence;
-            ulong[] sequences = document.LocalOperationReceipts
-                .Where(receipt => receipt.NamespaceId == client.NamespaceId
-                    && receipt.ClientId.AsSpan().SequenceEqual(client.ClientId))
-                .Select(receipt => receipt.ClientSequence)
-                .Order()
-                .ToArray();
-            if ((ulong)sequences.Length != expectedCount)
+            if (!receiptSequencesByClient.TryGetValue(pair.Key, out List<ulong>? sequences))
+                sequences = [];
+            sequences.Sort();
+            if ((ulong)sequences.Count != expectedCount)
                 throw new InvalidDataException("LocalOperationClientEntry has a gap in its unacknowledged receipt window.");
-            for (int i = 0; i < sequences.Length; i++)
+            for (int i = 0; i < sequences.Count; i++)
             {
                 if (sequences[i] != client.AcknowledgedThroughSequence + (ulong)i + 1)
                     throw new InvalidDataException("LocalOperationClientEntry receipt sequences are not contiguous.");
             }
         }
-
-        if (document.CoordinatorSessionId.Length != 16)
-            throw new InvalidDataException("CoordinatorSessionId must be 16 bytes");
     }
 }
