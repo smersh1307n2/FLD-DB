@@ -69,6 +69,16 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return response.Span[0] == 1;
     }
 
+    /// <summary>Reads the current durable Outbox high watermark without acquiring a consumer lease.</summary>
+    public async Task<ulong> GetOutboxHighWatermarkAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.GetOutboxHighWatermark,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeOutboxHighWatermarkResponse(response);
+    }
+
     public async Task<FldDatabaseIpcOutboxLease> AcquireOutboxLeaseAsync(
         CancellationToken cancellationToken = default)
     {
