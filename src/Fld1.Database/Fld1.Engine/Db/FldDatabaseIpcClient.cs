@@ -144,6 +144,23 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcProtocol.DecodeOutboxBooleanResponse(response);
     }
 
+    /// <summary>
+    /// Acknowledges the safe Outbox prefix and retires the matching contiguous
+    /// auto-sequenced provider append receipts.
+    /// </summary>
+    public async Task<bool> AcknowledgeProviderOutboxThroughAsync(
+        FldDatabaseIpcOutboxLease lease,
+        ulong throughSequence,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeOutboxAcknowledgementPayload(
+            lease, throughSequence);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AcknowledgeProviderOutbox,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeOutboxBooleanResponse(response);
+    }
+
     public async Task<bool> ReleaseOutboxLeaseAsync(
         FldDatabaseIpcOutboxLease lease,
         CancellationToken cancellationToken = default)
