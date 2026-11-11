@@ -855,7 +855,12 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     private static void ValidateLocalOperationReceipt(FldLocalOperationReceipt receipt)
-        => ValidateOperationIdentity(receipt.ClientId, receipt.OperationId, receipt.Fingerprint);
+    {
+        ValidateOperationIdentity(receipt.ClientId, receipt.OperationId, receipt.Fingerprint);
+        ArgumentNullException.ThrowIfNull(receipt.Result);
+        if (receipt.Result.Length > WalConstants.MaxValLen)
+            throw new ArgumentOutOfRangeException(nameof(receipt), "Local operation result exceeds the 4 MiB WAL limit.");
+    }
 
     private static void ValidateOperationIdentity(
         ReadOnlySpan<byte> clientId, ReadOnlySpan<byte> operationId, ReadOnlySpan<byte> fingerprint)
