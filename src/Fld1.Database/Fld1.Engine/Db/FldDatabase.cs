@@ -944,7 +944,8 @@ public sealed partial class FldDatabase : IDisposable
                 try
                 {
                     _outbox.MarkMaterialized(applyOnlySeq);
-                    _manifestStore.Update(m => CloneManifest(m, lastFlushed: applyOnlySeq));
+                    _manifestStore.Update(m => CloneManifest(m, lastFlushed: applyOnlySeq,
+                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts)));
                 }
                 catch
                 {
@@ -1013,7 +1014,8 @@ public sealed partial class FldDatabase : IDisposable
                     SeqLo = _lastSealedCommitSeq + 1,
                     SeqHi = seqHi
                 });
-                return CloneManifest(m, runs: runs, lastFlushed: seqHi);
+                return CloneManifest(m, runs: runs, lastFlushed: seqHi,
+                    localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts));
             });
 
             try
@@ -1356,7 +1358,8 @@ public sealed partial class FldDatabase : IDisposable
                 SeqLo = 1,
                 SeqHi = seqHi
             });
-            return CloneManifest(manifest, runs: runs, lastFlushed: seqHi);
+            return CloneManifest(manifest, runs: runs, lastFlushed: seqHi,
+                localOperationReceipts: BuildManifestLocalOperationReceipts(manifest.LocalOperationReceipts));
         });
 
         try
@@ -1510,7 +1513,8 @@ public sealed partial class FldDatabase : IDisposable
         ManifestDocument m,
         ulong? lastFlushed = null,
         List<uint>? nss = null,
-        List<RunEntry>? runs = null)
+        List<RunEntry>? runs = null,
+        List<LocalOperationReceiptEntry>? localOperationReceipts = null)
         => new()
         {
             Generation = m.Generation,
@@ -1521,7 +1525,7 @@ public sealed partial class FldDatabase : IDisposable
             Retains = m.Retains,
             ResultClients = m.ResultClients,
             ProvenanceIndex = m.ProvenanceIndex,
-            LocalOperationReceipts = m.LocalOperationReceipts,
+            LocalOperationReceipts = localOperationReceipts ?? m.LocalOperationReceipts,
             CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
             CoordinatorSessionId = m.CoordinatorSessionId
         };
@@ -1534,7 +1538,8 @@ public sealed partial class FldDatabase : IDisposable
         {
             EnsureHealthy();
             if (!_manifestDirty) return;
-            _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq));
+            _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq,
+                localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts)));
             _manifestDirty = false;
         }
     }
