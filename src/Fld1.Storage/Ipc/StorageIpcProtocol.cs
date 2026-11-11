@@ -86,7 +86,7 @@ public static class StorageIpcProtocol
         return frame;
     }
 
-    public static uint ComputeCrc32C(ReadOnlySpan<byte> headerPrefix, ReadOnlySpan<byte> payload)
+    internal static uint ComputeCrc32C(ReadOnlySpan<byte> headerPrefix, ReadOnlySpan<byte> payload)
     {
         uint crc = uint.MaxValue;
         Update(ref crc, headerPrefix);
