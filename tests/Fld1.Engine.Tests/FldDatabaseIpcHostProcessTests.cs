@@ -264,12 +264,12 @@ public sealed class FldDatabaseIpcHostProcessTests
             using var recoveredDatabase = FldDatabase.Open(root, namespaceId);
             Assert.Equal(2ul, recoveredDatabase.GetOutboxWatermark());
             Assert.Equal(2, recoveredDatabase.ReadOutboxBatch(0, 10).Count);
-            Assert.True(recoveredDatabase.TryResolve(recordA, 0x0441, out FieldResolver.Resolved resolvedA));
+            Assert.True(recoveredDatabase.TryResolve(recordA, 0x0441, out var resolvedA));
             Assert.Equal(changeA, resolvedA.ChangeId);
             Assert.Equal(7u, resolvedA.OriginAuthorEpoch);
             Assert.Equal(0ul, resolvedA.OriginSequence);
             Assert.Equal(223456ul, resolvedA.Wall);
-            Assert.True(recoveredDatabase.TryResolve(recordB, 0x0442, out FieldResolver.Resolved resolvedB));
+            Assert.True(recoveredDatabase.TryResolve(recordB, 0x0442, out var resolvedB));
             Assert.Equal(changeB, resolvedB.ChangeId);
             Assert.Equal(7u, resolvedB.OriginAuthorEpoch);
             Assert.Equal(0ul, resolvedB.OriginSequence);
