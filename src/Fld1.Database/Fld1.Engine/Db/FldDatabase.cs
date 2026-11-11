@@ -874,12 +874,7 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     private static string LocalOperationKey(ReadOnlySpan<byte> clientId, ReadOnlySpan<byte> operationId)
-    {
-        Span<char> key = stackalloc char[64];
-        Convert.TryToHexString(clientId, key, out int clientChars);
-        Convert.TryToHexString(operationId, key.Slice(clientChars), out int operationChars);
-        return new string(key.Slice(0, clientChars + operationChars));
-    }
+        => Convert.ToHexString(clientId) + Convert.ToHexString(operationId);
 
     private void AddLocalOperationReceipt(LocalOperationReceiptEntry receipt)
     {
