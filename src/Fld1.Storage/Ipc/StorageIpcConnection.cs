@@ -22,14 +22,26 @@ public sealed class StorageIpcServer
 {
     private readonly string _pipeName;
     private readonly StorageIpcRequestHandler _handler;
+    private readonly SemaphoreSlim _clientSlots;
     private int _started;
 
-    public StorageIpcServer(string pipeName, StorageIpcRequestHandler handler)
+    public StorageIpcServer(
+        string pipeName,
+        StorageIpcRequestHandler handler,
+        int maxConcurrentClients = 64)
     {
         ValidatePipeName(pipeName);
+        if (maxConcurrentClients is < 1 or > 254)
+            throw new ArgumentOutOfRangeException(nameof(maxConcurrentClients),
+                "Storage IPC server must admit between 1 and 254 concurrent clients.");
+
         _pipeName = pipeName;
         _handler = handler ?? throw new ArgumentNullException(nameof(handler));
+        MaxConcurrentClients = maxConcurrentClients;
+        _clientSlots = new SemaphoreSlim(maxConcurrentClients, maxConcurrentClients);
     }
+
+    public int MaxConcurrentClients { get; }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
@@ -61,7 +73,15 @@ public sealed class StorageIpcServer
                 }
 
                 clients.RemoveAll(task => task.IsCompleted);
-                clients.Add(HandleClientAsync(pipe, cancellationToken));
+                if (!_clientSlots.Wait(0))
+                {
+                    // Admission is deliberately non-queued: reject excess clients
+                    // before allocating a session or retaining another handler task.
+                    await pipe.DisposeAsync().ConfigureAwait(false);
+                    continue;
+                }
+
+                clients.Add(HandleClientWithSlotAsync(pipe, cancellationToken));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -70,6 +90,20 @@ public sealed class StorageIpcServer
         finally
         {
             await Task.WhenAll(clients).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleClientWithSlotAsync(
+        NamedPipeServerStream pipe,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await HandleClientAsync(pipe, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _clientSlots.Release();
         }
     }
 
