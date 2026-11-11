@@ -44,6 +44,8 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | ApplyRemoteBatch | 0x210C | versioned RemoteBatchCommit envelope; defined below (implemented in the current branch) |
 | AppendLocalProviderBatch | 0x210D | ClientSequence (u64), mutation count (u32), then identity-preserving local draft mutations |
 | GetOutboxHighWatermark | 0x210E | empty payload; response is durable Outbox HighWatermark (u64) |
+| AppendLocalProviderBatchAutoSequence | 0x2111 | Versioned identity-preserving local provider batch with ClientSequence = 0; Host allocates the next contiguous sequence under the commit lock |
+| GetLocalAuthor | 0x2112 | empty payload; response is the authoritative nonzero LocalAuthor (16 bytes) configured by the Database Host |
 | ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
 | ReadCurrentValueChunk | 0x2110 | RecordId (16 bytes), FieldId (u16), expected ChangeId (16 bytes), ValueOffset (u32), MaxChunkBytes (u32); returns Data, Missing or Changed plus one bounded value slice |
 
@@ -99,6 +101,17 @@ The versioned payload begins with Version (u8 = 1), ClientSequence (u64) and mut
 
 The Host supplies its own LocalAuthorNodeId to PutWithIdentity; the IPC caller cannot choose the author identity. The operation commits all mutations and the ordinary local Outbox entries together with one durable local IPC receipt in one WAL GROUP_COMMIT. An exact retry returns the original CommitSeq/result and does not append a second Outbox entry. The receipt sequence remains contiguous per ClientId and is acknowledged independently from the Outbox.
 
+### Auto-sequenced local provider append (0x2111; implemented)
+
+The regular 0x210D operation remains available when a caller durably manages its own ClientSequence. The 0x2111 variant uses the same canonical provider-mutation payload but requires the encoded ClientSequence field to be zero. The Database Host assigns the next contiguous sequence for the stable ClientId while holding the same commit lock that checks the operation receipt and commits the local mutations.
+
+The caller supplies a stable, nonzero OperationId. The IPC client adapter derives it from the immutable ChangeId for a single-mutation provider append. The durable identity is the existing (ClientId, OperationId, request fingerprint) receipt; no second client-side sequence journal or pending table is introduced. An exact retry returns the original CommitSeq/result, including after Database Host restart. Reusing the same identity with different payload bytes fails closed. The caller must keep ClientId stable across reconnects and must not retry an operation after its receipt has been acknowledged/retired.
+
+This variant closes the response-loss window without asking an async provider to persist a second sequence allocator. It does not change Outbox sequencing: OutboxSeq remains the local feed coordinate, not OriginSequence. OriginSequence is still assigned only at BIN-SYNC publication freeze.
+
+### Host identity discovery (0x2112; implemented)
+
+GetLocalAuthor returns the Database Host's configured nonzero LocalAuthor identity. An IPC-backed provider must compare it with the BIN-SYNC local replica identity before accepting local drafts. The Host remains authoritative when writing provider mutations; the IPC caller cannot select or override LocalAuthor.
 ## Contextual remote APPLY IPC (0x210C; implemented)
 
 The Database facade exposes the existing FldDatabase.ApplyRemoteBatch(RemoteBatchCommit) transaction without translating it into local WriteBatch operations. Local writes and remote applies have different authorship, Outbox and durability semantics.
@@ -123,7 +136,8 @@ The full encoded request and response must fit the Storage IPC frame limit befor
 Implemented in the current facade:
 
 - atomic WriteBatch with durable local operation receipt and contiguous-prefix receipt acknowledgement;
-- identity-preserving local provider draft batches with stable ChangeId/HLC/OriginAuthorEpoch and atomic Outbox + receipt commit;
+- identity-preserving local provider draft batches with stable ChangeId/HLC/OriginAuthorEpoch and atomic Outbox + receipt commit, including Host-assigned receipt sequencing for retry-safe async callers;
+- authoritative Host LocalAuthor discovery for IPC client identity validation;
 - receipt-backed ReadField;
 - lease-fenced Outbox acquisition, bounded entry chunks, durable Outbox high-watermark query, Outbox ACK and release;
 - immutable provider snapshots over IPC: idempotent open within one live Host generation, bounded metadata pages/value chunks, client/Host-generation fencing and release (handles are not restart-resumable);
