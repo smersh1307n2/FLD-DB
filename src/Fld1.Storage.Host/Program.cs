@@ -56,7 +56,7 @@ internal static class Program
             {
                 shutdown.Cancel();
                 try { await serverTask; } catch { }
-                StorageIpcEndpoint.DeleteIfOwned(rootDirectory, ownerId);
+                StorageIpcEndpoint.DeleteIfOwned(rootDirectory, partitionId, ownerId);
                 Console.CancelKeyPress -= cancelHandler;
             }
         }
