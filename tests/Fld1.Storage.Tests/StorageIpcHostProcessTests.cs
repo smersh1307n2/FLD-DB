@@ -49,6 +49,7 @@ public sealed class StorageIpcHostProcessTests
 
             await StopHostAsync(firstHost);
             firstHost = null;
+            await WaitForWriterFenceReleaseAsync(root, partition, TimeSpan.FromSeconds(15));
 
             restartedHost = StartHost(root, partition);
             StorageIpcEndpointInfo restartedEndpoint =
@@ -64,6 +65,7 @@ public sealed class StorageIpcHostProcessTests
 
             await StopHostAsync(restartedHost);
             restartedHost = null;
+            await WaitForWriterFenceReleaseAsync(root, partition, TimeSpan.FromSeconds(15));
 
             using var recovered = StorageDatabase.Open(root, partition);
             Assert.Equal(1UL, recovered.LastCommitSeq);
@@ -138,6 +140,30 @@ public sealed class StorageIpcHostProcessTests
         }
 
         throw new TimeoutException("Storage Host did not publish its endpoint before the deadline.");
+    }
+
+    private static async Task WaitForWriterFenceReleaseAsync(
+        string root, ulong partition, TimeSpan timeout)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        IOException? lastFailure = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var probe = StorageDatabase.Open(root, partition);
+                return;
+            }
+            catch (IOException exception)
+            {
+                lastFailure = exception;
+                await Task.Delay(50);
+            }
+        }
+
+        throw new TimeoutException(
+            "Storage Host exited but its WAL writer fence was not released before the deadline.",
+            lastFailure);
     }
 
     private static async Task StopHostAsync(Process host)
