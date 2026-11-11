@@ -253,7 +253,7 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
     /// The caller supplies a stable OperationId (normally derived from the mutation ChangeId);
     /// the same id and exact payload are safe to retry across client and Host restarts.
     /// </summary>
-    public async Task<FldDatabaseIpcWriteResult> AppendLocalProviderBatchAutoSequenceAsync(
+    public async Task<FldDatabaseIpcAutoSequenceWriteResult> AppendLocalProviderBatchAutoSequenceAsync(
         Guid operationId,
         IReadOnlyList<FldLocalProviderMutation> mutations,
         CancellationToken cancellationToken = default)
@@ -264,8 +264,7 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         ReadOnlyMemory<byte> response = await SendAsync(
             operationId, FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence,
             payload, cancellationToken).ConfigureAwait(false);
-        (ulong commitSeq, bool duplicate, byte[] result) = FldDatabaseIpcProtocol.DecodeCommitResult(response);
-        return FldDatabaseIpcProtocol.DecodeWriteResult(commitSeq, duplicate, result);
+        return FldDatabaseIpcProtocol.DecodeAutoSequenceWriteResult(response);
     }
 
     /// <summary>
