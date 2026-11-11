@@ -5,8 +5,15 @@ using System.Text;
 
 namespace Fld1.Storage.Ipc;
 
-/// <summary>Identity attached to every request received on one authenticated local pipe session.</summary>
-public readonly record struct StorageIpcRequestContext(Guid ClientId, ulong SessionGeneration);
+/// <summary>
+ * Identity attached to one request on an authenticated local pipe session.
+ * RequestId is a per-session transport correlation value; it is not a durable
+ * idempotency key and may restart from one after reconnect.
+/// </summary>
+public readonly record struct StorageIpcRequestContext(
+    Guid ClientId,
+    ulong SessionGeneration,
+    ulong RequestId);
 
 /// <summary>Handles one opaque domain request. Storage itself does not interpret request payloads.</summary>
 public delegate ValueTask<ReadOnlyMemory<byte>> StorageIpcRequestHandler(
@@ -157,7 +164,7 @@ public sealed class StorageIpcServer
                     try
                     {
                         ReadOnlyMemory<byte> response = await _handler(
-                            new StorageIpcRequestContext(clientId, generation),
+                            new StorageIpcRequestContext(clientId, generation, frame.RequestId),
                             frame.Payload,
                             cancellationToken).ConfigureAwait(false);
                         await StorageIpcProtocol.WriteAsync(pipe,
