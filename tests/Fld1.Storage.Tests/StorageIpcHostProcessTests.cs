@@ -92,6 +92,14 @@ public sealed class StorageIpcHostProcessTests
         start.ArgumentList.Add("run");
         start.ArgumentList.Add("--project");
         start.ArgumentList.Add(project);
+#if DEBUG
+        start.ArgumentList.Add("--configuration");
+        start.ArgumentList.Add("Debug");
+#else
+        start.ArgumentList.Add("--configuration");
+        start.ArgumentList.Add("Release");
+#endif
+        start.ArgumentList.Add("--no-build");
         start.ArgumentList.Add("--no-launch-profile");
         start.ArgumentList.Add("--");
         start.ArgumentList.Add(root);
