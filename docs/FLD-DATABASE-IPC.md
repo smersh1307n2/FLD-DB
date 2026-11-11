@@ -75,6 +75,14 @@ The returned handle binds HostGeneration and SnapshotToken; every page, value-ch
 
 The host creates the snapshot from its persisted provider-snapshot mechanism; IPC does not expose raw FldDatabase or borrowed storage views. Consumers must release handles in finally and discard handles after a Host-generation change.
 
+## Provider current-state reads and feed watermark (snapshot API; implemented)
+
+The IPC facade does not need a separate high-watermark operation for a provider snapshot. `OpenSnapshotAsync` returns `SourceFeedWatermark`, captured by `FldDatabase.OpenProviderSnapshotForIpc` from the same immutable generation as the snapshot index and overlay. This is the source-feed ceiling that a snapshot-based provider must use; it must not fetch a later live Outbox watermark and combine it with an older snapshot.
+
+`ReadSnapshotPageAsync` returns metadata for every visible field winner, including RecordId, FieldId, value length, HLC, AuthorNodeId, KeyEpoch, tombstone state, ChangeId, OriginAuthorEpoch, OriginSequence and record-lifecycle tombstone state. `ReadSnapshotValueChunkAsync` retrieves the corresponding value from that same pinned generation. Together these operations are sufficient to implement a correct snapshot-backed `ReadCurrentAsync` by traversing metadata pages and fetching the matching value chunks. This is a stable but potentially expensive fallback; it is not an efficient point-read API and callers must not pretend it is O(1).
+
+A future dedicated point-read operation may improve lookup cost, but it must preserve the same generation semantics or return an explicit current-state version token. It is not a prerequisite for correctness of the initial async provider. The remaining material provider gaps are published-origin stamping, durable author-epoch/publication-mode operations, full-replace/snapshot-state capabilities, and a cross-call async commit barrier. The existing snapshot handle already carries the feed watermark; do not add a redundant high-watermark RPC.
+
 ## Identity-preserving local provider writes (0x210D; implemented)
 
 The generic WriteBatch operation is intended for ordinary local database writes; it generates local HLC and ChangeId inside FLD. A BIN-SYNC provider draft must instead preserve the caller's stable ChangeId, HLC and active OriginAuthorEpoch. AppendLocalProviderBatch provides that separate atomic boundary.
