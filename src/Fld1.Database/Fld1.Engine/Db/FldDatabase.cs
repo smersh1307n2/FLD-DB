@@ -251,8 +251,6 @@ public sealed partial class FldDatabase : IDisposable
         foreach (LocalOperationReceiptEntry receipt in manifest.LocalOperationReceipts
                      .Where(item => item.NamespaceId == _namespaceId))
         {
-            if (receipt.CommitSeq > manifest.LastFlushedCommitSeq)
-                throw new InvalidDataException("Manifest local-operation receipt exceeds LastFlushedCommitSeq.");
             AddLocalOperationReceipt(receipt);
         }
 
