@@ -127,6 +127,61 @@ public sealed class FldDatabaseIpcLocalProviderTests
         }
     }
 
+    [Fact]
+    public async Task Local_provider_ipc_rejects_unrelated_uncommitted_overlay_writes()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-local-provider-ipc-boundary-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x324;
+        byte[] localAuthor = Id(0x41);
+        Guid ownerId = Guid.NewGuid();
+        Guid clientId = Guid.NewGuid();
+        byte[] pendingRecord = FldDatabase.NewRecordId();
+        byte[] providerRecord = FldDatabase.NewRecordId();
+
+        using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+        using var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+        Task serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            database.Put(pendingRecord, 9, "uncommitted-direct-write"u8);
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+
+            FldLocalProviderMutation mutation = Mutation() with { RecordId = providerRecord };
+            await using var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10));
+            await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                client.AppendLocalProviderBatchAsync(Guid.NewGuid(), 1, [mutation]));
+
+            Assert.Equal(0ul, database.GetOutboxHighWatermark());
+            Assert.True(database.TryGetBytes(pendingRecord, 9, out byte[]? pendingValue));
+            Assert.Equal("uncommitted-direct-write"u8.ToArray(), pendingValue);
+            Assert.False(database.TryGetBytes(providerRecord, mutation.FieldId, out _));
+
+            // The rejected provider operation did not seal or merge the unrelated
+            // dirty overlay. The caller can commit its own write independently.
+            _ = database.Commit();
+            Assert.Equal(1ul, database.GetOutboxHighWatermark());
+            var entry = Assert.Single(database.ReadOutboxBatch(0, 10));
+            Assert.Equal(pendingRecord, entry.RecordId);
+            Assert.Equal((ushort)9, entry.FieldId);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     private static FldLocalProviderMutation Mutation()
         => new(
             FldDatabase.NewRecordId(),
