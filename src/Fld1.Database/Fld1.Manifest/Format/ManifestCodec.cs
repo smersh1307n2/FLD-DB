@@ -95,6 +95,7 @@ public static class ManifestCodec
         WriteU32(ms, (uint)doc.LocalOperationReceipts.Count);
         foreach (var receipt in doc.LocalOperationReceipts)
         {
+            WriteU32(ms, receipt.NamespaceId);
             ms.Write(receipt.ClientId);
             ms.Write(receipt.OperationId);
             ms.Write(receipt.Fingerprint);
@@ -211,10 +212,11 @@ public static class ManifestCodec
                 throw new InvalidDataException("unknown manifest extension");
             pos += 4;
             int receiptCount = ReadCount(
-                data, ref pos, minimumEntryBytes: 76, maxCount: 1_000_000, "local operation receipt");
+                data, ref pos, minimumEntryBytes: 80, maxCount: 1_000_000, "local operation receipt");
             localReceipts = new List<LocalOperationReceiptEntry>(receiptCount);
             for (int i = 0; i < receiptCount; i++)
             {
+                uint namespaceId = ReadU32(data, ref pos);
                 byte[] clientId = ReadBytes(data, ref pos, 16);
                 byte[] operationId = ReadBytes(data, ref pos, 16);
                 byte[] fingerprint = ReadBytes(data, ref pos, 32);
@@ -225,6 +227,7 @@ public static class ManifestCodec
                 byte[] result = ReadBytes(data, ref pos, checked((int)resultLength));
                 localReceipts.Add(new LocalOperationReceiptEntry
                 {
+                    NamespaceId = namespaceId,
                     ClientId = clientId,
                     OperationId = operationId,
                     Fingerprint = fingerprint,
@@ -380,7 +383,7 @@ public static class ManifestCodec
         var operationReceiptKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var receipt in document.LocalOperationReceipts)
         {
-            if (receipt.ClientId.Length != 16 || IsZero(receipt.ClientId)
+            if (receipt.NamespaceId > 0xFFFF || receipt.ClientId.Length != 16 || IsZero(receipt.ClientId)
                 || receipt.OperationId.Length != 16 || IsZero(receipt.OperationId)
                 || receipt.Fingerprint.Length != 32 || receipt.CommitSeq == 0
                 || receipt.Result.Length > 4 * 1024 * 1024)
