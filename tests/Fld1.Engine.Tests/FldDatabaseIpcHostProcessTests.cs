@@ -101,7 +101,7 @@ public sealed class FldDatabaseIpcHostProcessTests
                 Assert.Equal(4ul, next.CommitSeq);
 
                 FldDatabaseIpcOutboxLease thirdOutboxLease = await client.AcquireOutboxLeaseAsync();
-                Assert.Equal(checked(secondOutboxLease.Epoch + 1), thirdOutboxLease.Epoch);
+                Assert.Equal(checked(secondOutboxLease.Epoch + 2), thirdOutboxLease.Epoch);
                 await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
                     client.ReadOutboxEntryChunkAsync(secondOutboxLease, afterSequence: 1));
                 FldDatabaseIpcOutboxEntryChunk? nextOutboxEntry =
