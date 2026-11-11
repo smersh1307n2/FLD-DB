@@ -108,6 +108,36 @@ public sealed class StorageIpcOperationLedgerTests
     }
 
     [Fact]
+    public void Operation_ledger_rejects_a_write_batch_from_a_different_storage_database()
+    {
+        string firstDirectory = Path.Combine(
+            Path.GetTempPath(), "fld-storage-ipc-ledger-owner-" + Guid.NewGuid().ToString("N"));
+        string secondDirectory = Path.Combine(
+            Path.GetTempPath(), "fld-storage-ipc-ledger-foreign-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            using var first = StorageDatabase.Open(firstDirectory, 0x1D04);
+            using var second = StorageDatabase.Open(secondDirectory, 0x1D04);
+            var ledger = new StorageIpcOperationLedger(first);
+            using var foreignBatch = second.BeginWriteBatch();
+
+            Assert.Throws<ArgumentException>(() => ledger.TryStageResult(
+                foreignBatch,
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                StorageIpcOperationLedger.ComputeFingerprint(1, "request"u8),
+                "result"u8,
+                out _));
+        }
+        finally
+        {
+            try { Directory.Delete(firstDirectory, recursive: true); } catch { }
+            try { Directory.Delete(secondDirectory, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Reusing_operation_identity_with_different_fingerprint_fails_closed()
     {
         string directory = Path.Combine(
