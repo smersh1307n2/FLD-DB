@@ -38,6 +38,7 @@ public class OutboxTests : IDisposable
         {
             ClientId = clientId,
             OperationId = operationId,
+            ClientSequence = 1,
             Fingerprint = fingerprint,
             Result = response
         };
@@ -58,7 +59,7 @@ public class OutboxTests : IDisposable
             Assert.Equal(response, committed.Result);
             Assert.Single(db.ReadOutboxBatch(0, 10));
             Assert.True(db.TryGetLocalOperationReceipt(
-                clientId, operationId, fingerprint, out var found));
+                clientId, operationId, 1, fingerprint, out var found));
             Assert.Equal(originalCommitSeq, found!.CommitSeq);
             Assert.Equal(response, found.Result);
 
@@ -86,7 +87,7 @@ public class OutboxTests : IDisposable
             byte[] conflictingFingerprint = fingerprint.ToArray();
             conflictingFingerprint[0] ^= 0x80;
             Assert.Throws<InvalidDataException>(() => reopened.TryGetLocalOperationReceipt(
-                clientId, operationId, conflictingFingerprint, out _));
+                clientId, operationId, 1, conflictingFingerprint, out _));
         }
     }
 
@@ -104,6 +105,7 @@ public class OutboxTests : IDisposable
             {
                 ClientId = clientId,
                 OperationId = operationId,
+                ClientSequence = 1,
                 Fingerprint = fingerprint,
                 Result = response
             });
@@ -114,7 +116,7 @@ public class OutboxTests : IDisposable
         using (var reopened = FldDatabase.Open(_dir))
         {
             Assert.True(reopened.TryGetLocalOperationReceipt(
-                clientId, operationId, fingerprint, out var replay));
+                clientId, operationId, 1, fingerprint, out var replay));
             Assert.Equal(response, replay!.Result);
             Assert.Equal(1ul, replay.CommitSeq);
         }

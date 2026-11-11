@@ -62,6 +62,15 @@ public sealed partial class FldDatabase : IDisposable
     // Rebuilt from GROUP_COMMIT WAL receipts and the atomic checkpoint manifest.
     private readonly Dictionary<string, LocalOperationReceiptEntry> _localOperationReceipts =
         new(StringComparer.Ordinal);
+    private sealed class LocalOperationClientState
+    {
+        public required uint NamespaceId { get; init; }
+        public required byte[] ClientId { get; init; }
+        public ulong LastCommittedSequence { get; set; }
+        public ulong AcknowledgedThroughSequence { get; set; }
+    }
+    private readonly Dictionary<string, LocalOperationClientState> _localOperationClients =
+        new(StringComparer.Ordinal);
     private ApplyJournal _applyJournal;
     // Rebuildable in-memory author discovery cache; no duplicate durable author index.
     private Dictionary<string, (byte[] Author, ulong MaxUnackedJournalSeq)>? _unacknowledgedRelayAuthors;
@@ -248,10 +257,38 @@ public sealed partial class FldDatabase : IDisposable
                 _nextRunId = checked(entry.RunId + 1);
         }
 
+        foreach (LocalOperationClientEntry client in manifest.LocalOperationClients
+                     .Where(item => item.NamespaceId == _namespaceId))
+        {
+            string clientKey = LocalOperationClientKey(client.ClientId);
+            _localOperationClients.Add(clientKey, new LocalOperationClientState
+            {
+                NamespaceId = client.NamespaceId,
+                ClientId = client.ClientId.ToArray(),
+                LastCommittedSequence = client.LastCommittedSequence,
+                AcknowledgedThroughSequence = client.AcknowledgedThroughSequence
+            });
+        }
+
         foreach (LocalOperationReceiptEntry receipt in manifest.LocalOperationReceipts
                      .Where(item => item.NamespaceId == _namespaceId))
         {
-            AddLocalOperationReceipt(receipt);
+            LocalOperationClientState state = GetOrCreateLocalOperationClientState(receipt.ClientId);
+            if (receipt.ClientSequence <= state.AcknowledgedThroughSequence
+                || receipt.ClientSequence > state.LastCommittedSequence)
+                throw new InvalidDataException("Manifest local-operation receipt is outside its client sequence window.");
+            string key = LocalOperationKey(receipt.ClientId, receipt.OperationId);
+            if (!_localOperationReceipts.TryAdd(key, new LocalOperationReceiptEntry
+                {
+                    NamespaceId = receipt.NamespaceId,
+                    ClientId = receipt.ClientId.ToArray(),
+                    OperationId = receipt.OperationId.ToArray(),
+                    ClientSequence = receipt.ClientSequence,
+                    Fingerprint = receipt.Fingerprint.ToArray(),
+                    CommitSeq = receipt.CommitSeq,
+                    Result = receipt.Result.ToArray()
+                }))
+                throw new InvalidDataException("Duplicate manifest local-operation receipt.");
         }
 
         foreach (var re in manifest.Runs.Where(r => r.Ns == _namespaceId).OrderBy(r => r.RunId))
@@ -300,6 +337,17 @@ public sealed partial class FldDatabase : IDisposable
                     _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
                     _manifestDirty = true;
                 }
+                continue;
+            }
+
+            if (record.Kind == WalConstants.KindLocalOperationAck)
+            {
+                WalLocalOperationAck acknowledgement = WalLocalOperationAckCodec.Decode(record.Payload);
+                if (acknowledgement.NamespaceId != _namespaceId)
+                    throw new InvalidDataException("Local-operation acknowledgement namespace mismatch.");
+                ApplyRecoveredLocalOperationAck(acknowledgement);
+                _pendingFlushedCommitSeq = Math.Max(_pendingFlushedCommitSeq, record.CommitSeq);
+                _manifestDirty = true;
                 continue;
             }
 
@@ -377,6 +425,7 @@ public sealed partial class FldDatabase : IDisposable
                     NamespaceId = receipt.NamespaceId,
                     ClientId = receipt.ClientId,
                     OperationId = receipt.OperationId,
+                    ClientSequence = receipt.ClientSequence,
                     Fingerprint = receipt.Fingerprint,
                     CommitSeq = record.CommitSeq,
                     Result = receipt.Result
@@ -646,6 +695,7 @@ public sealed partial class FldDatabase : IDisposable
         {
             ClientId = receipt.ClientId.ToArray(),
             OperationId = receipt.OperationId.ToArray(),
+            ClientSequence = receipt.ClientSequence,
             Fingerprint = receipt.Fingerprint.ToArray(),
             Result = receipt.Result.ToArray()
         };
@@ -653,37 +703,99 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     /// <summary>
-    /// Look up a durable local operation result. Reusing an identity with a different
-    /// request fingerprint fails closed rather than applying the request again.
+    /// Look up a durable local operation result. A sequence at or below the client's
+    /// acknowledged watermark is permanently retired and can never be re-applied.
     /// </summary>
     public bool TryGetLocalOperationReceipt(
         ReadOnlySpan<byte> clientId,
         ReadOnlySpan<byte> operationId,
+        ulong clientSequence,
         ReadOnlySpan<byte> fingerprint,
         out FldLocalOperationCommitResult? result)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ValidateOperationIdentity(clientId, operationId, fingerprint);
+        if (clientSequence == 0)
+            throw new ArgumentOutOfRangeException(nameof(clientSequence));
         lock (_commitLock)
         {
             EnsureHealthy();
             string key = LocalOperationKey(clientId, operationId);
-            if (!_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? stored))
+            if (_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? stored))
             {
-                result = null;
-                return false;
+                if (stored.ClientSequence != clientSequence)
+                    throw new InvalidDataException("ClientId + OperationId was reused with a different ClientSequence.");
+                if (!stored.Fingerprint.AsSpan().SequenceEqual(fingerprint))
+                    throw new InvalidDataException("ClientId + OperationId was reused with a different request fingerprint.");
+
+                result = new FldLocalOperationCommitResult
+                {
+                    CommitSeq = stored.CommitSeq,
+                    Result = stored.Result.ToArray(),
+                    IsDuplicate = true
+                };
+                return true;
             }
 
-            if (!stored.Fingerprint.AsSpan().SequenceEqual(fingerprint))
-                throw new InvalidDataException("ClientId + OperationId was reused with a different request fingerprint.");
+            LocalOperationClientState state = GetOrCreateLocalOperationClientState(clientId);
+            if (clientSequence <= state.AcknowledgedThroughSequence)
+                throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
+            if (clientSequence <= state.LastCommittedSequence)
+                throw new InvalidDataException("A committed local operation receipt is missing inside the active retry window.");
 
-            result = new FldLocalOperationCommitResult
+            result = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Durably acknowledges every operation for this client through a contiguous
+    /// sequence. The client must persist all returned results before acknowledging.
+    /// </summary>
+    public bool AcknowledgeLocalOperationReceipts(
+        ReadOnlySpan<byte> clientId,
+        ulong acknowledgedThroughSequence)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ValidateClientId(clientId);
+        if (acknowledgedThroughSequence == 0)
+            throw new ArgumentOutOfRangeException(nameof(acknowledgedThroughSequence));
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string clientKey = LocalOperationClientKey(clientId);
+            if (!_localOperationClients.TryGetValue(clientKey, out LocalOperationClientState? state))
+                return false;
+            if (acknowledgedThroughSequence <= state.AcknowledgedThroughSequence)
+                return false;
+            if (acknowledgedThroughSequence > state.LastCommittedSequence)
+                throw new ArgumentOutOfRangeException(
+                    nameof(acknowledgedThroughSequence), "Cannot acknowledge an operation that has not committed.");
+
+            EnsureCompleteLocalOperationReceiptRange(state, acknowledgedThroughSequence);
+            byte[] payload = WalLocalOperationAckCodec.Encode(new WalLocalOperationAck
             {
-                CommitSeq = stored.CommitSeq,
-                Result = stored.Result.ToArray(),
-                IsDuplicate = true
-            };
-            return true;
+                NamespaceId = checked((ushort)_namespaceId),
+                ClientId = state.ClientId,
+                AcknowledgedThroughSequence = acknowledgedThroughSequence
+            });
+
+            try
+            {
+                ulong commitSeq = _wal.Append(WalConstants.KindLocalOperationAck, payload);
+                _wal.Flush();
+                RemoveLocalOperationReceiptsThrough(state, acknowledgedThroughSequence);
+                state.AcknowledgedThroughSequence = acknowledgedThroughSequence;
+                _pendingFlushedCommitSeq = commitSeq;
+                _manifestDirty = true;
+                return true;
+            }
+            catch
+            {
+                _faulted = true;
+                throw;
+            }
         }
     }
 
@@ -698,6 +810,8 @@ public sealed partial class FldDatabase : IDisposable
                 string key = LocalOperationKey(operationReceipt.ClientId, operationReceipt.OperationId);
                 if (_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? prior))
                 {
+                    if (prior.ClientSequence != operationReceipt.ClientSequence)
+                        throw new InvalidDataException("ClientId + OperationId was reused with a different ClientSequence.");
                     if (!prior.Fingerprint.AsSpan().SequenceEqual(operationReceipt.Fingerprint))
                         throw new InvalidDataException("ClientId + OperationId was reused with a different request fingerprint.");
                     if (_dirty.Count != 0)
@@ -710,6 +824,14 @@ public sealed partial class FldDatabase : IDisposable
                         IsDuplicate = true
                     };
                 }
+
+                LocalOperationClientState clientState =
+                    GetOrCreateLocalOperationClientState(operationReceipt.ClientId);
+                if (operationReceipt.ClientSequence <= clientState.AcknowledgedThroughSequence)
+                    throw new InvalidOperationException("This client operation sequence has already been acknowledged and retired.");
+                if (operationReceipt.ClientSequence != checked(clientState.LastCommittedSequence + 1))
+                    throw new InvalidOperationException(
+                        $"Expected ClientSequence {clientState.LastCommittedSequence + 1}, received {operationReceipt.ClientSequence}.");
             }
 
             if (_dirty.Count == 0 && operationReceipt is null)
@@ -755,6 +877,7 @@ public sealed partial class FldDatabase : IDisposable
                         NamespaceId = checked((ushort)_namespaceId),
                         ClientId = operationReceipt.ClientId,
                         OperationId = operationReceipt.OperationId,
+                        ClientSequence = operationReceipt.ClientSequence,
                         Fingerprint = operationReceipt.Fingerprint,
                         Result = operationReceipt.Result
                     }
@@ -879,32 +1002,135 @@ public sealed partial class FldDatabase : IDisposable
     private void AddLocalOperationReceipt(LocalOperationReceiptEntry receipt)
     {
         ValidateOperationIdentity(receipt.ClientId, receipt.OperationId, receipt.Fingerprint);
+        if (receipt.NamespaceId != _namespaceId || receipt.ClientSequence == 0)
+            throw new InvalidDataException("Local-operation receipt namespace or sequence is invalid.");
+
+        LocalOperationClientState state = GetOrCreateLocalOperationClientState(receipt.ClientId);
+        if (receipt.ClientSequence <= state.AcknowledgedThroughSequence)
+            return;
+
         string key = LocalOperationKey(receipt.ClientId, receipt.OperationId);
         if (_localOperationReceipts.TryGetValue(key, out LocalOperationReceiptEntry? existing))
         {
             if (existing.NamespaceId != receipt.NamespaceId
+                || existing.ClientSequence != receipt.ClientSequence
                 || existing.CommitSeq != receipt.CommitSeq
                 || !existing.Fingerprint.AsSpan().SequenceEqual(receipt.Fingerprint)
                 || !existing.Result.AsSpan().SequenceEqual(receipt.Result))
                 throw new InvalidDataException("Conflicting durable local-operation receipt identity.");
             return;
         }
+
+        if (receipt.ClientSequence != checked(state.LastCommittedSequence + 1))
+            throw new InvalidDataException("Local-operation receipt sequence is not contiguous.");
+        state.LastCommittedSequence = receipt.ClientSequence;
         _localOperationReceipts.Add(key, new LocalOperationReceiptEntry
         {
             NamespaceId = receipt.NamespaceId,
             ClientId = receipt.ClientId.ToArray(),
             OperationId = receipt.OperationId.ToArray(),
+            ClientSequence = receipt.ClientSequence,
             Fingerprint = receipt.Fingerprint.ToArray(),
             CommitSeq = receipt.CommitSeq,
             Result = receipt.Result.ToArray()
         });
     }
 
+    private LocalOperationClientState GetOrCreateLocalOperationClientState(ReadOnlySpan<byte> clientId)
+    {
+        ValidateClientId(clientId);
+        string key = LocalOperationClientKey(clientId);
+        if (_localOperationClients.TryGetValue(key, out LocalOperationClientState? state))
+            return state;
+        state = new LocalOperationClientState
+        {
+            NamespaceId = _namespaceId,
+            ClientId = clientId.ToArray(),
+            LastCommittedSequence = 0,
+            AcknowledgedThroughSequence = 0
+        };
+        _localOperationClients.Add(key, state);
+        return state;
+    }
+
+    private void EnsureCompleteLocalOperationReceiptRange(
+        LocalOperationClientState state,
+        ulong acknowledgedThroughSequence)
+    {
+        ulong expectedCount = acknowledgedThroughSequence - state.AcknowledgedThroughSequence;
+        if (expectedCount > int.MaxValue)
+            throw new InvalidOperationException("Acknowledgement range is too large to verify.");
+        ulong[] sequences = _localOperationReceipts.Values
+            .Where(item => item.NamespaceId == state.NamespaceId
+                && item.ClientId.AsSpan().SequenceEqual(state.ClientId)
+                && item.ClientSequence > state.AcknowledgedThroughSequence
+                && item.ClientSequence <= acknowledgedThroughSequence)
+            .Select(item => item.ClientSequence)
+            .Order()
+            .ToArray();
+        if ((ulong)sequences.Length != expectedCount)
+            throw new InvalidDataException("Cannot acknowledge a non-contiguous local-operation receipt range.");
+        for (int i = 0; i < sequences.Length; i++)
+        {
+            if (sequences[i] != state.AcknowledgedThroughSequence + (ulong)i + 1)
+                throw new InvalidDataException("Cannot acknowledge a local-operation sequence gap.");
+        }
+    }
+
+    private void RemoveLocalOperationReceiptsThrough(
+        LocalOperationClientState state,
+        ulong acknowledgedThroughSequence)
+    {
+        string[] keys = _localOperationReceipts
+            .Where(pair => pair.Value.NamespaceId == state.NamespaceId
+                && pair.Value.ClientId.AsSpan().SequenceEqual(state.ClientId)
+                && pair.Value.ClientSequence <= acknowledgedThroughSequence)
+            .Select(pair => pair.Key)
+            .ToArray();
+        foreach (string key in keys)
+            _localOperationReceipts.Remove(key);
+    }
+
+    private void ApplyRecoveredLocalOperationAck(WalLocalOperationAck acknowledgement)
+    {
+        LocalOperationClientState state = GetOrCreateLocalOperationClientState(acknowledgement.ClientId);
+        if (acknowledgement.AcknowledgedThroughSequence <= state.AcknowledgedThroughSequence)
+            return;
+        if (acknowledgement.AcknowledgedThroughSequence > state.LastCommittedSequence)
+            throw new InvalidDataException("WAL local-operation acknowledgement exceeds the committed client sequence.");
+        EnsureCompleteLocalOperationReceiptRange(state, acknowledgement.AcknowledgedThroughSequence);
+        RemoveLocalOperationReceiptsThrough(state, acknowledgement.AcknowledgedThroughSequence);
+        state.AcknowledgedThroughSequence = acknowledgement.AcknowledgedThroughSequence;
+    }
+
+    private static void ValidateClientId(ReadOnlySpan<byte> clientId)
+    {
+        if (clientId.Length != 16 || IsZeroId(clientId))
+            throw new ArgumentException("ClientId must be a nonzero 16-byte identifier.", nameof(clientId));
+    }
+
+    private static string LocalOperationClientKey(ReadOnlySpan<byte> clientId)
+        => Convert.ToHexString(clientId);
+
     private List<LocalOperationReceiptEntry> BuildManifestLocalOperationReceipts(
         IReadOnlyList<LocalOperationReceiptEntry> existing)
     {
         var result = existing.Where(item => item.NamespaceId != _namespaceId).ToList();
         result.AddRange(_localOperationReceipts.Values);
+        return result;
+    }
+
+    private List<LocalOperationClientEntry> BuildManifestLocalOperationClients(
+        IReadOnlyList<LocalOperationClientEntry> existing)
+    {
+        var result = existing.Where(item => item.NamespaceId != _namespaceId).ToList();
+        result.AddRange(_localOperationClients.Values.Select(state => new LocalOperationClientEntry
+        {
+            NamespaceId = state.NamespaceId,
+            ClientId = state.ClientId.ToArray(),
+            LastCommittedSequence = state.LastCommittedSequence,
+            AcknowledgedThroughSequence = state.AcknowledgedThroughSequence
+        }));
         return result;
     }
 
@@ -943,7 +1169,8 @@ public sealed partial class FldDatabase : IDisposable
                 {
                     _outbox.MarkMaterialized(applyOnlySeq);
                     _manifestStore.Update(m => CloneManifest(m, lastFlushed: applyOnlySeq,
-                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts)));
+                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
+                        localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients)));
                 }
                 catch
                 {
@@ -1357,7 +1584,8 @@ public sealed partial class FldDatabase : IDisposable
                 SeqHi = seqHi
             });
             return CloneManifest(manifest, runs: runs, lastFlushed: seqHi,
-                localOperationReceipts: BuildManifestLocalOperationReceipts(manifest.LocalOperationReceipts));
+                localOperationReceipts: BuildManifestLocalOperationReceipts(manifest.LocalOperationReceipts),
+                localOperationClients: BuildManifestLocalOperationClients(manifest.LocalOperationClients));
         });
 
         try
@@ -1512,7 +1740,8 @@ public sealed partial class FldDatabase : IDisposable
         ulong? lastFlushed = null,
         List<uint>? nss = null,
         List<RunEntry>? runs = null,
-        List<LocalOperationReceiptEntry>? localOperationReceipts = null)
+        List<LocalOperationReceiptEntry>? localOperationReceipts = null,
+        List<LocalOperationClientEntry>? localOperationClients = null)
         => new()
         {
             Generation = m.Generation,
@@ -1524,6 +1753,7 @@ public sealed partial class FldDatabase : IDisposable
             ResultClients = m.ResultClients,
             ProvenanceIndex = m.ProvenanceIndex,
             LocalOperationReceipts = localOperationReceipts ?? m.LocalOperationReceipts,
+            LocalOperationClients = localOperationClients ?? m.LocalOperationClients,
             CoordinatorLeaseEpoch = m.CoordinatorLeaseEpoch,
             CoordinatorSessionId = m.CoordinatorSessionId
         };

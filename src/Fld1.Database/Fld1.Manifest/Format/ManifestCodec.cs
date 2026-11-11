@@ -92,6 +92,7 @@ public static class ManifestCodec
 
         // Optional v1 extension. Older manifests end immediately after CoordinatorSessionId.
         ms.Write("FLOR"u8);
+        ms.Write("LOR2"u8);
         WriteU32(ms, (uint)doc.LocalOperationReceipts.Count);
         foreach (var receipt in doc.LocalOperationReceipts)
         {
@@ -107,6 +108,7 @@ public static class ManifestCodec
 
         // Per-client sequence state lets an explicit contiguous ACK safely retire receipts.
         ms.Write("FLOC"u8);
+        ms.Write("LOC1"u8);
         WriteU32(ms, (uint)doc.LocalOperationClients.Count);
         foreach (var client in doc.LocalOperationClients)
         {
@@ -223,6 +225,9 @@ public static class ManifestCodec
             if (data.Length - pos < 8 || !data.Slice(pos, 4).SequenceEqual("FLOR"u8))
                 throw new InvalidDataException("unknown manifest extension");
             pos += 4;
+            if (data.Length - pos < 8 || !data.Slice(pos, 4).SequenceEqual("LOR2"u8))
+                throw new InvalidDataException("unsupported FLOR local-operation receipt format");
+            pos += 4;
             int receiptCount = ReadCount(
                 data, ref pos, minimumEntryBytes: 88, maxCount: 1_000_000, "local operation receipt");
             localReceipts = new List<LocalOperationReceiptEntry>(receiptCount);
@@ -256,6 +261,9 @@ public static class ManifestCodec
         {
             if (data.Length - pos < 8 || !data.Slice(pos, 4).SequenceEqual("FLOC"u8))
                 throw new InvalidDataException("unknown manifest local-operation client extension");
+            pos += 4;
+            if (data.Length - pos < 8 || !data.Slice(pos, 4).SequenceEqual("LOC1"u8))
+                throw new InvalidDataException("unsupported FLOC local-operation client format");
             pos += 4;
             int clientCount = ReadCount(
                 data, ref pos, minimumEntryBytes: 40, maxCount: 100_000, "local operation client");
@@ -437,6 +445,7 @@ public static class ManifestCodec
         {
             if (client.NamespaceId > 0xFFFF || !namespaces.Contains(client.NamespaceId)
                 || client.ClientId.Length != 16 || IsZero(client.ClientId)
+                || client.LastCommittedSequence == 0
                 || client.AcknowledgedThroughSequence > client.LastCommittedSequence)
                 throw new InvalidDataException("invalid LocalOperationClientEntry");
             string key = client.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -447,8 +456,6 @@ public static class ManifestCodec
 
         foreach (var receipt in document.LocalOperationReceipts)
         {
-            string key = receipt.NamespaceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                + ":" + Convert.ToHexString(receipt.ClientId);
             LocalOperationClientEntry? client = document.LocalOperationClients.FirstOrDefault(
                 item => item.NamespaceId == receipt.NamespaceId
                     && item.ClientId.AsSpan().SequenceEqual(receipt.ClientId));

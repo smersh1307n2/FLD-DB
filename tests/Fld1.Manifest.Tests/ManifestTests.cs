@@ -74,6 +74,7 @@ public class ManifestTests : IDisposable
             NamespaceId = 1,
             ClientId = Id(0x41),
             OperationId = Id(0x42),
+            ClientSequence = 1,
             Fingerprint = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray(),
             CommitSeq = 17,
             Result = "original-response"u8.ToArray()
@@ -90,6 +91,16 @@ public class ManifestTests : IDisposable
             ResultClients = [],
             ProvenanceIndex = [],
             LocalOperationReceipts = [receipt],
+            LocalOperationClients =
+            [
+                new LocalOperationClientEntry
+                {
+                    NamespaceId = 1,
+                    ClientId = receipt.ClientId,
+                    LastCommittedSequence = 1,
+                    AcknowledgedThroughSequence = 0
+                }
+            ],
             CoordinatorLeaseEpoch = document.CoordinatorLeaseEpoch,
             CoordinatorSessionId = document.CoordinatorSessionId
         };
@@ -108,7 +119,7 @@ public class ManifestTests : IDisposable
     public void Manifest_decoder_accepts_legacy_document_without_receipt_extension()
     {
         byte[] encoded = ManifestCodec.Encode(ManifestDocument.Empty(4));
-        byte[] legacy = encoded.AsSpan(0, encoded.Length - 8).ToArray();
+        byte[] legacy = encoded.AsSpan(0, encoded.Length - 24).ToArray();
         BinaryPrimitives.WriteUInt32LittleEndian(
             legacy.AsSpan(8, 4), Fld1.Core.Hash.Hashes.Crc32C(legacy.AsSpan(12)));
 
