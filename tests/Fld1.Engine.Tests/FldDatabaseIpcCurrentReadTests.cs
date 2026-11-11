@@ -39,7 +39,27 @@ public sealed class FldDatabaseIpcCurrentReadTests
             byte[] change2=Id(0x72),value2="replacement-value"u8.ToArray();
             await c.AppendLocalProviderBatchAsync(Guid.NewGuid(),2,[new FldLocalProviderMutation(record,7,value2,change2,9,1235,0,3)]);
             var stale=await c.ReadCurrentValueChunkAsync(record,7,change1,5,5);Assert.Equal(FldDatabaseIpcCurrentReadStatus.Changed,stale.Status);Assert.Empty(stale.ValueChunk);
-            var latest=await c.ReadCurrentMetadataAsync(record,7);Assert.NotNull(latest);Assert.Equal(change2,latest.ChangeId);Assert.Equal((uint)value2.Length,latest.ValueLength);
+            Assert.Equal(0, await c.CommitPublishedOriginsAsync([stamp]));
+            var replacementStamp = new FldPublishedOrigin
+            {
+                RecordId = record,
+                FieldId = 7,
+                ChangeId = change2,
+                OriginAuthorEpoch = 9,
+                OriginSequence = 45
+            };
+            Assert.Equal(1, await c.CommitPublishedOriginsAsync([replacementStamp]));
+            var conflictingStamp = new FldPublishedOrigin
+            {
+                RecordId = record,
+                FieldId = 7,
+                ChangeId = change2,
+                OriginAuthorEpoch = 9,
+                OriginSequence = 46
+            };
+            await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                c.CommitPublishedOriginsAsync([conflictingStamp]));
+            var latest=await c.ReadCurrentMetadataAsync(record,7);Assert.NotNull(latest);Assert.Equal(change2,latest.ChangeId);Assert.Equal((uint)value2.Length,latest.ValueLength);Assert.Equal(45ul,latest.OriginSequence);
             var all=await c.ReadCurrentValueChunkAsync(record,7,change2,0,64);Assert.Equal(FldDatabaseIpcCurrentReadStatus.Data,all.Status);Assert.True(all.IsComplete);Assert.Equal(value2,all.ValueChunk);
             Assert.Null(await c.ReadCurrentMetadataAsync(FldDatabase.NewRecordId(),7));
         }finally{shutdown.Cancel();try{await serverTask.WaitAsync(TimeSpan.FromSeconds(10));}catch{}StorageIpcEndpoint.DeleteIfOwned(root,0,owner);dispatcher.Dispose();db.Dispose();try{Directory.Delete(root,true);}catch{}}
