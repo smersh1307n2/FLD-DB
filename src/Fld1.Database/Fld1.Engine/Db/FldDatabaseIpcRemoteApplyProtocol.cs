@@ -98,7 +98,7 @@ public static class FldDatabaseIpcRemoteApplyProtocol
             throw new InvalidDataException("Remote APPLY request declares an oversized delta or operation count.");
 
         long required = (long)deltaLength + (long)writeCount * FieldHeaderBytes + (long)relayCount * sizeof(uint);
-        if (required != stream.Length - stream.Position)
+        if (required > stream.Length - stream.Position)
             throw new InvalidDataException("Remote APPLY request lengths do not match the encoded payload.");
 
         byte[] delta = ReadExact(reader, checked((int)deltaLength));
