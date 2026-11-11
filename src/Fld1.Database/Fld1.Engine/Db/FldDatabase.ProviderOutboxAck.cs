@@ -6,9 +6,9 @@ public sealed partial class FldDatabase
 {
     /// <summary>
     /// Acknowledges a BIN-SYNC safe Outbox prefix and retires the matching contiguous
-    /// auto-sequenced provider-operation receipts. Provider OperationId is the big-endian
-    /// Guid form of the mutation ChangeId. Receipt retirement happens before Outbox ACK:
-    /// if the process stops between the two durable writes, replaying this call is safe.
+    /// local-operation receipts. A receipt is eligible only when every Outbox entry
+    /// produced by its WAL commit is inside the acknowledged prefix. Receipt-only reads
+    /// have no Outbox commit and therefore remain independently acknowledged.
     /// </summary>
     public void AcknowledgeProviderOutbox(ulong throughSequence, OutboxLease lease)
     {
@@ -34,7 +34,7 @@ public sealed partial class FldDatabase
         if (throughSequence <= acknowledgedOutbox)
             return;
 
-        var prefix = new List<(ulong Sequence, ulong CommitSequence, Guid ChangeId)>();
+        var prefix = new List<(ulong Sequence, ulong CommitSequence)>();
         ulong cursor = acknowledgedOutbox;
         while (cursor < throughSequence)
         {
@@ -42,10 +42,7 @@ public sealed partial class FldDatabase
             {
                 if (entry.OutboxSeq > throughSequence)
                     return false;
-                prefix.Add((
-                    entry.OutboxSeq,
-                    entry.CommitSeq,
-                    new Guid(entry.ChangeId, bigEndian: true)));
+                prefix.Add((entry.OutboxSeq, entry.CommitSeq));
                 cursor = entry.OutboxSeq;
                 return true;
             });
@@ -55,12 +52,11 @@ public sealed partial class FldDatabase
 
         if (cursor < throughSequence)
             throw new InvalidDataException("The requested provider Outbox ACK prefix is not fully present.");
-
         if (prefix.Count == 0)
             return;
 
-        // A provider batch may create multiple Outbox entries under one WAL commit.
-        // Do not retire its receipt if the safe prefix ends in the middle of that commit.
+        // A single WAL commit can append several Outbox entries. Exclude the final
+        // commit group if the safe prefix ends before that group's last entry.
         ulong lastCommitSequence = prefix[^1].CommitSequence;
         bool commitContinuesAfterPrefix = false;
         _outbox.VisitBatch(throughSequence, 1, lease, (in OutboxEntryView next) =>
@@ -68,16 +64,19 @@ public sealed partial class FldDatabase
             commitContinuesAfterPrefix = next.CommitSeq == lastCommitSequence;
             return false;
         });
-        if (commitContinuesAfterPrefix)
-            prefix.RemoveAll(entry => entry.CommitSequence == lastCommitSequence);
-        if (prefix.Count == 0)
+
+        var completeCommitSequences = prefix
+            .Where(entry => !commitContinuesAfterPrefix || entry.CommitSequence != lastCommitSequence)
+            .Select(entry => entry.CommitSequence)
+            .ToHashSet();
+        if (completeCommitSequences.Count == 0)
             return;
 
-        string clientKey = LocalOperationClientKey(lease.OwnerId);
-        if (!_localOperationClients.TryGetValue(clientKey, out LocalOperationClientState? state))
+        if (!_localOperationClients.TryGetValue(
+            LocalOperationClientKey(lease.OwnerId), out LocalOperationClientState? state))
             return;
 
-        var coveredChangeIds = prefix.Select(entry => entry.ChangeId).ToHashSet();
+        ulong safeReceiptSequence = state.AcknowledgedThroughSequence;
         LocalOperationReceiptEntry[] receipts = _localOperationReceipts.Values
             .Where(receipt =>
                 receipt.NamespaceId == state.NamespaceId &&
@@ -86,18 +85,15 @@ public sealed partial class FldDatabase
             .OrderBy(receipt => receipt.ClientSequence)
             .ToArray();
 
-        ulong safeReceiptSequence = state.AcknowledgedThroughSequence;
         foreach (LocalOperationReceiptEntry receipt in receipts)
         {
-            // The async provider derives OperationId from ChangeId. Stop at the first
-            // unrelated or not-yet-published receipt to preserve the contiguous prefix.
-            Guid operationId = new(receipt.OperationId, bigEndian: true);
-            if (!coveredChangeIds.Contains(operationId))
+            // Stop at the first receipt whose commit is not fully covered. This keeps
+            // the receipt ACK a contiguous prefix even when read-only receipts are mixed in.
+            if (!completeCommitSequences.Contains(receipt.CommitSeq))
                 break;
             safeReceiptSequence = receipt.ClientSequence;
         }
 
         if (safeReceiptSequence > state.AcknowledgedThroughSequence)
             AcknowledgeLocalOperationReceipts(state.ClientId, safeReceiptSequence);
-    }
-}
+    }}
