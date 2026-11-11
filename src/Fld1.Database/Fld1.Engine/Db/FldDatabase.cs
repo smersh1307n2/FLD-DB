@@ -953,6 +953,7 @@ public sealed partial class FldDatabase : IDisposable
                         NamespaceId = checked((uint)_namespaceId),
                         ClientId = operationReceipt.ClientId,
                         OperationId = operationReceipt.OperationId,
+                        ClientSequence = operationReceipt.ClientSequence,
                         Fingerprint = operationReceipt.Fingerprint,
                         CommitSeq = commitSeq,
                         Result = operationReceipt.Result
