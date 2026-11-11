@@ -25,6 +25,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReadCurrentMetadata = 0x210F;
     public const ushort ReadCurrentValueChunk = 0x2110;
     public const ushort AppendLocalProviderBatchAutoSequence = 0x2111;
+    public const ushort AcknowledgeProviderOutbox = 0x2112;
     public const ushort GetLocalAuthor = 0x2112;
 }
 
