@@ -50,6 +50,7 @@ public sealed class FldDatabaseIpcOutboxTests
 
             await using var firstClient = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, firstClientGuid, TimeSpan.FromSeconds(10));
+            Assert.Equal(1ul, await firstClient.GetOutboxHighWatermarkAsync());
             FldDatabaseIpcOutboxLease firstLease = await firstClient.AcquireOutboxLeaseAsync();
             Assert.Equal(1ul, firstLease.Epoch);
 
@@ -105,6 +106,7 @@ public sealed class FldDatabaseIpcOutboxTests
             Assert.False(secondRead.IsComplete);
 
             Assert.True(await secondClient.AcknowledgeOutboxThroughAsync(secondLease, 1));
+            Assert.Equal(1ul, await secondClient.GetOutboxHighWatermarkAsync());
             Assert.Equal(1ul, database.GetOutboxWatermark());
             Assert.True(database.TryGetLocalOperationReceipt(
                 firstClientId, ToNetworkBytes(receiptOperationId), 1, fingerprint, out var retainedReceipt));
