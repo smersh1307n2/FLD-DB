@@ -38,9 +38,9 @@ public sealed class StorageIpcEndpointTests
                 root, 0x101, secondOwner, Environment.ProcessId);
             StorageIpcEndpoint.Publish(root, second);
 
-            Assert.False(StorageIpcEndpoint.DeleteIfOwned(root, firstOwner));
+            Assert.False(StorageIpcEndpoint.DeleteIfOwned(root, 0x101, firstOwner));
             Assert.Equal(second, StorageIpcEndpoint.Read(root, 0x101));
-            Assert.True(StorageIpcEndpoint.DeleteIfOwned(root, secondOwner));
+            Assert.True(StorageIpcEndpoint.DeleteIfOwned(root, 0x101, secondOwner));
             Assert.Throws<FileNotFoundException>(() => StorageIpcEndpoint.Read(root, 0x101));
         }
         finally
@@ -87,7 +87,38 @@ public sealed class StorageIpcEndpointTests
         }
         finally
         {
-            StorageIpcEndpoint.DeleteIfOwned(root, ownerId);
+            StorageIpcEndpoint.DeleteIfOwned(root, partition, ownerId);
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Endpoint_files_are_isolated_per_partition_in_the_same_root()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld ipc endpoint partitions " + Guid.NewGuid().ToString("N"));
+        Guid firstOwner = Guid.NewGuid();
+        Guid secondOwner = Guid.NewGuid();
+
+        try
+        {
+            StorageIpcEndpointInfo first = StorageIpcEndpoint.Create(
+                root, 0x301, firstOwner, Environment.ProcessId);
+            StorageIpcEndpointInfo second = StorageIpcEndpoint.Create(
+                root, 0x302, secondOwner, Environment.ProcessId);
+            StorageIpcEndpoint.Publish(root, first);
+            StorageIpcEndpoint.Publish(root, second);
+
+            Assert.NotEqual(
+                StorageIpcEndpoint.GetEndpointFilePath(root, 0x301),
+                StorageIpcEndpoint.GetEndpointFilePath(root, 0x302));
+            Assert.Equal(first, StorageIpcEndpoint.Read(root, 0x301));
+            Assert.Equal(second, StorageIpcEndpoint.Read(root, 0x302));
+
+            Assert.True(StorageIpcEndpoint.DeleteIfOwned(root, 0x301, firstOwner));
+            Assert.Equal(second, StorageIpcEndpoint.Read(root, 0x302));
+        }
+        finally
+        {
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }
