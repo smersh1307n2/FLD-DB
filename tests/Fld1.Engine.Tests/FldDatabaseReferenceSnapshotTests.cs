@@ -75,7 +75,7 @@ public sealed class FldDatabaseReferenceSnapshotTests
                 batchDigest: Id(0x55),
                 recordsRoot: Id(0x56),
                 writes: [write],
-                relayWrites: [],
+                relayWrites: [write],
                 protocolStateDelta: [0xA1]);
 
             RemoteBatchReceipt receipt = database.ApplyRemoteBatch(batch);
