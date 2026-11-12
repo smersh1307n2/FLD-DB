@@ -95,13 +95,34 @@ public static class StorageIpcEndpoint
             if (File.Exists(path))
             {
                 File.SetAttributes(path, FileAttributes.Normal);
-                File.Delete(path);
+                DeleteStaleEndpointFile(path);
             }
             File.Move(temporary, path);
         }
         finally
         {
             try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+        }
+    }
+
+    private static void DeleteStaleEndpointFile(string path)
+    {
+        // Windows can briefly retain a discovery-file handle after an owner
+        // process exits (for example during antivirus/indexer inspection).
+        // The database partition lease is already held by this publisher, so
+        // retry only the stale-name deletion; never overwrite a live owner.
+        const int maxAttempts = 40;
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException) when (attempt + 1 < maxAttempts)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(25));
+            }
         }
     }
 
