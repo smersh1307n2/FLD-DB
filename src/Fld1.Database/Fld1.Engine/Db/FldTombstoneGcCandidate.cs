@@ -36,7 +36,9 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
     {
         if (recordId.Length != 16 || changeId.Length is not (0 or 16) ||
             authorNodeId.Length is not (0 or 16) ||
-            isRecordTombstone == isFieldTombstone)
+            isRecordTombstone == isFieldTombstone ||
+            (isRecordTombstone && fieldId != FldLifecycle.FieldId) ||
+            (isFieldTombstone && fieldId == FldLifecycle.FieldId))
             throw new ArgumentException("FLD tombstone candidate identity or kind is invalid.");
 
         _recordId = recordId.ToArray();
