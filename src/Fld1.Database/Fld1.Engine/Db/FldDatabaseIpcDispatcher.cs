@@ -195,10 +195,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         // ChangeId/RecordId reference, so seal that already-committed prefix before
         // building the GC reference index. Never checkpoint an uncommitted overlay;
         // and keep the subsequent Outbox/draft/reference checks as independent gates.
-        if (_database.OverlayCount != 0)
+        if (!_database.TrySealCommittedWalForTombstoneGc())
             return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
-        if (_database.PendingFlushedCommitSeq > _database.LastSealedCommitSeq)
-            _database.Checkpoint();
 
         using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
         FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
