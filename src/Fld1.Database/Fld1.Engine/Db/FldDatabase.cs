@@ -1288,6 +1288,25 @@ public sealed partial class FldDatabase : IDisposable
     }
 
 
+    /// <summary>
+    /// Seal the already committed WAL prefix before a tombstone-GC reference scan.
+    /// Returns false when an uncommitted overlay write prevents checkpointing.
+    /// The caller must hold the composed application/Metadata commit boundary.
+    /// </summary>
+    internal bool TrySealCommittedWalForTombstoneGc()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            if (_dirty.Count != 0)
+                return false;
+            if (_pendingFlushedCommitSeq > _lastSealedCommitSeq)
+                CheckpointUnderLock();
+            return true;
+        }
+    }
+
     public ulong Checkpoint()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
