@@ -84,6 +84,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
             FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication =>
                 HandleEnableMetadataStoreOwnedPublication(operation.Payload),
+            FldDatabaseIpcOperationCodes.CompactTombstones =>
+                HandleCompactTombstones(operation.Payload),
             FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
                 HandleGetOutboxHighWatermark(operation.Payload),
             FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
@@ -166,6 +168,33 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             FldDatabaseIpcPublishedOriginProtocol.DecodeRequest(payload);
         int committed = _database.CommitPublishedOrigins(origins);
         return FldDatabaseIpcPublishedOriginProtocol.EncodeResult(committed);
+    }
+
+    private byte[] HandleCompactTombstones(ReadOnlyMemory<byte> payload)
+    {
+        (int limit, FldTombstoneGcCandidate[] candidates) =
+            FldDatabaseIpcProtocol.DecodeTombstoneGcRequest(payload);
+        if (candidates.Length == 0)
+            return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
+
+        // This is one synchronous IPC operation: the database commit monitor stays on
+        // this thread while the FLD reference snapshot is checked and the replacement
+        // Run/manifest generation is committed. A client-side snapshot is never trusted
+        // as a substitute for this final host-side revalidation.
+        using IDisposable commitLease = _database.AcquireCommitGuard();
+        using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
+        FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
+        if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
+            draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
+            return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
+
+        var approved = new HashSet<FldTombstoneGcCandidate>(candidates);
+        int reclaimed = _database.CompactTombstones(candidate =>
+            approved.Contains(candidate) &&
+            !references.HasChangeIdReference(candidate.ChangeId.Span) &&
+            !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
+            limit);
+        return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(reclaimed, limit);
     }
 
     private byte[] HandleGetLocalAuthor(ReadOnlyMemory<byte> payload)
