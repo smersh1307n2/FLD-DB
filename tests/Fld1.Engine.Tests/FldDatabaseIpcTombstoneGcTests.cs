@@ -44,7 +44,7 @@ public sealed class FldDatabaseIpcTombstoneGcTests
         Assert.False(receipt.IsDuplicate);
         Assert.NotEqual(0UL, database.Checkpoint());
 
-        var dispatcher = new FldDatabaseIpcDispatcher(database);
+        var dispatcher = new FldDatabaseIpcDispatcher(database, enableTombstoneGc: true);
         using var shutdown = new CancellationTokenSource();
         var server = new StorageIpcServer(
             StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
