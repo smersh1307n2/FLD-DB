@@ -136,7 +136,7 @@ public sealed class FldDatabaseTombstoneGcTests
                 return false;
             });
             Assert.Equal(0, reclaimed);
-            Assert.True(database.TryResolve(recordId, 7, out FieldResolver.Resolved retained));
+            Assert.True(database.TryResolve(recordId, 7, out var retained));
             Assert.True(retained.IsTombstone);
 
             database.UndeleteRecord(recordId);
