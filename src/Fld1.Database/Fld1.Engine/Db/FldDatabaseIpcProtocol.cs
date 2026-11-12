@@ -923,7 +923,8 @@ public static class FldDatabaseIpcProtocol
                 candidate.HlcWall == 0 || candidate.OriginAuthorEpoch == 0 ||
                 candidate.OriginSequence == 0 ||
                 candidate.IsRecordTombstone == candidate.IsFieldTombstone ||
-                (candidate.IsRecordTombstone && candidate.FieldId != FldLifecycle.FieldId))
+                (candidate.IsRecordTombstone && candidate.FieldId != FldLifecycle.FieldId) ||
+                (candidate.IsFieldTombstone && candidate.FieldId == FldLifecycle.FieldId))
                 throw new ArgumentException("Tombstone GC candidate is not canonical.", nameof(candidates));
 
             recordId.CopyTo(payload.AsSpan(offset, 16));
@@ -988,7 +989,8 @@ public static class FldDatabaseIpcProtocol
                 changeId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
                 authorNodeId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
                 wall == 0 || authorEpoch == 0 || originSequence == 0 ||
-                (isRecordTombstone && fieldId != FldLifecycle.FieldId))
+                (isRecordTombstone && fieldId != FldLifecycle.FieldId) ||
+                (isFieldTombstone && fieldId == FldLifecycle.FieldId))
                 throw new InvalidDataException("FLD tombstone-GC candidate identity or kind is invalid.");
 
             candidates[i] = new FldTombstoneGcCandidate(
