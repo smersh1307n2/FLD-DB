@@ -35,7 +35,7 @@ public sealed class FldDatabaseIpcHostProcessTests
         {
             firstHost = StartHost(root, namespaceId);
             StorageIpcEndpointInfo firstEndpoint =
-                await WaitForEndpointAsync(root, firstHost, TimeSpan.FromSeconds(45));
+                await WaitForEndpointAsync(root, namespaceId, firstHost, TimeSpan.FromSeconds(45));
 
             await using (var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, clientId, TimeSpan.FromSeconds(10)))
@@ -65,7 +65,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
             secondHost = StartHost(root, namespaceId);
             StorageIpcEndpointInfo secondEndpoint = await WaitForEndpointAsync(
-                root, secondHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
+                root, namespaceId, secondHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
             Assert.NotEqual(firstEndpoint.OwnerId, secondEndpoint.OwnerId);
 
             await using (var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
@@ -110,7 +110,7 @@ public sealed class FldDatabaseIpcHostProcessTests
             await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
 
             thirdHost = StartHost(root, namespaceId);
-            await WaitForEndpointAsync(root, thirdHost, TimeSpan.FromSeconds(45), secondEndpoint.OwnerId);
+            await WaitForEndpointAsync(root, namespaceId, thirdHost, TimeSpan.FromSeconds(45), secondEndpoint.OwnerId);
             await using (var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, clientId, TimeSpan.FromSeconds(10)))
             {
@@ -189,7 +189,7 @@ public sealed class FldDatabaseIpcHostProcessTests
         {
             firstHost = StartHost(root, namespaceId);
             StorageIpcEndpointInfo firstEndpoint =
-                await WaitForEndpointAsync(root, firstHost, TimeSpan.FromSeconds(45));
+                await WaitForEndpointAsync(root, namespaceId, firstHost, TimeSpan.FromSeconds(45));
 
             Task<FldDatabaseIpcClient> connectA = FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, clientAId, TimeSpan.FromSeconds(10));
@@ -228,7 +228,7 @@ public sealed class FldDatabaseIpcHostProcessTests
             firstHost = null;
             await WaitForWriterFenceReleaseAsync(root, namespaceId, TimeSpan.FromSeconds(15));
             secondHost = StartHost(root, namespaceId);
-            await WaitForEndpointAsync(root, secondHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
+            await WaitForEndpointAsync(root, namespaceId, secondHost, TimeSpan.FromSeconds(45), firstEndpoint.OwnerId);
 
             await using (FldDatabaseIpcClient clientA = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, clientAId, TimeSpan.FromSeconds(10)))
@@ -327,6 +327,7 @@ public sealed class FldDatabaseIpcHostProcessTests
 
     private static async Task<StorageIpcEndpointInfo> WaitForEndpointAsync(
         string root,
+        uint namespaceId,
         Process host,
         TimeSpan timeout,
         Guid? previousOwnerId = null)
@@ -342,11 +343,19 @@ public sealed class FldDatabaseIpcHostProcessTests
                     $"Database Host exited with {host.ExitCode}. stdout={stdout} stderr={stderr}");
             }
 
-            if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, 0)))
+            if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, namespaceId)))
             {
-                StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, 0);
-                if (previousOwnerId is null || endpoint.OwnerId != previousOwnerId.Value)
-                    return endpoint;
+                try
+                {
+                    StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, namespaceId);
+                    if (previousOwnerId is null || endpoint.OwnerId != previousOwnerId.Value)
+                        return endpoint;
+                }
+                catch (FileNotFoundException)
+                {
+                    // A restarting Host removes the stale endpoint before atomically publishing
+                    // its replacement. Retry if the file disappeared between Exists and Read.
+                }
             }
             await Task.Delay(100);
         }
