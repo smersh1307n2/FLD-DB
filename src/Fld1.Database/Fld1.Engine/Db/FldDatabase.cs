@@ -1906,7 +1906,7 @@ public sealed partial class FldDatabase : IDisposable
         return runId;
     }
 
-    private static void AddResolvedField(
+    private void AddResolvedField(
         RunBuilder builder, ReadOnlySpan<byte> recordId, ushort fieldId,
         FieldResolver.Resolved resolved)
     {
@@ -1914,7 +1914,7 @@ public sealed partial class FldDatabase : IDisposable
         {
             builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
                 resolved.Wall, resolved.Logical,
-                resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty, resolved.KeyEpoch, isTombstone: true,
+                resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true,
                 changeId: resolved.ChangeId ?? Array.Empty<byte>(),
                 originAuthorEpoch: resolved.OriginAuthorEpoch,
                 originSequence: resolved.OriginSequence);
@@ -1923,7 +1923,7 @@ public sealed partial class FldDatabase : IDisposable
         {
             builder.Add(recordId, fieldId, resolved.Value,
                 resolved.Wall, resolved.Logical,
-                resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty, resolved.KeyEpoch, isTombstone: false,
+                resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false,
                 changeId: resolved.ChangeId ?? Array.Empty<byte>(),
                 originAuthorEpoch: resolved.OriginAuthorEpoch,
                 originSequence: resolved.OriginSequence);
