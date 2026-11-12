@@ -39,12 +39,12 @@ public sealed class FldDatabaseIpcTombstoneGcTests
             relayWrites: [retained],
             protocolStateDelta: [0xA1, 0xB2]);
 
-        using var database = FldDatabase.Open(root, namespaceId, Id(0x41));
+        FldDatabase database = FldDatabase.Open(root, namespaceId, Id(0x41));
         var receipt = database.ApplyRemoteBatch(batch);
         Assert.False(receipt.IsDuplicate);
         Assert.NotEqual(0UL, database.Checkpoint());
 
-        using var dispatcher = new FldDatabaseIpcDispatcher(database);
+        var dispatcher = new FldDatabaseIpcDispatcher(database);
         using var shutdown = new CancellationTokenSource();
         var server = new StorageIpcServer(
             StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
@@ -93,13 +93,21 @@ public sealed class FldDatabaseIpcTombstoneGcTests
             shutdown.Cancel();
             try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
         }
 
-        using var reopened = FldDatabase.Open(root, namespaceId, Id(0x41));
-        Assert.True(reopened.TryResolve(retainedRecord, 5, out var persistedRetained));
-        Assert.True(persistedRetained.IsTombstone);
-        Assert.False(reopened.TryResolve(reclaimableRecord, 5, out _));
-        try { Directory.Delete(root, recursive: true); } catch { }
+        try
+        {
+            using var reopened = FldDatabase.Open(root, namespaceId, Id(0x41));
+            Assert.True(reopened.TryResolve(retainedRecord, 5, out var persistedRetained));
+            Assert.True(persistedRetained.IsTombstone);
+            Assert.False(reopened.TryResolve(reclaimableRecord, 5, out _));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 
     private static FldTombstoneGcCandidate ToCandidate(FldProviderSnapshotEntryMetadata entry)
