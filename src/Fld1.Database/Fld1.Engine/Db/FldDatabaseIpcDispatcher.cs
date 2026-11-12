@@ -188,6 +188,18 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         // Run/manifest generation is committed. A client-side snapshot is never trusted
         // as a substitute for this final host-side revalidation.
         using IDisposable commitLease = _database.AcquireCommitGuard();
+
+        // A committed local/remote operation can still be present in the WAL after
+        // its provider Outbox and peer delivery references are fully acknowledged.
+        // The reference snapshot deliberately treats an unsealed WAL as a live
+        // ChangeId/RecordId reference, so seal that already-committed prefix before
+        // building the GC reference index. Never checkpoint an uncommitted overlay;
+        // and keep the subsequent Outbox/draft/reference checks as independent gates.
+        if (_database.OverlayCount != 0)
+            return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
+        if (_database.PendingFlushedCommitSeq > _database.LastSealedCommitSeq)
+            _database.Checkpoint();
+
         using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
         FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
         if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
