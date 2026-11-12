@@ -252,6 +252,23 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Reclaims only the exact tombstone identities approved by the caller. The Host
+    /// reopens its own reference snapshot and revalidates each candidate under the
+    /// database commit monitor before publishing the replacement Run.
+    /// </summary>
+    public async Task<int> CompactTombstonesAsync(
+        IReadOnlyList<FldTombstoneGcCandidate> approvedCandidates,
+        int limit = FldDatabaseIpcProtocol.MaxTombstoneGcCandidates,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeTombstoneGcRequest(approvedCandidates, limit);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.CompactTombstones,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeTombstoneGcResponse(response, limit);
+    }
+
+    /// <summary>
     /// Appends provider-owned local drafts with stable ChangeId, HLC and author epoch.
     /// Retry with the same OperationId, ClientSequence and exact mutation payload.
     /// </summary>
