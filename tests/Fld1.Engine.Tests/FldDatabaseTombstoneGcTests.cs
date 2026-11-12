@@ -38,7 +38,7 @@ public sealed class FldDatabaseTombstoneGcTests
                 });
                 Assert.True(sawCandidate);
                 Assert.Equal(0, rejected);
-                Assert.True(database.TryResolve(recordId, 7, out FieldResolver.Resolved retained));
+                Assert.True(database.TryResolve(recordId, 7, out var retained));
                 Assert.True(retained.IsTombstone);
 
                 int reclaimed = database.CompactTombstones(candidate =>
@@ -99,8 +99,8 @@ public sealed class FldDatabaseTombstoneGcTests
 
             using var reopened = FldDatabase.Open(root, namespaceId, Id(0x41));
             Assert.False(reopened.TryGetBytes(recordId, 7, out _));
-            Assert.True(reopened.TryGetBytes(recordId, 9, out byte[]? newer));
-            Assert.Equal("newer-field"u8.ToArray(), newer);
+            Assert.True(reopened.TryGetBytes(recordId, 9, out byte[]? reopenedNewer));
+            Assert.Equal("newer-field"u8.ToArray(), reopenedNewer);
             Assert.False(reopened.IsRecordDead(recordId));
         }
         finally
@@ -129,7 +129,6 @@ public sealed class FldDatabaseTombstoneGcTests
             Assert.NotEqual(0UL, database.Checkpoint());
             SealAndAcknowledgeOutbox(database);
 
-            int fieldTombstoneCallbacks = 0;
             int reclaimed = database.CompactTombstones(candidate =>
             {
                 Assert.True(candidate.IsRecordTombstone);
@@ -137,7 +136,6 @@ public sealed class FldDatabaseTombstoneGcTests
                 return false;
             });
             Assert.Equal(0, reclaimed);
-            Assert.Equal(0, fieldTombstoneCallbacks);
             Assert.True(database.TryResolve(recordId, 7, out FieldResolver.Resolved retained));
             Assert.True(retained.IsTombstone);
 
