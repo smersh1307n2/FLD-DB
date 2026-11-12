@@ -1627,7 +1627,75 @@ public sealed partial class FldDatabase : IDisposable
             return CompactUnderLock();
     }
 
-    private ulong CompactUnderLock()
+    /// <summary>
+    /// Reclaim current field/record tombstones only when the caller's retention proof
+    /// approves the exact current identity. The caller must hold the composed
+    /// application/Metadata/FLD commit lease for the entire call.
+    /// </summary>
+    public int CompactTombstones(
+        Func<FldTombstoneGcCandidate, bool> canReclaim,
+        int limit = 4096)
+    {
+        ArgumentNullException.ThrowIfNull(canReclaim);
+        if (limit <= 0 || limit > 4096)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string snapshotRoot = Path.Combine(_dbDir, "snapshots");
+            if (_dirty.Count != 0 ||
+                _pendingFlushedCommitSeq > _lastSealedCommitSeq ||
+                _outbox.AckedThrough != _outbox.HighWatermark ||
+                _providerSnapshots.Count != 0 ||
+                (Directory.Exists(snapshotRoot) && Directory.EnumerateDirectories(snapshotRoot).Any()))
+                return 0;
+
+            var filter = new TombstoneGcFilter(canReclaim, limit);
+            _ = CompactUnderLock(filter);
+            return filter.ReclaimedCount;
+        }
+    }
+
+    private sealed class TombstoneGcFilter
+    {
+        private readonly Func<FldTombstoneGcCandidate, bool> _canReclaim;
+        private readonly int _limit;
+
+        public int ReclaimedCount { get; private set; }
+
+        public TombstoneGcFilter(Func<FldTombstoneGcCandidate, bool> canReclaim, int limit)
+        {
+            _canReclaim = canReclaim;
+            _limit = limit;
+        }
+
+        public bool TryReclaim(FldTombstoneGcCandidate candidate)
+        {
+            if (ReclaimedCount >= _limit || !_canReclaim(candidate))
+                return false;
+            ReclaimedCount++;
+            return true;
+        }
+    }
+
+    private static FldTombstoneGcCandidate CreateTombstoneGcCandidate(
+        ReadOnlySpan<byte> recordId, ushort fieldId, FieldResolver.Resolved resolved,
+        bool isRecordTombstone, bool isFieldTombstone)
+        => new(
+            recordId.ToArray(),
+            fieldId,
+            resolved.ChangeId?.ToArray() ?? Array.Empty<byte>(),
+            resolved.AuthorNodeId?.ToArray() ?? Array.Empty<byte>(),
+            resolved.Wall,
+            resolved.Logical,
+            resolved.OriginAuthorEpoch,
+            resolved.OriginSequence,
+            isRecordTombstone,
+            isFieldTombstone);
+
+    private ulong CompactUnderLock(TombstoneGcFilter? tombstoneGc = null)
     {
         EnsureHealthy();
         if (_dirty.Count != 0)
@@ -1667,6 +1735,7 @@ public sealed partial class FldDatabase : IDisposable
             return 0;
 
         var builder = new RunBuilder(_namespaceId);
+        var outputRecordIds = new List<byte[]>(recordIds.Count);
         foreach (var recordId in recordIds)
         {
             var recordKey = (
@@ -1680,43 +1749,94 @@ public sealed partial class FldDatabase : IDisposable
                 new RunReader(bytes).ScanFieldIds(recordId, fieldId => { fieldIds.Add(fieldId); });
             }
 
+            bool hasRecordTombstone = false;
+            bool reclaimRecordTombstone = false;
+            FieldResolver.Resolved recordTombstone = FieldResolver.Resolved.Miss;
+            if (tombstoneGc is not null &&
+                fieldIds.Contains(FldLifecycle.FieldId) &&
+                TryResolveUnlocked(recordId, FldLifecycle.FieldId, out recordTombstone) &&
+                recordTombstone.Found)
+            {
+                if (recordTombstone.IsTombstone || recordTombstone.Value is null)
+                    throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
+                if (recordTombstone.Value.AsSpan().SequenceEqual(FldLifecycle.DeadValue))
+                {
+                    hasRecordTombstone = true;
+                    reclaimRecordTombstone = tombstoneGc.TryReclaim(
+                        CreateTombstoneGcCandidate(
+                            recordId, FldLifecycle.FieldId, recordTombstone,
+                            isRecordTombstone: true, isFieldTombstone: false));
+                }
+                else if (!recordTombstone.Value.AsSpan().SequenceEqual(FldLifecycle.AliveValue))
+                {
+                    throw new InvalidDataException("FLD lifecycle value is neither Alive nor Dead.");
+                }
+            }
+
+            bool wroteRecord = false;
             foreach (ushort fieldId in fieldIds)
             {
                 if (!TryResolveUnlocked(recordId, fieldId, out var resolved) || !resolved.Found)
                     continue;
 
-                if (resolved.IsTombstone)
+                if (tombstoneGc is not null && hasRecordTombstone)
                 {
-                    builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
-                        resolved.Wall, resolved.Logical,
-                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true,
-                        changeId: resolved.ChangeId ?? Array.Empty<byte>(),
-                        originAuthorEpoch: resolved.OriginAuthorEpoch,
-                        originSequence: resolved.OriginSequence);
+                    // Until the record-level delete itself is safe, retain every field
+                    // tombstone too: a later undelete must not reveal an older value.
+                    if (!reclaimRecordTombstone)
+                    {
+                        AddResolvedField(builder, recordId, fieldId, resolved);
+                        wroteRecord = true;
+                        continue;
+                    }
+
+                    if (fieldId == FldLifecycle.FieldId)
+                        continue;
+
+                    bool newerThanRecordDelete = FieldResolver.IsNewer(
+                        resolved.Wall, resolved.Logical, resolved.AuthorNodeId ?? _localAuthor,
+                        recordTombstone.Wall, recordTombstone.Logical,
+                        recordTombstone.AuthorNodeId ?? _localAuthor);
+                    if (!newerThanRecordDelete)
+                        continue;
                 }
-                else if (resolved.Value is not null)
-                {
-                    builder.Add(recordId, fieldId, resolved.Value,
-                        resolved.Wall, resolved.Logical,
-                        resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false,
-                        changeId: resolved.ChangeId ?? Array.Empty<byte>(),
-                        originAuthorEpoch: resolved.OriginAuthorEpoch,
-                        originSequence: resolved.OriginSequence);
-                }
+
+                if (tombstoneGc is not null && resolved.IsTombstone &&
+                    tombstoneGc.TryReclaim(CreateTombstoneGcCandidate(
+                        recordId, fieldId, resolved,
+                        isRecordTombstone: false, isFieldTombstone: true)))
+                    continue;
+
+                AddResolvedField(builder, recordId, fieldId, resolved);
+                wroteRecord = true;
             }
+
+            if (wroteRecord)
+                outputRecordIds.Add(recordId);
         }
 
-        byte[] runBytes = builder.Build();
-        var newReader = new RunReader(runBytes);
-        if (!newReader.TryValidate(out var verify) || newReader.NamespaceId != _namespaceId)
-            throw new InvalidDataException($"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
+        if (tombstoneGc is not null && tombstoneGc.ReclaimedCount == 0)
+            return 0;
+        if (outputRecordIds.Count == 0 && tombstoneGc is null)
+            return 0;
 
-        ulong runId = AllocateRunId();
-        string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-        _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
-        WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
+        ulong runId = 0;
+        string? path = null;
+        byte[]? runBytes = null;
+        if (outputRecordIds.Count != 0)
+        {
+            runBytes = builder.Build();
+            var newReader = new RunReader(runBytes);
+            if (!newReader.TryValidate(out var verify) || newReader.NamespaceId != _namespaceId)
+                throw new InvalidDataException($"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
 
-        recordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+            runId = AllocateRunId();
+            path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
+            WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
+            outputRecordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+        }
+
         ulong seqHi = _pendingFlushedCommitSeq;
         if (seqHi == 0)
             seqHi = _manifestStore.Load().LastFlushedCommitSeq;
@@ -1727,16 +1847,19 @@ public sealed partial class FldDatabase : IDisposable
         _manifestStore.Update(manifest =>
         {
             var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
-            runs.Add(new RunEntry
+            if (runId != 0)
             {
-                RunId = runId,
-                Level = 0,
-                Ns = _namespaceId,
-                MinRec = recordIds[0],
-                MaxRec = recordIds[^1],
-                SeqLo = 1,
-                SeqHi = seqHi
-            });
+                runs.Add(new RunEntry
+                {
+                    RunId = runId,
+                    Level = 0,
+                    Ns = _namespaceId,
+                    MinRec = outputRecordIds[0],
+                    MaxRec = outputRecordIds[^1],
+                    SeqLo = 1,
+                    SeqHi = seqHi
+                });
+            }
             return CloneManifest(manifest, runs: runs, lastFlushed: seqHi,
                 localOperationReceipts: BuildManifestLocalOperationReceipts(manifest.LocalOperationReceipts),
                 localOperationClients: BuildManifestLocalOperationClients(manifest.LocalOperationClients));
@@ -1755,7 +1878,8 @@ public sealed partial class FldDatabase : IDisposable
         _manifestDirty = false;
         _pendingFlushedCommitSeq = seqHi;
         _runs.Clear();
-        _runs.Add((runId, path, runBytes));
+        if (runId != 0)
+            _runs.Add((runId, path!, runBytes!));
         _overlay.Clear();
         _dirty.Clear();
         _lastSealedCommitSeq = seqHi;
@@ -1780,6 +1904,30 @@ public sealed partial class FldDatabase : IDisposable
             _wal.TruncateSealedSegments(seqHi);
 
         return runId;
+    }
+
+    private static void AddResolvedField(
+        RunBuilder builder, ReadOnlySpan<byte> recordId, ushort fieldId,
+        FieldResolver.Resolved resolved)
+    {
+        if (resolved.IsTombstone)
+        {
+            builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
+                resolved.Wall, resolved.Logical,
+                resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty, resolved.KeyEpoch, isTombstone: true,
+                changeId: resolved.ChangeId ?? Array.Empty<byte>(),
+                originAuthorEpoch: resolved.OriginAuthorEpoch,
+                originSequence: resolved.OriginSequence);
+        }
+        else if (resolved.Value is not null)
+        {
+            builder.Add(recordId, fieldId, resolved.Value,
+                resolved.Wall, resolved.Logical,
+                resolved.AuthorNodeId ?? ReadOnlySpan<byte>.Empty, resolved.KeyEpoch, isTombstone: false,
+                changeId: resolved.ChangeId ?? Array.Empty<byte>(),
+                originAuthorEpoch: resolved.OriginAuthorEpoch,
+                originSequence: resolved.OriginSequence);
+        }
     }
 
     /// <summary>Remove run files absent from both the active manifest and durable provider snapshot pins.</summary>
