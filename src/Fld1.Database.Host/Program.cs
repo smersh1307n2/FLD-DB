@@ -6,18 +6,46 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        if (args.Length is < 2 or > 4
+        if (args.Length is < 2 or > 5
             || !uint.TryParse(args[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint namespaceId))
         {
-            Console.Error.WriteLine("Usage: Fld1.Database.Host <database-root> <namespace-id-decimal> [local-author-hex] [--test-drop-remote-apply-response]");
+            Console.Error.WriteLine("Usage: Fld1.Database.Host <database-root> <namespace-id-decimal> [local-author-hex] [--enable-tombstone-gc] [--test-drop-remote-apply-response]");
             return 64;
         }
 
         string root = Path.GetFullPath(args[0]);
         byte[]? localAuthor = null;
-        if (args.Length >= 3)
+        bool dropRemoteApplyResponseForTest = false;
+        bool enableTombstoneGc = false;
+        for (int i = 2; i < args.Length; i++)
         {
-            try { localAuthor = Convert.FromHexString(args[2]); }
+            string argument = args[i];
+            if (string.Equals(argument, "--test-drop-remote-apply-response", StringComparison.Ordinal))
+            {
+                if (dropRemoteApplyResponseForTest)
+                {
+                    Console.Error.WriteLine("Duplicate test failpoint argument.");
+                    return 64;
+                }
+                dropRemoteApplyResponseForTest = true;
+                continue;
+            }
+            if (string.Equals(argument, "--enable-tombstone-gc", StringComparison.Ordinal))
+            {
+                if (enableTombstoneGc)
+                {
+                    Console.Error.WriteLine("Duplicate tombstone-GC enablement argument.");
+                    return 64;
+                }
+                enableTombstoneGc = true;
+                continue;
+            }
+            if (localAuthor is not null)
+            {
+                Console.Error.WriteLine("Unknown optional Database Host argument.");
+                return 64;
+            }
+            try { localAuthor = Convert.FromHexString(argument); }
             catch (FormatException)
             {
                 Console.Error.WriteLine("local-author-hex must contain 32 hexadecimal characters.");
@@ -28,14 +56,6 @@ internal static class Program
                 Console.Error.WriteLine("local-author-hex must contain exactly 16 bytes.");
                 return 64;
             }
-        }
-
-        bool dropRemoteApplyResponseForTest = args.Length == 4
-            && string.Equals(args[3], "--test-drop-remote-apply-response", StringComparison.Ordinal);
-        if (args.Length == 4 && !dropRemoteApplyResponseForTest)
-        {
-            Console.Error.WriteLine("Unknown optional Database Host argument.");
-            return 64;
         }
 
         Directory.CreateDirectory(root);
@@ -51,7 +71,8 @@ internal static class Program
             };
             Console.CancelKeyPress += cancelHandler;
 
-            using var dispatcher = new FldDatabaseIpcDispatcher(database);
+            using var dispatcher = new FldDatabaseIpcDispatcher(
+                database, enableTombstoneGc: enableTombstoneGc);
             // The exclusive Database root lease is held; prune only IPC-owned generations
             // from older host generations, preserving durable FULL_REPLACE provider snapshots.
             database.PruneStaleIpcProviderSnapshots(dispatcher.HostGeneration);
