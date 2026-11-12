@@ -29,6 +29,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort CommitPublishedOrigins = 0x2114;
     public const ushort TryGetMetadataStoreOwnedPublicationCutover = 0x2115;
     public const ushort EnableMetadataStoreOwnedPublication = 0x2116;
+    public const ushort CompactTombstones = 0x2117;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -893,6 +894,127 @@ public static class FldDatabaseIpcProtocol
         if (response.Length != 1 || response.Span[0] > 1)
             throw new InvalidDataException("FLD snapshot release response is invalid.");
         return response.Span[0] == 1;
+    }
+
+    private const int TombstoneGcRequestHeaderBytes = 4;
+    private const int TombstoneGcCandidateBytes = 75;
+    public const int MaxTombstoneGcCandidates = 4096;
+
+    public static byte[] EncodeTombstoneGcRequest(
+        IReadOnlyList<FldTombstoneGcCandidate> candidates, int limit)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        if (limit is < 1 or > MaxTombstoneGcCandidates ||
+            candidates.Count > limit || candidates.Count > MaxTombstoneGcCandidates)
+            throw new ArgumentOutOfRangeException(nameof(limit));
+
+        byte[] payload = new byte[checked(TombstoneGcRequestHeaderBytes + candidates.Count * TombstoneGcCandidateBytes)];
+        BinaryPrimitives.WriteUInt16LittleEndian(payload, checked((ushort)limit));
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(2), checked((ushort)candidates.Count));
+        int offset = TombstoneGcRequestHeaderBytes;
+        foreach (FldTombstoneGcCandidate candidate in candidates)
+        {
+            ReadOnlySpan<byte> recordId = candidate.RecordId.Span;
+            ReadOnlySpan<byte> changeId = candidate.ChangeId.Span;
+            ReadOnlySpan<byte> authorNodeId = candidate.AuthorNodeId.Span;
+            if (recordId.Length != 16 || recordId.IndexOfAnyExcept((byte)0) < 0 ||
+                changeId.Length != 16 || changeId.IndexOfAnyExcept((byte)0) < 0 ||
+                authorNodeId.Length != 16 || authorNodeId.IndexOfAnyExcept((byte)0) < 0 ||
+                candidate.HlcWall == 0 || candidate.OriginAuthorEpoch == 0 ||
+                candidate.OriginSequence == 0 ||
+                candidate.IsRecordTombstone == candidate.IsFieldTombstone ||
+                (candidate.IsRecordTombstone && candidate.FieldId != FldLifecycle.FieldId))
+                throw new ArgumentException("Tombstone GC candidate is not canonical.", nameof(candidates));
+
+            recordId.CopyTo(payload.AsSpan(offset, 16));
+            offset += 16;
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(offset), candidate.FieldId);
+            offset += 2;
+            changeId.CopyTo(payload.AsSpan(offset, 16));
+            offset += 16;
+            authorNodeId.CopyTo(payload.AsSpan(offset, 16));
+            offset += 16;
+            BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(offset), candidate.HlcWall);
+            offset += 8;
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(offset), candidate.HlcLogical);
+            offset += 4;
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(offset), candidate.OriginAuthorEpoch);
+            offset += 4;
+            BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(offset), candidate.OriginSequence);
+            offset += 8;
+            payload[offset++] = candidate.IsRecordTombstone ? (byte)1 : (byte)2;
+        }
+        return payload;
+    }
+
+    public static (int Limit, FldTombstoneGcCandidate[] Candidates) DecodeTombstoneGcRequest(
+        ReadOnlyMemory<byte> payload)
+    {
+        ReadOnlySpan<byte> span = payload.Span;
+        if (span.Length < TombstoneGcRequestHeaderBytes)
+            throw new InvalidDataException("FLD tombstone-GC request is truncated.");
+        int limit = BinaryPrimitives.ReadUInt16LittleEndian(span);
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(span[2..]);
+        if (limit is < 1 or > MaxTombstoneGcCandidates || count > limit ||
+            count > MaxTombstoneGcCandidates ||
+            span.Length != TombstoneGcRequestHeaderBytes + count * TombstoneGcCandidateBytes)
+            throw new InvalidDataException("FLD tombstone-GC request limit or length is invalid.");
+
+        var candidates = new FldTombstoneGcCandidate[count];
+        int offset = TombstoneGcRequestHeaderBytes;
+        for (int i = 0; i < count; i++)
+        {
+            byte[] recordId = span.Slice(offset, 16).ToArray();
+            offset += 16;
+            ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(span[offset..]);
+            offset += 2;
+            byte[] changeId = span.Slice(offset, 16).ToArray();
+            offset += 16;
+            byte[] authorNodeId = span.Slice(offset, 16).ToArray();
+            offset += 16;
+            ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(span[offset..]);
+            offset += 8;
+            uint logical = BinaryPrimitives.ReadUInt32LittleEndian(span[offset..]);
+            offset += 4;
+            uint authorEpoch = BinaryPrimitives.ReadUInt32LittleEndian(span[offset..]);
+            offset += 4;
+            ulong originSequence = BinaryPrimitives.ReadUInt64LittleEndian(span[offset..]);
+            offset += 8;
+            byte kind = span[offset++];
+            bool isRecordTombstone = kind == 1;
+            bool isFieldTombstone = kind == 2;
+            if (kind is not (1 or 2) ||
+                recordId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                changeId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                authorNodeId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                wall == 0 || authorEpoch == 0 || originSequence == 0 ||
+                (isRecordTombstone && fieldId != FldLifecycle.FieldId))
+                throw new InvalidDataException("FLD tombstone-GC candidate identity or kind is invalid.");
+
+            candidates[i] = new FldTombstoneGcCandidate(
+                recordId, fieldId, changeId, authorNodeId, wall, logical,
+                authorEpoch, originSequence, isRecordTombstone, isFieldTombstone);
+        }
+        return (limit, candidates);
+    }
+
+    public static byte[] EncodeTombstoneGcResponse(int reclaimedCount, int limit)
+    {
+        if (reclaimedCount < 0 || reclaimedCount > limit || limit is < 1 or > MaxTombstoneGcCandidates)
+            throw new ArgumentOutOfRangeException(nameof(reclaimedCount));
+        byte[] response = new byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(response, reclaimedCount);
+        return response;
+    }
+
+    public static int DecodeTombstoneGcResponse(ReadOnlyMemory<byte> response, int limit)
+    {
+        if (response.Length != 4 || limit is < 1 or > MaxTombstoneGcCandidates)
+            throw new InvalidDataException("FLD tombstone-GC response length or limit is invalid.");
+        int reclaimed = BinaryPrimitives.ReadInt32LittleEndian(response.Span);
+        if (reclaimed < 0 || reclaimed > limit)
+            throw new InvalidDataException("FLD tombstone-GC response count is invalid.");
+        return reclaimed;
     }
 
     private static void ValidateSnapshotHandle(FldDatabaseIpcSnapshotHandle handle)
