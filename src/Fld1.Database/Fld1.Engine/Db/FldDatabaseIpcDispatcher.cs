@@ -11,6 +11,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private const int MaxActiveSnapshotHandlesPerClient = 4;
 
     private readonly FldDatabase _database;
+    private readonly bool _enableTombstoneGc;
     private readonly object _snapshotGate = new();
     private readonly Dictionary<Guid, IpcSnapshotHandle> _snapshotHandles = new();
     private readonly Dictionary<(Guid ClientId, Guid OperationId), Guid> _snapshotOpenOperations = new();
@@ -26,8 +27,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         public bool Released { get; set; }
     }
 
-    public FldDatabaseIpcDispatcher(FldDatabase database)
-        => _database = database ?? throw new ArgumentNullException(nameof(database));
+    public FldDatabaseIpcDispatcher(FldDatabase database, bool enableTombstoneGc = false)
+    {
+        _database = database ?? throw new ArgumentNullException(nameof(database));
+        _enableTombstoneGc = enableTombstoneGc;
+    }
 
     /// <summary>Stable for this dispatcher lifetime; changes when the Database host restarts.</summary>
     public Guid HostGeneration => _hostGeneration;
@@ -174,6 +178,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     {
         (int limit, FldTombstoneGcCandidate[] candidates) =
             FldDatabaseIpcProtocol.DecodeTombstoneGcRequest(payload);
+        if (!_enableTombstoneGc)
+            throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
         if (candidates.Length == 0)
             return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
 
