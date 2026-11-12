@@ -343,11 +343,11 @@ public sealed class FldDatabaseIpcHostProcessTests
                     $"Database Host exited with {host.ExitCode}. stdout={stdout} stderr={stderr}");
             }
 
-            if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, namespaceId)))
+            if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, 0)))
             {
                 try
                 {
-                    StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, namespaceId);
+                    StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, 0);
                     if (previousOwnerId is null || endpoint.OwnerId != previousOwnerId.Value)
                         return endpoint;
                 }
