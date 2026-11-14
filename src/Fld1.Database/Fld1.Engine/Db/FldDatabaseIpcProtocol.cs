@@ -30,6 +30,8 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort TryGetMetadataStoreOwnedPublicationCutover = 0x2115;
     public const ushort EnableMetadataStoreOwnedPublication = 0x2116;
     public const ushort CompactTombstones = 0x2117;
+    public const ushort AcquireGcLease = 0x2118;
+    public const ushort ReleaseGcLease = 0x2119;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -82,6 +84,25 @@ public sealed record FldDatabaseIpcSnapshotHandle(
 
 public static class FldDatabaseIpcProtocol
 {
+    public static byte[] EncodeGcLeaseToken(Guid token)
+    {
+        if (token == Guid.Empty)
+            throw new ArgumentException("FLD GC lease token must be nonzero.", nameof(token));
+        byte[] payload = new byte[16];
+        token.TryWriteBytes(payload, bigEndian: true, out _);
+        return payload;
+    }
+
+    public static Guid DecodeGcLeaseToken(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length != 16)
+            throw new InvalidDataException("FLD GC lease token length is invalid.");
+        Guid token = new(payload.Span, bigEndian: true);
+        if (token == Guid.Empty)
+            throw new InvalidDataException("FLD GC lease token must be nonzero.");
+        return token;
+    }
+
     private const int WriteHeaderBytes = 12;
     private const int MutationHeaderBytes = 25;
     private const int ReadPayloadBytes = 26;
