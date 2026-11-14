@@ -39,6 +39,44 @@ public sealed class StorageIpcConnectionTests
     }
 
     [Fact]
+    public async Task Local_pipe_server_notifies_dispatcher_when_client_session_disconnects()
+    {
+        string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
+        Guid clientId = Guid.NewGuid();
+        using var serverCancellation = new CancellationTokenSource();
+        var disconnected = new TaskCompletionSource<(Guid ClientId, ulong SessionGeneration)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = new StorageIpcServer(
+            pipeName,
+            EchoClientAndPayload,
+            clientDisconnected: (id, generation) =>
+                disconnected.TrySetResult((id, generation)));
+        Task serverTask = server.RunAsync(serverCancellation.Token);
+
+        try
+        {
+            ulong sessionGeneration;
+            await using (var client = await StorageIpcClientConnection.ConnectAsync(
+                pipeName, clientId, TimeSpan.FromSeconds(10)))
+            {
+                sessionGeneration = client.SessionGeneration;
+                Assert.NotEqual(0UL, sessionGeneration);
+                _ = await client.RequestAsync("active"u8.ToArray());
+            }
+
+            (Guid disconnectedClientId, ulong disconnectedGeneration) =
+                await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(clientId, disconnectedClientId);
+            Assert.Equal(sessionGeneration, disconnectedGeneration);
+        }
+        finally
+        {
+            serverCancellation.Cancel();
+            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
     public async Task Local_pipe_server_isolates_multiple_client_sessions()
     {
         string pipeName = "fld1-ipc-" + Guid.NewGuid().ToString("N");
