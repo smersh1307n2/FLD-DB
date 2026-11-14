@@ -2408,3 +2408,13 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x CI] Exact FLD-DB HEAD `cb07deb7f4a90e970ac186ff961a84fc1a296180`: push run `43592577000` and PR run `43592579695` both passed all three jobs (Ubuntu, Windows, macOS 15).
 - [!] This closes the same-session mutation bypass. The Host lease still has a five-minute idle timeout renewed by Host IPC operations; the async Metadata transaction does not currently send a keepalive while its final synchronous durable commit is in progress. A bounded commit/lease-expiry proof or explicit keepalive remains part of the cross-layer safety gate.
 - [!] Physical tombstone, ChangeId, receipt and Ghost GC remain disabled by default. The runtime remains exactly two DLLs: `Fld1.Storage.dll` and `Fld1.Database.dll`.
+
+
+### 7.106 Explicit Host GC lease renewal for long async Metadata commits — 2026-11-14
+
+- [x C] Added IPC operation `RenewGcLease = 0x211D`. Renewal is accepted only from the exact active owner client/session and requires the matching lease token; it extends the Host idle deadline without opening a new reference snapshot or changing its pinned generation.
+- [x C] The lease owner remains restricted to GC reference-scan open/query/release and lease renewal. Ordinary database operations are still rejected from the owner session while the exclusive Host-wide boundary is active.
+- [x T] Added a short-TTL test that repeatedly renews a lease beyond its original five-second idle window and then successfully queries/releases the Host-owned reference scan. Updated the independent idle-expiry test to use a wider timing margin so Windows scheduling does not turn it into a false failure.
+- [x CI] Exact FLD-DB HEAD `a560cfa7237f8afb35726b4d88dbb1fcfbe3c5a6`: push run `43594086263` and PR run `43594091165` passed Ubuntu, Windows and macOS 15.
+- [!] The explicit IPC renewal primitive does not by itself keep a lease alive: the process-isolated BIN-SYNC provider must renew throughout the entire async Metadata compaction scope and must drain any in-flight renewal before releasing the scan/lease. That provider behavior and its long-lived integration test are tracked in BIN-SYNC roadmap §1.149.
+- [!] GC remains opt-in. Tombstone, ChangeId, Receipt and Ghost physical reclamation are not enabled by default.
