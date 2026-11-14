@@ -14,13 +14,6 @@ internal readonly record struct FldId128(ulong Low, ulong High)
     }
 }
 
-internal readonly record struct FldReceiptReferenceKey(
-    FldId128 SenderPeer,
-    uint TransportEpoch,
-    uint AuthorEpoch,
-    ushort NamespaceId,
-    FldId128 BatchId);
-
 /// <summary>
 /// Immutable, partition-local reference index built while the caller holds the FLD
 /// commit gate. It lets the BIN-SYNC adapter answer many candidate queries without
@@ -30,7 +23,6 @@ public sealed class FldReferenceSnapshot : IDisposable
 {
     private readonly HashSet<FldId128> _changeIds;
     private readonly HashSet<FldId128> _recordIds;
-    private readonly HashSet<FldReceiptReferenceKey> _receipts;
     private readonly bool _unsealedWal;
     private readonly bool _snapshotPin;
 
@@ -38,14 +30,12 @@ public sealed class FldReferenceSnapshot : IDisposable
         FldDraftHorizon drafts,
         HashSet<FldId128> changeIds,
         HashSet<FldId128> recordIds,
-        HashSet<FldReceiptReferenceKey> receipts,
         bool unsealedWal,
         bool snapshotPin)
     {
         UnpublishedLocalDraftHorizon = drafts;
         _changeIds = changeIds;
         _recordIds = recordIds;
-        _receipts = receipts;
         _unsealedWal = unsealedWal;
         _snapshotPin = snapshotPin;
     }
@@ -81,21 +71,23 @@ public sealed class FldReferenceSnapshot : IDisposable
            _changeIds.Contains(FldId128.From(tombstoneChangeId));
 
     /// <summary>
-    /// Returns whether the receipt key is retained by unsealed WAL or the captured
-    /// ApplyJournal receipt index. Provider-snapshot pins do not extend receipt lifetime.
+    /// An unsealed WAL is a cross-store uncertainty barrier for every receipt. A
+    /// committed ApplyJournal receipt is FLD's independent replay/recovery evidence,
+    /// not a reference to the separate BIN-SYNC receipt row, and therefore does not
+    /// veto BIN-SYNC receipt compaction. Provider-snapshot pins are also independent.
     /// </summary>
-    /// <param name="senderPeer">Canonical 16-byte transport sender identity.</param>
-    /// <param name="authorEpoch">Wire author epoch.</param>
-    /// <param name="transportPeerEpoch">Sender transport-peer epoch.</param>
-    /// <param name="namespaceId">FLD namespace of the receipt.</param>
-    /// <param name="batchId">Canonical 16-byte batch identity.</param>
     public bool HasReceiptReference(
         ReadOnlySpan<byte> senderPeer, uint authorEpoch,
         uint transportPeerEpoch, ushort namespaceId,
         ReadOnlySpan<byte> batchId)
-        => _unsealedWal || _receipts.Contains(new FldReceiptReferenceKey(
-            FldId128.From(senderPeer), transportPeerEpoch, authorEpoch,
-            namespaceId, FldId128.From(batchId)));
+    {
+        _ = FldId128.From(senderPeer);
+        _ = FldId128.From(batchId);
+        if (authorEpoch == 0 || transportPeerEpoch == 0 || namespaceId == 0)
+            throw new ArgumentOutOfRangeException(nameof(authorEpoch),
+                "Receipt reference identity epochs and namespace must be nonzero.");
+        return _unsealedWal;
+    }
 
     /// <summary>Ends the caller's logical use of this index; it owns no database lock or file pin.</summary>
     public void Dispose()

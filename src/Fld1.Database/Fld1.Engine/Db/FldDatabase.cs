@@ -2885,7 +2885,6 @@ public sealed partial class FldDatabase : IDisposable
             EnsureHealthy();
             var changeIds = new HashSet<FldId128>();
             var recordIds = new HashSet<FldId128>();
-            var receipts = new HashSet<FldReceiptReferenceKey>();
 
             ulong draftCount = checked((ulong)_dirty.Count);
             ulong maxWall = 0;
@@ -2922,9 +2921,6 @@ public sealed partial class FldDatabase : IDisposable
                     WalApplyCommit commit = record.Commit;
                     if (commit.NamespaceId != _namespaceId)
                         continue;
-                    receipts.Add(new FldReceiptReferenceKey(
-                        FldId128.From(commit.SenderPeer), commit.SenderEpoch,
-                        commit.IssuerEpoch, commit.NamespaceId, FldId128.From(commit.BatchId)));
                     AddFields(commit.Fields);
                     AddFields(commit.RelayFields);
                 }
@@ -2947,7 +2943,7 @@ public sealed partial class FldDatabase : IDisposable
                 draftCount = 1;
             return new FldReferenceSnapshot(
                 new FldDraftHorizon(draftCount, maxWall, maxLogical),
-                changeIds, recordIds, receipts, unsealedWal, snapshotPin);
+                changeIds, recordIds, unsealedWal, snapshotPin);
 
             bool VisitOutbox(in OutboxEntryView entry)
             {
