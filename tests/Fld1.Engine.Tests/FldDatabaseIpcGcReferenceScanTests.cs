@@ -88,6 +88,8 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
             Assert.True(await clientA.HasGcChangeIdReferenceAsync(scan.Token, retainedChangeId));
 
             await clientA.ReleaseGcReferenceScanAsync(scan.Token);
+            await clientA.ReleaseGcReferenceScanAsync(scan.Token);
+            await clientA.ReleaseGcLeaseAsync(lease);
             await clientA.ReleaseGcLeaseAsync(lease);
             Assert.Equal(author, await blocked.WaitAsync(TimeSpan.FromSeconds(5)));
         }
