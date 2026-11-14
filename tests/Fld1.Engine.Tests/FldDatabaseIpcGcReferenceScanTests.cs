@@ -195,6 +195,63 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
         try { Directory.Delete(root, recursive: true); } catch { }
     }
 
+    [Fact]
+    public async Task Host_gc_lease_expires_after_idle_timeout_and_releases_boundary()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), "fld-ipc-gc-reference-expiry-" + Guid.NewGuid().ToString("N"));
+        Guid ownerId = Guid.NewGuid();
+        byte[] author = Id(0x42);
+        using FldDatabase database = FldDatabase.Open(root, 0x765, author);
+        var dispatcher = new FldDatabaseIpcDispatcher(
+            database, gcLeaseIdleTimeout: TimeSpan.FromMilliseconds(250));
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0),
+            dispatcher.HandleAsync,
+            clientDisconnected: dispatcher.OnClientDisconnected);
+        Task serverTask = server.RunAsync(shutdown.Token);
+        FldDatabaseIpcClient? owner = null;
+        FldDatabaseIpcClient? waiter = null;
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+            owner = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+            waiter = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+
+            Guid lease = await owner.AcquireGcLeaseAsync();
+            FldDatabaseIpcGcReferenceScan scan = await owner.OpenGcReferenceScanAsync();
+            Task<byte[]> blocked = waiter.GetLocalAuthorAsync();
+            await Task.Delay(100);
+            Assert.False(blocked.IsCompleted);
+
+            Assert.Equal(author, await blocked.WaitAsync(TimeSpan.FromSeconds(5)));
+            await Assert.ThrowsAnyAsync<Exception>(async () =>
+                await owner.HasGcChangeIdReferenceAsync(scan.Token, Id(0x71)));
+
+            // A release retry after timer expiry is idempotent.
+            await owner.ReleaseGcLeaseAsync(lease);
+        }
+        finally
+        {
+            if (owner is not null)
+                await owner.DisposeAsync();
+            if (waiter is not null)
+                await waiter.DisposeAsync();
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+        }
+
+        try { Directory.Delete(root, recursive: true); } catch { }
+    }
+
     private static byte[] Id(byte value)
     {
         byte[] id = new byte[16];
