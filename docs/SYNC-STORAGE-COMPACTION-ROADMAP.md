@@ -2398,3 +2398,13 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x CI] Exact branch HEAD `2a7801122873bdf285f476e8e2582342cfc897bc`: push run `43590550539` and PR run `43590554469` both passed all three platform jobs (Ubuntu, Windows, macOS 15).
 - [!] This proves Host-wide writer exclusion and disconnect cleanup for the IPC lease. It does not alone prove the complete BIN-SYNC async ChangeId/receipt compaction window or authorize physical GC by default. The cross-layer deterministic cut between the final Host reference answer and Metadata deletion remains tracked in BIN-SYNC roadmap §1.147.
 - [!] Keep `EnableTombstoneGc`, `EnableChangeIdGc` and `EnableReceiptGc` disabled by default. The two-runtime-DLL boundary remains exactly `Fld1.Storage.dll` plus `Fld1.Database.dll`; no third runtime assembly is introduced.
+
+
+### 7.105 GC lease owner is read-only except for its reference scan — 2026-11-14
+
+- [x C] Source audit found that the Host-wide GC lease owner previously bypassed the IPC admission boundary for every operation. That allowed the same IPC session that owned the immutable reference scan to issue a local mutation while the scan was active, even though competing sessions were excluded.
+- [x C] The dispatcher now permits the lease owner only to open, query and release its GC reference scan. Lease release remains handled by the dedicated token-checked path. All ordinary database operations from the owner session are rejected until the lease is released.
+- [x T] Extended `FldDatabaseIpcGcLeaseTests.Host_gc_lease_blocks_other_sessions_allows_owner_and_releases_on_disconnect`: the owner can query its Host snapshot, an owner-session `WriteBatchAsync` is rejected with the IPC remote exception, another session's read and a third session's write remain blocked, and disconnect cleanup still releases the boundary.
+- [x CI] Exact FLD-DB HEAD `cb07deb7f4a90e970ac186ff961a84fc1a296180`: push run `43592577000` and PR run `43592579695` both passed all three jobs (Ubuntu, Windows, macOS 15).
+- [!] This closes the same-session mutation bypass. The Host lease still has a five-minute idle timeout renewed by Host IPC operations; the async Metadata transaction does not currently send a keepalive while its final synchronous durable commit is in progress. A bounded commit/lease-expiry proof or explicit keepalive remains part of the cross-layer safety gate.
+- [!] Physical tombstone, ChangeId, receipt and Ghost GC remain disabled by default. The runtime remains exactly two DLLs: `Fld1.Storage.dll` and `Fld1.Database.dll`.
