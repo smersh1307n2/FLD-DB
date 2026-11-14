@@ -17,6 +17,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private readonly Dictionary<(Guid ClientId, Guid OperationId), Guid> _snapshotOpenOperations = new();
     private readonly Guid _hostGeneration = Guid.NewGuid();
     private volatile bool _disposed;
+    private readonly SemaphoreSlim _gcBoundary = new(1, 1);
+    private readonly object _gcLeaseGate = new();
+    private Guid _gcLeaseToken;
+    private Guid _gcLeaseClientId;
+    private ulong _gcLeaseSessionGeneration;
 
     private sealed class IpcSnapshotHandle(Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot)
     {
