@@ -23,6 +23,7 @@ public sealed class FldDatabaseIpcGcLeaseTests
         Task serverTask = server.RunAsync(shutdown.Token);
         FldDatabaseIpcClient? clientA = null;
         FldDatabaseIpcClient? clientB = null;
+        FldDatabaseIpcClient? clientC = null;
 
         try
         {
@@ -33,6 +34,8 @@ public sealed class FldDatabaseIpcGcLeaseTests
                 root, clientAId, TimeSpan.FromSeconds(10));
             clientB = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
                 root, clientBId, TimeSpan.FromSeconds(10));
+            clientC = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
 
             Guid lease = await clientA.AcquireGcLeaseAsync();
             Task<byte[]> blockedByLease = clientB.GetLocalAuthorAsync();
@@ -45,7 +48,7 @@ public sealed class FldDatabaseIpcGcLeaseTests
             byte[] recordId = FldDatabase.NewRecordId();
             var mutation = new FldDatabaseIpcMutation(
                 recordId, 7, 1, false, "writer-after-gc"u8.ToArray());
-            Task<FldDatabaseIpcWriteResult> blockedWriter = clientB.WriteBatchAsync(
+            Task<FldDatabaseIpcWriteResult> blockedWriter = clientC.WriteBatchAsync(
                 Guid.NewGuid(), clientSequence: 1, [mutation]);
             await Task.Delay(100);
             Assert.False(blockedWriter.IsCompleted,
@@ -72,6 +75,8 @@ public sealed class FldDatabaseIpcGcLeaseTests
                 await clientA.DisposeAsync();
             if (clientB is not null)
                 await clientB.DisposeAsync();
+            if (clientC is not null)
+                await clientC.DisposeAsync();
             shutdown.Cancel();
             try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
             StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
