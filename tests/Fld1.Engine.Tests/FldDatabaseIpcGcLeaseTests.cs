@@ -39,11 +39,27 @@ public sealed class FldDatabaseIpcGcLeaseTests
             await Task.Delay(100);
             Assert.False(blockedByLease.IsCompleted);
 
+            // A competing data mutation must be excluded by the same Host-wide
+            // boundary. Otherwise a new local draft could appear after the final
+            // reference snapshot but before the provider's physical tombstone delete.
+            byte[] recordId = FldDatabase.NewRecordId();
+            var mutation = new FldDatabaseIpcMutation(
+                recordId, fieldId: 7, keyEpoch: 1, isTombstone: false,
+                value: "writer-after-gc"u8.ToArray());
+            Task<FldDatabaseIpcWriteResult> blockedWriter = clientB.WriteBatchAsync(
+                Guid.NewGuid(), clientSequence: 1, [mutation]);
+            await Task.Delay(100);
+            Assert.False(blockedWriter.IsCompleted,
+                "A second IPC session must not commit a new local draft during the Host GC lease.");
+
             // The lease owner must continue to use the Host for its reference scan
             // and Metadata transaction while every other IPC session is excluded.
             Assert.Equal(Id(0x41), await clientA.GetLocalAuthorAsync());
             await clientA.ReleaseGcLeaseAsync(lease);
             Assert.Equal(Id(0x41), await blockedByLease.WaitAsync(TimeSpan.FromSeconds(5)));
+            FldDatabaseIpcWriteResult committed = await blockedWriter.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(committed.IsDuplicate);
+            Assert.Equal(1, committed.MutationCount);
 
             // A crashed/disposed coordinator cannot strand the Host-wide boundary.
             _ = await clientA.AcquireGcLeaseAsync();
