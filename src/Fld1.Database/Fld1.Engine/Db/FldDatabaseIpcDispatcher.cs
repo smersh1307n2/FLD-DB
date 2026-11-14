@@ -41,67 +41,115 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     /// <summary>Stable for this dispatcher lifetime; changes when the Database host restarts.</summary>
     public Guid HostGeneration => _hostGeneration;
 
-    public ValueTask<ReadOnlyMemory<byte>> HandleAsync(
+    public async ValueTask<ReadOnlyMemory<byte>> HandleAsync(
         StorageIpcRequestContext context,
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
-        if (context.ClientId == Guid.Empty)
-            throw new InvalidDataException("FLD IPC ClientId must be nonzero.");
+        if (context.ClientId == Guid.Empty || context.SessionGeneration == 0)
+            throw new InvalidDataException("FLD IPC client/session identity must be nonzero.");
 
         StorageIpcOperationEnvelope operation = StorageIpcOperationProtocol.Decode(payload);
-        Span<byte> clientId = stackalloc byte[16];
-        Span<byte> operationId = stackalloc byte[16];
-        context.ClientId.TryWriteBytes(clientId, bigEndian: true, out _);
-        operation.OperationId.TryWriteBytes(operationId, bigEndian: true, out _);
-
-        byte[] response = operation.OperationCode switch
+        if (operation.OperationCode == FldDatabaseIpcOperationCodes.AcquireGcLease)
         {
-            FldDatabaseIpcOperationCodes.WriteBatch =>
-                HandleWriteBatch(clientId, operationId, operation),
-            FldDatabaseIpcOperationCodes.ReadField =>
-                HandleReadField(clientId, operationId, operation),
-            FldDatabaseIpcOperationCodes.AcknowledgeReceipts =>
-                HandleAcknowledgement(clientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.AcquireOutboxLease =>
-                HandleAcquireOutboxLease(clientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.ReadOutboxEntryChunk =>
-                HandleReadOutboxEntryChunk(clientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.AcknowledgeOutbox =>
-                HandleOutboxAcknowledgement(clientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.ReleaseOutboxLease =>
-                HandleReleaseOutboxLease(clientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.OpenSnapshot =>
-                HandleOpenSnapshot(context.ClientId, operation.OperationId, operation.Payload),
-            FldDatabaseIpcOperationCodes.ReadSnapshotPage =>
-                HandleReadSnapshotPage(context.ClientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.ReadSnapshotValueChunk =>
-                HandleReadSnapshotValueChunk(context.ClientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.ReleaseSnapshot =>
-                HandleReleaseSnapshot(context.ClientId, operation.Payload),
-            FldDatabaseIpcOperationCodes.ApplyRemoteBatch =>
-                HandleApplyRemoteBatch(operation.Payload),
-            FldDatabaseIpcOperationCodes.AppendLocalProviderBatch =>
-                HandleAppendLocalProviderBatch(clientId, operationId, operation),
-            FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence =>
-                HandleAppendLocalProviderBatchAutoSequence(clientId, operationId, operation),
-            FldDatabaseIpcOperationCodes.GetLocalAuthor => HandleGetLocalAuthor(operation.Payload),
-            FldDatabaseIpcOperationCodes.CommitPublishedOrigins => HandleCommitPublishedOrigins(operation.Payload),
-            FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover =>
-                HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
-            FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication =>
-                HandleEnableMetadataStoreOwnedPublication(operation.Payload),
-            FldDatabaseIpcOperationCodes.CompactTombstones =>
-                HandleCompactTombstones(operation.Payload),
-            FldDatabaseIpcOperationCodes.GetOutboxHighWatermark =>
-                HandleGetOutboxHighWatermark(operation.Payload),
-            FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
-            FldDatabaseIpcOperationCodes.ReadCurrentValueChunk => HandleReadCurrentValueChunk(operation.Payload),
-            _ => throw new NotSupportedException($"Unsupported FLD Database IPC operation code {operation.OperationCode}.")
-        };
-        return ValueTask.FromResult<ReadOnlyMemory<byte>>(response);
+            if (!operation.Payload.IsEmpty)
+                throw new InvalidDataException("FLD GC lease acquisition payload must be empty.");
+            await _gcBoundary.WaitAsync(cancellationToken).ConfigureAwait(false);
+            lock (_gcLeaseGate)
+            {
+                if (_gcLeaseToken != Guid.Empty)
+                {
+                    _gcBoundary.Release();
+                    throw new InvalidOperationException("A FLD GC lease is already active.");
+                }
+                _gcLeaseToken = Guid.NewGuid();
+                _gcLeaseClientId = context.ClientId;
+                _gcLeaseSessionGeneration = context.SessionGeneration;
+                return FldDatabaseIpcProtocol.EncodeGcLeaseToken(_gcLeaseToken);
+            }
+        }
+
+        if (operation.OperationCode == FldDatabaseIpcOperationCodes.ReleaseGcLease)
+        {
+            Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(operation.Payload);
+            lock (_gcLeaseGate)
+            {
+                if (_gcLeaseToken != token || _gcLeaseClientId != context.ClientId ||
+                    _gcLeaseSessionGeneration != context.SessionGeneration)
+                    throw new InvalidDataException("FLD GC lease token is unknown or belongs to another IPC session.");
+                _gcLeaseToken = Guid.Empty;
+                _gcLeaseClientId = Guid.Empty;
+                _gcLeaseSessionGeneration = 0;
+            }
+            _gcBoundary.Release();
+            return ReadOnlyMemory<byte>.Empty;
+        }
+
+        bool ownsGcLease;
+        lock (_gcLeaseGate)
+            ownsGcLease = _gcLeaseToken != Guid.Empty && _gcLeaseClientId == context.ClientId &&
+                _gcLeaseSessionGeneration == context.SessionGeneration;
+        if (!ownsGcLease)
+            await _gcBoundary.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Span<byte> clientId = stackalloc byte[16];
+            Span<byte> operationId = stackalloc byte[16];
+            context.ClientId.TryWriteBytes(clientId, bigEndian: true, out _);
+            operation.OperationId.TryWriteBytes(operationId, bigEndian: true, out _);
+            byte[] response = operation.OperationCode switch
+            {
+                FldDatabaseIpcOperationCodes.WriteBatch => HandleWriteBatch(clientId, operationId, operation),
+                FldDatabaseIpcOperationCodes.ReadField => HandleReadField(clientId, operationId, operation),
+                FldDatabaseIpcOperationCodes.AcknowledgeReceipts => HandleAcknowledgement(clientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.AcquireOutboxLease => HandleAcquireOutboxLease(clientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.ReadOutboxEntryChunk => HandleReadOutboxEntryChunk(clientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.AcknowledgeOutbox => HandleOutboxAcknowledgement(clientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.ReleaseOutboxLease => HandleReleaseOutboxLease(clientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.OpenSnapshot => HandleOpenSnapshot(context.ClientId, operation.OperationId, operation.Payload),
+                FldDatabaseIpcOperationCodes.ReadSnapshotPage => HandleReadSnapshotPage(context.ClientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.ReadSnapshotValueChunk => HandleReadSnapshotValueChunk(context.ClientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.ReleaseSnapshot => HandleReleaseSnapshot(context.ClientId, operation.Payload),
+                FldDatabaseIpcOperationCodes.ApplyRemoteBatch => HandleApplyRemoteBatch(operation.Payload),
+                FldDatabaseIpcOperationCodes.AppendLocalProviderBatch => HandleAppendLocalProviderBatch(clientId, operationId, operation),
+                FldDatabaseIpcOperationCodes.AppendLocalProviderBatchAutoSequence => HandleAppendLocalProviderBatchAutoSequence(clientId, operationId, operation),
+                FldDatabaseIpcOperationCodes.GetLocalAuthor => HandleGetLocalAuthor(operation.Payload),
+                FldDatabaseIpcOperationCodes.CommitPublishedOrigins => HandleCommitPublishedOrigins(operation.Payload),
+                FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover => HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
+                FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication => HandleEnableMetadataStoreOwnedPublication(operation.Payload),
+                FldDatabaseIpcOperationCodes.CompactTombstones => HandleCompactTombstones(operation.Payload),
+                FldDatabaseIpcOperationCodes.GetOutboxHighWatermark => HandleGetOutboxHighWatermark(operation.Payload),
+                FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
+                FldDatabaseIpcOperationCodes.ReadCurrentValueChunk => HandleReadCurrentValueChunk(operation.Payload),
+                _ => throw new NotSupportedException("Unsupported FLD Database IPC operation code " + operation.OperationCode + ".")
+            };
+            return response;
+        }
+        finally
+        {
+            if (!ownsGcLease)
+                _gcBoundary.Release();
+        }
+    }
+
+    public void OnClientDisconnected(Guid clientId, ulong sessionGeneration)
+    {
+        bool release = false;
+        lock (_gcLeaseGate)
+        {
+            if (_gcLeaseToken != Guid.Empty && _gcLeaseClientId == clientId &&
+                _gcLeaseSessionGeneration == sessionGeneration)
+            {
+                _gcLeaseToken = Guid.Empty;
+                _gcLeaseClientId = Guid.Empty;
+                _gcLeaseSessionGeneration = 0;
+                release = true;
+            }
+        }
+        if (release)
+            _gcBoundary.Release();
     }
 
     private byte[] HandleWriteBatch(
