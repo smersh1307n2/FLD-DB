@@ -44,8 +44,7 @@ public sealed class FldDatabaseIpcGcLeaseTests
             // reference snapshot but before the provider's physical tombstone delete.
             byte[] recordId = FldDatabase.NewRecordId();
             var mutation = new FldDatabaseIpcMutation(
-                recordId, fieldId: 7, keyEpoch: 1, isTombstone: false,
-                value: "writer-after-gc"u8.ToArray());
+                recordId, 7, 1, false, "writer-after-gc"u8.ToArray());
             Task<FldDatabaseIpcWriteResult> blockedWriter = clientB.WriteBatchAsync(
                 Guid.NewGuid(), clientSequence: 1, [mutation]);
             await Task.Delay(100);
