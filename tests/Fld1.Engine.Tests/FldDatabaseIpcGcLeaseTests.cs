@@ -100,6 +100,61 @@ public sealed class FldDatabaseIpcGcLeaseTests
     }
 
     [Fact]
+    public async Task Host_gc_lease_rejects_foreign_renewal_and_expires_without_owner_heartbeat()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-ipc-gc-renew-owner-" + Guid.NewGuid().ToString("N"));
+        Guid ownerId = Guid.NewGuid();
+        using var shutdown = new CancellationTokenSource();
+        using FldDatabase database = FldDatabase.Open(root, 0x766, Id(0x45));
+        var dispatcher = new FldDatabaseIpcDispatcher(
+            database, gcLeaseIdleTimeout: TimeSpan.FromMilliseconds(500));
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0),
+            dispatcher.HandleAsync,
+            clientDisconnected: dispatcher.OnClientDisconnected);
+        Task serverTask = server.RunAsync(shutdown.Token);
+        FldDatabaseIpcClient? owner = null;
+        FldDatabaseIpcClient? foreign = null;
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+            owner = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+            foreign = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+
+            Guid lease = await owner.AcquireGcLeaseAsync();
+            StorageIpcRemoteException rejected = await Assert.ThrowsAsync<StorageIpcRemoteException>(
+                () => foreign.RenewGcLeaseAsync(lease));
+            Assert.Contains("active Host-wide GC lease", rejected.Message);
+
+            await Task.Delay(900);
+            StorageIpcRemoteException expired = await Assert.ThrowsAsync<StorageIpcRemoteException>(
+                () => owner.OpenGcReferenceScanAsync());
+            Assert.Contains("GC lease", expired.Message);
+
+            Guid replacement = await foreign.AcquireGcLeaseAsync();
+            await foreign.ReleaseGcLeaseAsync(replacement);
+        }
+        finally
+        {
+            if (owner is not null)
+                await owner.DisposeAsync();
+            if (foreign is not null)
+                await foreign.DisposeAsync();
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+        }
+
+        try { Directory.Delete(root, recursive: true); } catch { }
+    }
+
+    [Fact]
     public async Task Host_gc_lease_renewal_extends_idle_deadline_and_preserves_reference_scan()
     {
         string root = Path.Combine(Path.GetTempPath(), "fld-ipc-gc-renew-" + Guid.NewGuid().ToString("N"));
