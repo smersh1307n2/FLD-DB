@@ -62,11 +62,13 @@ public sealed class FldDatabaseIpcGcLeaseTests
             Assert.Equal(0UL, ownerScan.UnpublishedLocalDraftHorizon.Count);
             Assert.False(await clientA.HasGcChangeIdReferenceAsync(
                 ownerScan.Token, Id(0x42)));
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                clientA.WriteBatchAsync(
-                    Guid.NewGuid(), clientSequence: 1,
-                    [new FldDatabaseIpcMutation(
-                        FldDatabase.NewRecordId(), 8, 1, false, "owner-write-during-gc"u8.ToArray())]));
+            StorageIpcRemoteException ownerWriteError =
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                    clientA.WriteBatchAsync(
+                        Guid.NewGuid(), clientSequence: 1,
+                        [new FldDatabaseIpcMutation(
+                            FldDatabase.NewRecordId(), 8, 1, false, "owner-write-during-gc"u8.ToArray())]));
+            Assert.Contains("may only access its reference scan", ownerWriteError.Message);
             await clientA.ReleaseGcReferenceScanAsync(ownerScan.Token);
             await clientA.ReleaseGcLeaseAsync(lease);
             Assert.Equal(Id(0x41), await blockedByLease.WaitAsync(TimeSpan.FromSeconds(5)));
