@@ -14,15 +14,13 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private readonly bool _enableTombstoneGc;
     private readonly object _snapshotGate = new();
     private readonly Dictionary<Guid, IpcSnapshotHandle> _snapshotHandles = new();
-    private readonly Dictionary<(Guid ClientId, ulong SessionGeneration, Guid OperationId), Guid> _snapshotOpenOperations = new();
+    private readonly Dictionary<(Guid ClientId, Guid OperationId), Guid> _snapshotOpenOperations = new();
     private readonly Guid _hostGeneration = Guid.NewGuid();
     private volatile bool _disposed;
 
-    private sealed class IpcSnapshotHandle(
-        Guid clientId, ulong sessionGeneration, Guid openOperationId, FldProviderSnapshot snapshot)
+    private sealed class IpcSnapshotHandle(Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot)
     {
         public Guid ClientId { get; } = clientId;
-        public ulong SessionGeneration { get; } = sessionGeneration;
         public Guid OpenOperationId { get; } = openOperationId;
         public FldProviderSnapshot Snapshot { get; } = snapshot;
         public object Gate { get; } = new();
@@ -71,13 +69,13 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             FldDatabaseIpcOperationCodes.ReleaseOutboxLease =>
                 HandleReleaseOutboxLease(clientId, operation.Payload),
             FldDatabaseIpcOperationCodes.OpenSnapshot =>
-                HandleOpenSnapshot(context.ClientId, context.SessionGeneration, operation.OperationId, operation.Payload),
+                HandleOpenSnapshot(context.ClientId, operation.OperationId, operation.Payload),
             FldDatabaseIpcOperationCodes.ReadSnapshotPage =>
-                HandleReadSnapshotPage(context.ClientId, context.SessionGeneration, operation.Payload),
+                HandleReadSnapshotPage(context.ClientId, operation.Payload),
             FldDatabaseIpcOperationCodes.ReadSnapshotValueChunk =>
-                HandleReadSnapshotValueChunk(context.ClientId, context.SessionGeneration, operation.Payload),
+                HandleReadSnapshotValueChunk(context.ClientId, operation.Payload),
             FldDatabaseIpcOperationCodes.ReleaseSnapshot =>
-                HandleReleaseSnapshot(context.ClientId, context.SessionGeneration, operation.Payload),
+                HandleReleaseSnapshot(context.ClientId, operation.Payload),
             FldDatabaseIpcOperationCodes.ApplyRemoteBatch =>
                 HandleApplyRemoteBatch(operation.Payload),
             FldDatabaseIpcOperationCodes.AppendLocalProviderBatch =>
@@ -340,8 +338,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         return FldDatabaseIpcRemoteApplyProtocol.EncodeReceipt(receipt);
     }
 
-    private byte[] HandleOpenSnapshot(
-        Guid clientId, ulong sessionGeneration, Guid operationId, ReadOnlyMemory<byte> payload)
+    private byte[] HandleOpenSnapshot(Guid clientId, Guid operationId, ReadOnlyMemory<byte> payload)
     {
         if (!payload.IsEmpty)
             throw new InvalidDataException("FLD snapshot-open request payload must be empty.");
@@ -351,7 +348,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         lock (_snapshotGate)
         {
             ThrowIfDisposed();
-            var operationKey = (clientId, sessionGeneration, operationId);
+            var operationKey = (clientId, operationId);
             if (_snapshotOpenOperations.TryGetValue(operationKey, out Guid existingToken))
             {
                 if (!_snapshotHandles.TryGetValue(existingToken, out IpcSnapshotHandle? existing) ||
@@ -371,7 +368,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 throw new InvalidOperationException("The active FLD snapshot handle limit has been reached.");
 
             FldProviderSnapshot snapshot = _database.OpenProviderSnapshotForIpc(clientId, _hostGeneration);
-            var handle = new IpcSnapshotHandle(clientId, sessionGeneration, operationId, snapshot);
+            var handle = new IpcSnapshotHandle(clientId, operationId, snapshot);
             _snapshotHandles.Add(snapshot.Generation, handle);
             _snapshotOpenOperations.Add(operationKey, snapshot.Generation);
             return FldDatabaseIpcProtocol.EncodeSnapshotOpenResponse(
@@ -379,12 +376,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         }
     }
 
-    private byte[] HandleReadSnapshotPage(
-        Guid clientId, ulong sessionGeneration, ReadOnlyMemory<byte> payload)
+    private byte[] HandleReadSnapshotPage(Guid clientId, ReadOnlyMemory<byte> payload)
     {
         var request = FldDatabaseIpcProtocol.DecodeSnapshotPagePayload(payload);
-        IpcSnapshotHandle handle = GetSnapshotHandle(
-            clientId, sessionGeneration, request.HostGeneration, request.SnapshotToken);
+        IpcSnapshotHandle handle = GetSnapshotHandle(clientId, request.HostGeneration, request.SnapshotToken);
         lock (handle.Gate)
         {
             if (handle.Released)
@@ -395,12 +390,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         }
     }
 
-    private byte[] HandleReadSnapshotValueChunk(
-        Guid clientId, ulong sessionGeneration, ReadOnlyMemory<byte> payload)
+    private byte[] HandleReadSnapshotValueChunk(Guid clientId, ReadOnlyMemory<byte> payload)
     {
         var request = FldDatabaseIpcProtocol.DecodeSnapshotValueChunkPayload(payload);
-        IpcSnapshotHandle handle = GetSnapshotHandle(
-            clientId, sessionGeneration, request.HostGeneration, request.SnapshotToken);
+        IpcSnapshotHandle handle = GetSnapshotHandle(clientId, request.HostGeneration, request.SnapshotToken);
         lock (handle.Gate)
         {
             if (handle.Released)
@@ -411,8 +404,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         }
     }
 
-    private byte[] HandleReleaseSnapshot(
-        Guid clientId, ulong sessionGeneration, ReadOnlyMemory<byte> payload)
+    private byte[] HandleReleaseSnapshot(Guid clientId, ReadOnlyMemory<byte> payload)
     {
         var request = FldDatabaseIpcProtocol.DecodeSnapshotReleasePayload(payload);
         if (request.HostGeneration != _hostGeneration)
@@ -424,10 +416,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             ThrowIfDisposed();
             if (!_snapshotHandles.TryGetValue(request.SnapshotToken, out handle))
                 return FldDatabaseIpcProtocol.EncodeSnapshotReleaseResponse(true);
-            if (handle.ClientId != clientId || handle.SessionGeneration != sessionGeneration)
-                throw new InvalidDataException("FLD snapshot handle is bound to another IPC client session.");
+            if (handle.ClientId != clientId)
+                throw new InvalidDataException("FLD snapshot handle is bound to another IPC client.");
             _snapshotHandles.Remove(request.SnapshotToken);
-            _snapshotOpenOperations.Remove((clientId, sessionGeneration, handle.OpenOperationId));
+            _snapshotOpenOperations.Remove((clientId, handle.OpenOperationId));
         }
 
         lock (handle.Gate)
@@ -441,8 +433,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         return FldDatabaseIpcProtocol.EncodeSnapshotReleaseResponse(true);
     }
 
-    private IpcSnapshotHandle GetSnapshotHandle(
-        Guid clientId, ulong sessionGeneration, Guid hostGeneration, Guid snapshotToken)
+    private IpcSnapshotHandle GetSnapshotHandle(Guid clientId, Guid hostGeneration, Guid snapshotToken)
     {
         if (hostGeneration != _hostGeneration)
             throw new InvalidDataException("FLD snapshot handle belongs to a different Database host generation.");
@@ -451,48 +442,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             ThrowIfDisposed();
             if (!_snapshotHandles.TryGetValue(snapshotToken, out IpcSnapshotHandle? handle))
                 throw new InvalidDataException("FLD snapshot handle is unknown or has been released.");
-            if (handle.ClientId != clientId || handle.SessionGeneration != sessionGeneration)
-                throw new InvalidDataException("FLD snapshot handle is bound to another IPC client session.");
+            if (handle.ClientId != clientId)
+                throw new InvalidDataException("FLD snapshot handle is bound to another IPC client.");
             return handle;
-        }
-    }
-
-    /// <summary>
-    /// Release all ephemeral snapshot pins owned by one disconnected IPC session.
-    /// A stable ClientId may reconnect with a new SessionGeneration; old handles
-    /// must not leak provider snapshot pins into that new session.
-    /// </summary>
-    public void ReleaseClientSession(Guid clientId, ulong sessionGeneration)
-    {
-        if (clientId == Guid.Empty || sessionGeneration == 0)
-            return;
-
-        IpcSnapshotHandle[] handles;
-        lock (_snapshotGate)
-        {
-            if (_disposed)
-                return;
-            handles = _snapshotHandles.Values
-                .Where(handle => handle.ClientId == clientId &&
-                    handle.SessionGeneration == sessionGeneration)
-                .ToArray();
-            foreach (IpcSnapshotHandle handle in handles)
-            {
-                _snapshotHandles.Remove(handle.Snapshot.Generation);
-                _snapshotOpenOperations.Remove((
-                    clientId, sessionGeneration, handle.OpenOperationId));
-            }
-        }
-
-        foreach (IpcSnapshotHandle handle in handles)
-        {
-            lock (handle.Gate)
-            {
-                if (handle.Released)
-                    continue;
-                handle.Released = true;
-                _database.ReleaseProviderSnapshot(handle.Snapshot.Generation);
-            }
         }
     }
 
