@@ -2418,3 +2418,13 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x CI] Exact FLD-DB HEAD `a560cfa7237f8afb35726b4d88dbb1fcfbe3c5a6`: push run `43594086263` and PR run `43594091165` passed Ubuntu, Windows and macOS 15.
 - [!] The explicit IPC renewal primitive does not by itself keep a lease alive: the process-isolated BIN-SYNC provider must renew throughout the entire async Metadata compaction scope and must drain any in-flight renewal before releasing the scan/lease. That provider behavior and its long-lived integration test are tracked in BIN-SYNC roadmap §1.149.
 - [!] GC remains opt-in. Tombstone, ChangeId, Receipt and Ghost physical reclamation are not enabled by default.
+
+
+### 7.107 Final tombstone-GC commit seals only the committed WAL prefix — 2026-11-14
+
+- [x C] Audited `FldDatabaseIpcDispatcher.HandleCompactTombstones`: it holds the database commit guard across the final synchronous operation, calls `TrySealCommittedWalForTombstoneGc`, then opens the Host-owned `FldReferenceSnapshot` and revalidates exact candidate identities before committing the bounded replacement generation.
+- [x C] If the committed WAL prefix cannot be sealed, the operation returns zero. The final snapshot separately vetoes any snapshot pin, non-empty unpublished draft horizon, unsealed WAL, and captured ChangeId/RecordId references. It does not checkpoint an uncommitted overlay.
+- [x C] The same Host-wide GC lease prevents other IPC sessions from mutating the database while the async Metadata reference scan and final Metadata commit are in progress. The lease owner remains read-only except for its reference scan and explicit lease renewal.
+- [x T] BIN-SYNC's two-real-Host integration test now exercises bounded tombstone deletion after signed rejoin, ChangeId-GC admission before and after the Host WAL seal, restart of both Host processes between tombstone pages, and successful second-page deletion after ChangeId ledger reclamation.
+- [x CI] Exact FLD-DB documentation/source HEAD `d311cbd1b5275f4bbf37cd57886e7c94e92972a7`: push run `43594987549` and PR run `43594993073` passed all three platforms.
+- [!] This proof is still opt-in and does not enable production physical GC. Keep Tombstone, ChangeId, Receipt and Ghost reclamation disabled by default until the remaining crash/cancellation and receipt-horizon matrix is complete.
