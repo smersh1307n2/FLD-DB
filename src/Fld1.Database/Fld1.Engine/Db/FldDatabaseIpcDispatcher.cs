@@ -17,7 +17,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private readonly Dictionary<(Guid ClientId, Guid OperationId), Guid> _snapshotOpenOperations = new();
     private readonly Guid _hostGeneration = Guid.NewGuid();
     private volatile bool _disposed;
-    private readonly SemaphoreSlim _gcBoundary = new(1, 1);
+    private readonly AsyncIpcGcBoundary _gcBoundary = new();
+    private IDisposable? _gcBoundaryLease;
     private readonly object _gcLeaseGate = new();
     private Guid _gcLeaseToken;
     private Guid _gcLeaseClientId;
@@ -56,17 +57,18 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             if (!operation.Payload.IsEmpty)
                 throw new InvalidDataException("FLD GC lease acquisition payload must be empty.");
-            await _gcBoundary.WaitAsync(cancellationToken).ConfigureAwait(false);
+            IDisposable boundaryLease = await _gcBoundary.EnterWriteAsync(cancellationToken).ConfigureAwait(false);
             lock (_gcLeaseGate)
             {
                 if (_gcLeaseToken != Guid.Empty)
                 {
-                    _gcBoundary.Release();
+                    boundaryLease.Dispose();
                     throw new InvalidOperationException("A FLD GC lease is already active.");
                 }
                 _gcLeaseToken = Guid.NewGuid();
                 _gcLeaseClientId = context.ClientId;
                 _gcLeaseSessionGeneration = context.SessionGeneration;
+                _gcBoundaryLease = boundaryLease;
                 return FldDatabaseIpcProtocol.EncodeGcLeaseToken(_gcLeaseToken);
             }
         }
@@ -74,6 +76,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         if (operation.OperationCode == FldDatabaseIpcOperationCodes.ReleaseGcLease)
         {
             Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(operation.Payload);
+            IDisposable? boundaryLease;
             lock (_gcLeaseGate)
             {
                 if (_gcLeaseToken != token || _gcLeaseClientId != context.ClientId ||
@@ -82,8 +85,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _gcLeaseToken = Guid.Empty;
                 _gcLeaseClientId = Guid.Empty;
                 _gcLeaseSessionGeneration = 0;
+                boundaryLease = _gcBoundaryLease;
+                _gcBoundaryLease = null;
             }
-            _gcBoundary.Release();
+            boundaryLease?.Dispose();
             return ReadOnlyMemory<byte>.Empty;
         }
 
@@ -91,8 +96,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         lock (_gcLeaseGate)
             ownsGcLease = _gcLeaseToken != Guid.Empty && _gcLeaseClientId == context.ClientId &&
                 _gcLeaseSessionGeneration == context.SessionGeneration;
-        if (!ownsGcLease)
-            await _gcBoundary.WaitAsync(cancellationToken).ConfigureAwait(false);
+        IDisposable? dispatchLease = ownsGcLease
+            ? null
+            : await _gcBoundary.EnterReadAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             Span<byte> clientId = stackalloc byte[16];
@@ -129,14 +135,13 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         }
         finally
         {
-            if (!ownsGcLease)
-                _gcBoundary.Release();
+            dispatchLease?.Dispose();
         }
     }
 
     public void OnClientDisconnected(Guid clientId, ulong sessionGeneration)
     {
-        bool release = false;
+        IDisposable? boundaryLease = null;
         lock (_gcLeaseGate)
         {
             if (_gcLeaseToken != Guid.Empty && _gcLeaseClientId == clientId &&
@@ -145,11 +150,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _gcLeaseToken = Guid.Empty;
                 _gcLeaseClientId = Guid.Empty;
                 _gcLeaseSessionGeneration = 0;
-                release = true;
+                boundaryLease = _gcBoundaryLease;
+                _gcBoundaryLease = null;
             }
         }
-        if (release)
-            _gcBoundary.Release();
+        boundaryLease?.Dispose();
     }
 
     private byte[] HandleWriteBatch(
@@ -501,6 +506,120 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         }
     }
 
+    private sealed class AsyncIpcGcBoundary
+    {
+        private readonly SemaphoreSlim _writerQueue = new(1, 1);
+        private readonly object _gate = new();
+        private int _readers;
+        private bool _writerActive;
+        private bool _writerPending;
+        private TaskCompletionSource _changed = NewSignal();
+
+        public async ValueTask<IDisposable> EnterReadAsync(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                Task wait;
+                lock (_gate)
+                {
+                    if (!_writerActive && !_writerPending)
+                    {
+                        _readers++;
+                        return new BoundaryLease(this, writer: false);
+                    }
+                    wait = _changed.Task;
+                }
+                await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public async ValueTask<IDisposable> EnterWriteAsync(CancellationToken cancellationToken)
+        {
+            await _writerQueue.WaitAsync(cancellationToken).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _writerPending = true;
+                Pulse();
+            }
+            try
+            {
+                while (true)
+                {
+                    Task wait;
+                    lock (_gate)
+                    {
+                        if (!_writerActive && _readers == 0)
+                        {
+                            _writerPending = false;
+                            _writerActive = true;
+                            Pulse();
+                            return new BoundaryLease(this, writer: true);
+                        }
+                        wait = _changed.Task;
+                    }
+                    await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                lock (_gate)
+                {
+                    _writerPending = false;
+                    Pulse();
+                }
+                _writerQueue.Release();
+                throw;
+            }
+        }
+
+        private void Release(bool writer)
+        {
+            lock (_gate)
+            {
+                if (writer)
+                {
+                    if (!_writerActive)
+                        throw new SynchronizationLockException("FLD IPC GC write boundary is not held.");
+                    _writerActive = false;
+                }
+                else
+                {
+                    if (_readers <= 0)
+                        throw new SynchronizationLockException("FLD IPC GC read boundary is not held.");
+                    _readers--;
+                }
+                Pulse();
+            }
+            if (writer)
+                _writerQueue.Release();
+        }
+
+        private void Pulse()
+        {
+            TaskCompletionSource previous = _changed;
+            _changed = NewSignal();
+            previous.TrySetResult();
+        }
+
+        private static TaskCompletionSource NewSignal()
+            => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private sealed class BoundaryLease : IDisposable
+        {
+            private AsyncIpcGcBoundary? _owner;
+            private readonly bool _writer;
+
+            public BoundaryLease(AsyncIpcGcBoundary owner, bool writer)
+            {
+                _owner = owner;
+                _writer = writer;
+            }
+
+            public void Dispose()
+                => Interlocked.Exchange(ref _owner, null)?.Release(_writer);
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         if (_disposed)
@@ -531,17 +650,16 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             }
         }
 
-        bool releaseGcLease;
+        IDisposable? boundaryLease;
         lock (_gcLeaseGate)
         {
-            releaseGcLease = _gcLeaseToken != Guid.Empty;
             _gcLeaseToken = Guid.Empty;
             _gcLeaseClientId = Guid.Empty;
             _gcLeaseSessionGeneration = 0;
+            boundaryLease = _gcBoundaryLease;
+            _gcBoundaryLease = null;
         }
-        if (releaseGcLease)
-            _gcBoundary.Release();
-        _gcBoundary.Dispose();
+        boundaryLease?.Dispose();
     }
 
 }
