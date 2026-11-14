@@ -32,6 +32,9 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort CompactTombstones = 0x2117;
     public const ushort AcquireGcLease = 0x2118;
     public const ushort ReleaseGcLease = 0x2119;
+    public const ushort OpenGcReferenceScan = 0x211A;
+    public const ushort QueryGcReferenceScan = 0x211B;
+    public const ushort ReleaseGcReferenceScan = 0x211C;
 }
 
 public sealed record FldDatabaseIpcMutation(
