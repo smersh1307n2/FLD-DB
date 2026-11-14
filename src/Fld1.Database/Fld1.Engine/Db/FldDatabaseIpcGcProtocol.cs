@@ -90,7 +90,7 @@ public static class FldDatabaseIpcGcProtocol
         if (kind == FldDatabaseIpcGcReferenceKind.Receipt && authorEpoch == 0)
             throw new ArgumentOutOfRangeException(nameof(authorEpoch));
 
-        byte[] payload = new byte[QueryHeaderBytes + extra +
+        byte[] payload = new byte[QueryHeaderBytes + 16 + extra +
             (kind == FldDatabaseIpcGcReferenceKind.Receipt ? 8 : 0)];
         payload[0] = (byte)kind;
         token.TryWriteBytes(payload.AsSpan(1, 16), bigEndian: true, out _);
