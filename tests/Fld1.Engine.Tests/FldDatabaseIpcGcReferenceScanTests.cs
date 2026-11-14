@@ -92,6 +92,42 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
             await clientA.ReleaseGcLeaseAsync(lease);
             await clientA.ReleaseGcLeaseAsync(lease);
             Assert.Equal(author, await blocked.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            // A newly appended, unsealed WAL commit is a global fail-closed barrier:
+            // even unrelated receipt and ChangeId probes must report a live reference.
+            byte[] secondRecord = FldDatabase.NewRecordId();
+            byte[] secondChangeId = Id(0x59);
+            var secondMutation = new RemoteFieldWrite(
+                secondRecord, 6, "unsealed-gc-barrier"u8.ToArray(), 101, 1,
+                Id(0x58), secondChangeId, keyEpoch: 0, isTombstone: false,
+                originAuthorEpoch: 9, originSequence: 10);
+            var secondBatch = new RemoteBatchCommit(
+                senderPeer: Id(0x57),
+                senderEpoch: 7,
+                namespaceId: checked((int)namespaceId),
+                issuerNodeId: Id(0x58),
+                issuerEpoch: 9,
+                batchId: Id(0x5A),
+                cursorStart: 1,
+                cursorEnd: 1,
+                previousBatchDigest: Id(0x5B),
+                batchDigest: Id(0x5C),
+                recordsRoot: Id(0x5D),
+                writes: [secondMutation],
+                relayWrites: [],
+                protocolStateDelta: [0xA2]);
+            Assert.False(database.ApplyRemoteBatch(secondBatch).IsDuplicate);
+
+            Guid secondLease = await clientA.AcquireGcLeaseAsync();
+            FldDatabaseIpcGcReferenceScan unsealedScan = await clientA.OpenGcReferenceScanAsync();
+            Assert.True(unsealedScan.UnpublishedLocalDraftHorizon.Count > 0);
+            Assert.True(await clientA.HasGcReceiptReferenceAsync(
+                unsealedScan.Token, Id(0x60), authorEpoch: 12,
+                transportPeerEpoch: 13, batchId: Id(0x61)));
+            Assert.True(await clientA.HasGcChangeIdReferenceAsync(
+                unsealedScan.Token, Id(0x62)));
+            await clientA.ReleaseGcReferenceScanAsync(unsealedScan.Token);
+            await clientA.ReleaseGcLeaseAsync(secondLease);
         }
         finally
         {
