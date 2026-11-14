@@ -20,6 +20,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private readonly AsyncIpcGcBoundary _gcBoundary = new();
     private IDisposable? _gcBoundaryLease;
     private readonly object _gcLeaseGate = new();
+    private readonly TimeSpan _gcLeaseIdleTimeout;
+    private readonly Timer _gcLeaseTimer;
+    private long _gcLeaseExpiresAtUtcTicks;
     private Guid _gcLeaseToken;
     private Guid _gcLeaseClientId;
     private ulong _gcLeaseSessionGeneration;
@@ -37,10 +40,19 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         public bool Released { get; set; }
     }
 
-    public FldDatabaseIpcDispatcher(FldDatabase database, bool enableTombstoneGc = false)
+    public FldDatabaseIpcDispatcher(
+        FldDatabase database,
+        bool enableTombstoneGc = false,
+        TimeSpan? gcLeaseIdleTimeout = null)
     {
         _database = database ?? throw new ArgumentNullException(nameof(database));
         _enableTombstoneGc = enableTombstoneGc;
+        _gcLeaseIdleTimeout = gcLeaseIdleTimeout ?? TimeSpan.FromMinutes(5);
+        if (_gcLeaseIdleTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(gcLeaseIdleTimeout));
+        _gcLeaseTimer = new Timer(
+            static state => ((FldDatabaseIpcDispatcher)state!).ExpireGcLeaseTimer(),
+            this, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
     /// <summary>Stable for this dispatcher lifetime; changes when the Database host restarts.</summary>
@@ -79,6 +91,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _gcLeaseClientId = context.ClientId;
                 _gcLeaseSessionGeneration = context.SessionGeneration;
                 _gcBoundaryLease = boundaryLease;
+                RenewGcLeaseLocked();
                 return FldDatabaseIpcProtocol.EncodeGcLeaseToken(_gcLeaseToken);
             }
         }
@@ -108,6 +121,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _gcLeaseToken = Guid.Empty;
                 _gcLeaseClientId = Guid.Empty;
                 _gcLeaseSessionGeneration = 0;
+                _gcLeaseExpiresAtUtcTicks = 0;
+                _gcLeaseTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 boundaryLease = _gcBoundaryLease;
                 _gcBoundaryLease = null;
             }
@@ -184,6 +199,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _gcLeaseToken = Guid.Empty;
                 _gcLeaseClientId = Guid.Empty;
                 _gcLeaseSessionGeneration = 0;
+                _gcLeaseExpiresAtUtcTicks = 0;
+                _gcLeaseTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 boundaryLease = _gcBoundaryLease;
                 _gcBoundaryLease = null;
             }
@@ -263,6 +280,51 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         if (_gcLeaseToken == Guid.Empty || _gcLeaseClientId != context.ClientId ||
             _gcLeaseSessionGeneration != context.SessionGeneration)
             throw new InvalidOperationException("FLD GC reference scans require the active Host-wide GC lease.");
+        if (_gcLeaseExpiresAtUtcTicks <= DateTime.UtcNow.Ticks)
+        {
+            ClearGcLeaseLocked();
+            throw new InvalidOperationException("The FLD Host GC lease expired while idle.");
+        }
+        RenewGcLeaseLocked();
+    }
+
+    private void RenewGcLeaseLocked()
+    {
+        _gcLeaseExpiresAtUtcTicks = DateTime.UtcNow.Add(_gcLeaseIdleTimeout).Ticks;
+        _gcLeaseTimer.Change(_gcLeaseIdleTimeout, Timeout.InfiniteTimeSpan);
+    }
+
+    private void ExpireGcLeaseTimer()
+    {
+        lock (_gcLeaseGate)
+        {
+            if (_gcLeaseToken == Guid.Empty)
+                return;
+            long remainingTicks = _gcLeaseExpiresAtUtcTicks - DateTime.UtcNow.Ticks;
+            if (remainingTicks > 0)
+            {
+                _gcLeaseTimer.Change(TimeSpan.FromTicks(remainingTicks), Timeout.InfiniteTimeSpan);
+                return;
+            }
+            ClearGcLeaseLocked();
+        }
+    }
+
+    // Caller holds _gcLeaseGate. Expiry is also the final safety net if an idle
+    // client keeps its pipe open without issuing another scan operation.
+    private void ClearGcLeaseLocked()
+    {
+        foreach (GcReferenceScanHandle scan in _gcReferenceScans.Values)
+            scan.Snapshot.Dispose();
+        _gcReferenceScans.Clear();
+        _gcLeaseToken = Guid.Empty;
+        _gcLeaseClientId = Guid.Empty;
+        _gcLeaseSessionGeneration = 0;
+        _gcLeaseExpiresAtUtcTicks = 0;
+        _gcLeaseTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        IDisposable? boundaryLease = _gcBoundaryLease;
+        _gcBoundaryLease = null;
+        boundaryLease?.Dispose();
     }
 
     private byte[] HandleWriteBatch(
@@ -767,10 +829,13 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             _gcLeaseToken = Guid.Empty;
             _gcLeaseClientId = Guid.Empty;
             _gcLeaseSessionGeneration = 0;
+            _gcLeaseExpiresAtUtcTicks = 0;
+            _gcLeaseTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             boundaryLease = _gcBoundaryLease;
             _gcBoundaryLease = null;
         }
         boundaryLease?.Dispose();
+        _gcLeaseTimer.Dispose();
     }
 
 }
