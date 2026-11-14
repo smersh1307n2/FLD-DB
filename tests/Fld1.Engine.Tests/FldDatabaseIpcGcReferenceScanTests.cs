@@ -69,6 +69,7 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
             Guid lease = await clientA.AcquireGcLeaseAsync();
             FldDatabaseIpcGcReferenceScan scan = await clientA.OpenGcReferenceScanAsync();
             Assert.NotEqual(Guid.Empty, scan.Token);
+            Assert.Equal(checked((ushort)namespaceId), scan.NamespaceId);
             Assert.False(scan.HasSnapshotPin);
             Assert.Equal(0UL, scan.UnpublishedLocalDraftHorizon.Count);
 

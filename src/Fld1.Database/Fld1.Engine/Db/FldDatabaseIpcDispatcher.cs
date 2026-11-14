@@ -200,7 +200,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 new GcReferenceScanHandle(context.ClientId, context.SessionGeneration, snapshot));
             return FldDatabaseIpcGcProtocol.EncodeScanResponse(
                 new FldDatabaseIpcGcReferenceScan(
-                    token, snapshot.UnpublishedLocalDraftHorizon, snapshot.HasSnapshotPin));
+                    token, snapshot.UnpublishedLocalDraftHorizon, snapshot.HasSnapshotPin,
+                    checked((ushort)_database.NamespaceId)));
         }
     }
 

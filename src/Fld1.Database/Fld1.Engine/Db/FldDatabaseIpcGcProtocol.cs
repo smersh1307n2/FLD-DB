@@ -12,7 +12,8 @@ public enum FldDatabaseIpcGcReferenceKind : byte
 public sealed record FldDatabaseIpcGcReferenceScan(
     Guid Token,
     FldDraftHorizon UnpublishedLocalDraftHorizon,
-    bool HasSnapshotPin);
+    bool HasSnapshotPin,
+    ushort NamespaceId);
 
 public sealed record FldDatabaseIpcGcReferenceQuery(
     FldDatabaseIpcGcReferenceKind Kind,
@@ -25,7 +26,7 @@ public sealed record FldDatabaseIpcGcReferenceQuery(
 /// <summary>Bounded codecs for the session-owned Host GC reference snapshot.</summary>
 public static class FldDatabaseIpcGcProtocol
 {
-    private const int ScanResponseBytes = 37;
+    private const int ScanResponseBytes = 39;
     private const int QueryHeaderBytes = 17;
 
     public static byte[] EncodeScanResponse(FldDatabaseIpcGcReferenceScan scan)
@@ -43,12 +44,16 @@ public static class FldDatabaseIpcGcProtocol
         BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(24), horizon.MaxHlcWall);
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(32), horizon.MaxHlcLogical);
         payload[36] = scan.HasSnapshotPin ? (byte)1 : (byte)0;
+        if (scan.NamespaceId == 0)
+            throw new ArgumentOutOfRangeException(nameof(scan), "GC reference-scan namespace must be nonzero.");
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(37), scan.NamespaceId);
         return payload;
     }
 
     public static FldDatabaseIpcGcReferenceScan DecodeScanResponse(ReadOnlyMemory<byte> payload)
     {
-        if (payload.Length != ScanResponseBytes || payload.Span[36] > 1)
+        if (payload.Length != ScanResponseBytes || payload.Span[36] > 1 ||
+            BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[37..]) == 0)
             throw new InvalidDataException("FLD GC reference-scan response is invalid.");
         Guid token = new(payload.Span[..16], bigEndian: true);
         if (token == Guid.Empty)
@@ -59,7 +64,9 @@ public static class FldDatabaseIpcGcProtocol
             BinaryPrimitives.ReadUInt32LittleEndian(payload.Span[32..]));
         if (horizon.Count == 0 && (horizon.MaxHlcWall != 0 || horizon.MaxHlcLogical != 0))
             throw new InvalidDataException("FLD GC reference-scan draft horizon is inconsistent.");
-        return new FldDatabaseIpcGcReferenceScan(token, horizon, payload.Span[36] != 0);
+        return new FldDatabaseIpcGcReferenceScan(
+            token, horizon, payload.Span[36] != 0,
+            BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[37..]));
     }
 
     public static byte[] EncodeChangeIdQuery(Guid token, ReadOnlySpan<byte> changeId)
