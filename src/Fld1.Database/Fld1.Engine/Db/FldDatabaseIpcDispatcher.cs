@@ -530,6 +530,18 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _database.ReleaseProviderSnapshot(handle.Snapshot.Generation);
             }
         }
+
+        bool releaseGcLease;
+        lock (_gcLeaseGate)
+        {
+            releaseGcLease = _gcLeaseToken != Guid.Empty;
+            _gcLeaseToken = Guid.Empty;
+            _gcLeaseClientId = Guid.Empty;
+            _gcLeaseSessionGeneration = 0;
+        }
+        if (releaseGcLease)
+            _gcBoundary.Release();
+        _gcBoundary.Dispose();
     }
 
 }
