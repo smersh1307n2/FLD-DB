@@ -89,6 +89,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             IDisposable? boundaryLease;
             lock (_gcLeaseGate)
             {
+                // Releasing an already-released token is idempotent. This closes the
+                // uncertain-response window without allowing a caller to release a
+                // different live session's lease.
+                if (_gcLeaseToken == Guid.Empty)
+                    return ReadOnlyMemory<byte>.Empty;
                 if (_gcLeaseToken != token || _gcLeaseClientId != context.ClientId ||
                     _gcLeaseSessionGeneration != context.SessionGeneration)
                     throw new InvalidDataException("FLD GC lease token is unknown or belongs to another IPC session.");
@@ -194,6 +199,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         lock (_gcLeaseGate)
         {
             EnsureGcLeaseOwner(context);
+            if (_gcReferenceScans.Count != 0)
+                throw new InvalidOperationException("The Host GC lease already owns an active reference scan.");
             FldReferenceSnapshot snapshot = _database.OpenReferenceSnapshot();
             Guid token = Guid.NewGuid();
             _gcReferenceScans.Add(token,
@@ -240,10 +247,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         lock (_gcLeaseGate)
         {
             EnsureGcLeaseOwner(context);
-            if (!_gcReferenceScans.TryGetValue(token, out GcReferenceScanHandle? handle) ||
-                handle.ClientId != context.ClientId ||
+            if (!_gcReferenceScans.TryGetValue(token, out GcReferenceScanHandle? handle))
+                return Array.Empty<byte>(); // Idempotent retry after an uncertain release response.
+            if (handle.ClientId != context.ClientId ||
                 handle.SessionGeneration != context.SessionGeneration)
-                throw new InvalidDataException("FLD GC reference-scan token is unknown or belongs to another IPC session.");
+                throw new InvalidDataException("FLD GC reference-scan token belongs to another IPC session.");
             _gcReferenceScans.Remove(token);
             handle.Snapshot.Dispose();
         }
