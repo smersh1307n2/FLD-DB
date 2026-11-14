@@ -326,6 +326,30 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcRemoteApplyProtocol.DecodeReceipt(response);
     }
 
+    /// <summary>
+    /// Acquires the exclusive Host-wide boundary used to compose Metadata GC with
+    /// the FLD reference snapshot. The lease is scoped to this authenticated IPC session;
+    /// closing the connection releases it even if the caller crashes.
+    /// </summary>
+    public async Task<Guid> AcquireGcLeaseAsync(CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AcquireGcLease,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeGcLeaseToken(response);
+    }
+
+    /// <summary>Releases the exclusive Host-wide GC boundary.</summary>
+    public async Task ReleaseGcLeaseAsync(Guid token, CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeGcLeaseToken(token);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReleaseGcLease,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("FLD GC lease release response must be empty.");
+    }
+
     private async Task<ReadOnlyMemory<byte>> SendAsync(
         Guid operationId,
         ushort operationCode,
