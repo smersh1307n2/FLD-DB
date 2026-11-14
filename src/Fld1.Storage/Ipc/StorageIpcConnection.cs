@@ -29,6 +29,7 @@ public sealed class StorageIpcServer
 {
     private readonly string _pipeName;
     private readonly StorageIpcRequestHandler _handler;
+    private readonly Action<Guid, ulong>? _clientDisconnected;
     private readonly SemaphoreSlim _clientSlots;
     private readonly TaskCompletionSource _ready =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -37,7 +38,8 @@ public sealed class StorageIpcServer
     public StorageIpcServer(
         string pipeName,
         StorageIpcRequestHandler handler,
-        int maxConcurrentClients = 64)
+        int maxConcurrentClients = 64,
+        Action<Guid, ulong>? clientDisconnected = null)
     {
         ValidatePipeName(pipeName);
         if (maxConcurrentClients is < 1 or > 254)
@@ -46,6 +48,7 @@ public sealed class StorageIpcServer
 
         _pipeName = pipeName;
         _handler = handler ?? throw new ArgumentNullException(nameof(handler));
+        _clientDisconnected = clientDisconnected;
         MaxConcurrentClients = maxConcurrentClients;
         _clientSlots = new SemaphoreSlim(maxConcurrentClients, maxConcurrentClients);
     }
@@ -141,6 +144,8 @@ public sealed class StorageIpcServer
     {
         await using (pipe.ConfigureAwait(false))
         {
+            Guid clientId = Guid.Empty;
+            ulong generation = 0;
             try
             {
                 StorageIpcFrame? first = await StorageIpcProtocol.ReadAsync(
@@ -149,11 +154,11 @@ public sealed class StorageIpcServer
                     first.Value.Payload.Length != 16)
                     return;
 
-                Guid clientId = new(first.Value.Payload.Span);
+                clientId = new Guid(first.Value.Payload.Span);
                 if (clientId == Guid.Empty)
                     return;
 
-                ulong generation = CreateSessionGeneration();
+                generation = CreateSessionGeneration();
                 await StorageIpcProtocol.WriteAsync(pipe,
                     new StorageIpcFrame(StorageIpcFrameType.HelloAck, 0, generation, ReadOnlyMemory<byte>.Empty),
                     cancellationToken).ConfigureAwait(false);
@@ -209,6 +214,11 @@ public sealed class StorageIpcServer
             }
             catch (ObjectDisposedException)
             {
+            }
+            finally
+            {
+                if (clientId != Guid.Empty && generation != 0)
+                    _clientDisconnected?.Invoke(clientId, generation);
             }
         }
     }
