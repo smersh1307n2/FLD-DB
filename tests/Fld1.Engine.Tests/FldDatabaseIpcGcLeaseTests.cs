@@ -107,7 +107,7 @@ public sealed class FldDatabaseIpcGcLeaseTests
         using var shutdown = new CancellationTokenSource();
         using FldDatabase database = FldDatabase.Open(root, 0x763, Id(0x43));
         var dispatcher = new FldDatabaseIpcDispatcher(
-            database, gcLeaseIdleTimeout: TimeSpan.FromSeconds(2));
+            database, gcLeaseIdleTimeout: TimeSpan.FromSeconds(5));
         var server = new StorageIpcServer(
             StorageIpcEndpoint.ComputePipeName(root, 0),
             dispatcher.HandleAsync,
@@ -124,11 +124,11 @@ public sealed class FldDatabaseIpcGcLeaseTests
                 root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
 
             Guid lease = await client.AcquireGcLeaseAsync();
-            // Keep the operation alive for longer than the original two-second idle TTL.
+            // Keep the operation alive for longer than the original five-second idle TTL.
             // Each explicit renewal must move the Host deadline forward.
             for (int i = 0; i < 6; i++)
             {
-                await Task.Delay(500);
+                await Task.Delay(1000);
                 await client.RenewGcLeaseAsync(lease);
             }
 
