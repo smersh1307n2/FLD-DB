@@ -163,6 +163,66 @@ public sealed class FldDatabaseIpcHostProcessTests
     }
 
     [Fact]
+    public async Task Database_host_releases_snapshot_pins_when_ipc_session_disconnects()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), "fld-db-host-session-snapshot-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x435;
+        Guid clientId = Guid.NewGuid();
+        Process? host = null;
+
+        try
+        {
+            host = StartHost(root, namespaceId);
+            await WaitForEndpointAsync(root, namespaceId, host, TimeSpan.FromSeconds(45));
+
+            FldDatabaseIpcSnapshotHandle disconnectedSnapshot;
+            await using (var firstSession = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10)))
+            {
+                disconnectedSnapshot = await firstSession.OpenSnapshotAsync(Guid.NewGuid());
+            }
+
+            await using (var reconnected = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10)))
+            {
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                    reconnected.ReadSnapshotPageAsync(disconnectedSnapshot, 0, 16));
+
+                // The per-client limit is four. The disconnected session's snapshot
+                // must be released by the server callback before this session can own
+                // four fresh handles; retry only while disconnect cleanup is in flight.
+                var snapshots = new List<FldDatabaseIpcSnapshotHandle>();
+                for (int attempt = 0; attempt < 40 && snapshots.Count != 4; attempt++)
+                {
+                    try
+                    {
+                        while (snapshots.Count < 4)
+                            snapshots.Add(await reconnected.OpenSnapshotAsync(Guid.NewGuid()));
+                    }
+                    catch (StorageIpcRemoteException)
+                    {
+                        foreach (FldDatabaseIpcSnapshotHandle snapshot in snapshots)
+                            await reconnected.ReleaseSnapshotAsync(snapshot);
+                        snapshots.Clear();
+                        await Task.Delay(50);
+                    }
+                }
+
+                Assert.Equal(4, snapshots.Count);
+                foreach (FldDatabaseIpcSnapshotHandle snapshot in snapshots)
+                    Assert.True(await reconnected.ReleaseSnapshotAsync(snapshot));
+            }
+        }
+        finally
+        {
+            if (host is not null)
+                await StopHostAsync(host);
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task Separate_host_process_serializes_concurrent_provider_clients_and_replays_batches_after_restart()
     {
         string root = Path.Combine(Path.GetTempPath(), "fld-provider-host-process-" + Guid.NewGuid().ToString("N"));
