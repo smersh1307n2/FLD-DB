@@ -93,9 +93,7 @@ internal static class Program
             }
 
             var server = new StorageIpcServer(
-                StorageIpcEndpoint.ComputePipeName(root, 0),
-                HandleIpcRequestAsync,
-                clientDisconnected: dispatcher.ReleaseClientSession);
+                StorageIpcEndpoint.ComputePipeName(root, 0), HandleIpcRequestAsync);
             Task serverTask = server.RunAsync(shutdown.Token);
             try
             {
