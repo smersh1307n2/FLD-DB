@@ -86,7 +86,7 @@ public sealed class FldDatabaseReferenceSnapshotTests
             Assert.Equal(0UL, references.UnpublishedLocalDraftHorizon.Count);
             Assert.True(references.HasChangeIdReference(changeId));
             Assert.True(references.HasRecordReference(recordId, changeId));
-            Assert.True(references.HasReceiptReference(
+            Assert.False(references.HasReceiptReference(
                 Id(0x51), transportPeerEpoch: 6, authorEpoch: 8,
                 namespaceId: checked((ushort)namespaceId), batchId: Id(0x52)));
             Assert.False(references.HasReceiptReference(

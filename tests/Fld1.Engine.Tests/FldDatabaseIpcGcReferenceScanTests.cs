@@ -76,8 +76,9 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
             Assert.True(await clientA.HasGcChangeIdReferenceAsync(scan.Token, retainedChangeId));
             Assert.True(await clientA.HasGcRecordReferenceAsync(
                 scan.Token, retainedRecord, retainedChangeId));
-            Assert.True(await clientA.HasGcReceiptReferenceAsync(
-                scan.Token, sender, authorEpoch: 8, transportPeerEpoch: 6, batchId));
+            Assert.False(await clientA.HasGcReceiptReferenceAsync(
+                scan.Token, sender, authorEpoch: 8, transportPeerEpoch: 6, batchId),
+                "A sealed ApplyJournal receipt is independent FLD replay evidence, not a BIN-SYNC Metadata reference.");
             Assert.False(await clientA.HasGcChangeIdReferenceAsync(scan.Token, Id(0x79)));
 
             // The exclusive lease blocks unrelated sessions, but its owner can query
