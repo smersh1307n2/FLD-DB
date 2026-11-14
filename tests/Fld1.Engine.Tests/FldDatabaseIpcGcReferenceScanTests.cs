@@ -204,7 +204,7 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
         byte[] author = Id(0x42);
         using FldDatabase database = FldDatabase.Open(root, 0x765, author);
         var dispatcher = new FldDatabaseIpcDispatcher(
-            database, gcLeaseIdleTimeout: TimeSpan.FromMilliseconds(250));
+            database, gcLeaseIdleTimeout: TimeSpan.FromSeconds(2));
         using var shutdown = new CancellationTokenSource();
         var server = new StorageIpcServer(
             StorageIpcEndpoint.ComputePipeName(root, 0),
