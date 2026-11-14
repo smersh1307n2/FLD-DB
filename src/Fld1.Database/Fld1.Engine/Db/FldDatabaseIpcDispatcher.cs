@@ -134,6 +134,12 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         lock (_gcLeaseGate)
             ownsGcLease = _gcLeaseToken != Guid.Empty && _gcLeaseClientId == context.ClientId &&
                 _gcLeaseSessionGeneration == context.SessionGeneration;
+        if (ownsGcLease && operation.OperationCode is not (
+            FldDatabaseIpcOperationCodes.OpenGcReferenceScan or
+            FldDatabaseIpcOperationCodes.QueryGcReferenceScan or
+            FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan))
+            throw new InvalidOperationException(
+                "The FLD GC lease owner may only access its reference scan until the Host-wide lease is released.");
         IDisposable? dispatchLease = ownsGcLease
             ? null
             : await _gcBoundary.EnterReadAsync(cancellationToken).ConfigureAwait(false);

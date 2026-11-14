@@ -54,9 +54,20 @@ public sealed class FldDatabaseIpcGcLeaseTests
             Assert.False(blockedWriter.IsCompleted,
                 "A second IPC session must not commit a new local draft during the Host GC lease.");
 
-            // The lease owner must continue to use the Host for its reference scan
-            // and Metadata transaction while every other IPC session is excluded.
-            Assert.Equal(Id(0x41), await clientA.GetLocalAuthorAsync());
+            // The lease owner may query its immutable Host snapshot, but it must not
+            // mutate the database through its own IPC session while the scan is active.
+            FldDatabaseIpcGcReferenceScan ownerScan =
+                await clientA.OpenGcReferenceScanAsync();
+            Assert.Equal((ushort)0x762, ownerScan.NamespaceId);
+            Assert.Equal(0UL, ownerScan.UnpublishedLocalDraftHorizon.Count);
+            Assert.False(await clientA.HasGcChangeIdReferenceAsync(
+                ownerScan.Token, Id(0x42)));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                clientA.WriteBatchAsync(
+                    Guid.NewGuid(), clientSequence: 1,
+                    [new FldDatabaseIpcMutation(
+                        FldDatabase.NewRecordId(), 8, 1, false, "owner-write-during-gc"u8.ToArray())]));
+            await clientA.ReleaseGcReferenceScanAsync(ownerScan.Token);
             await clientA.ReleaseGcLeaseAsync(lease);
             Assert.Equal(Id(0x41), await blockedByLease.WaitAsync(TimeSpan.FromSeconds(5)));
             FldDatabaseIpcWriteResult committed = await blockedWriter.WaitAsync(TimeSpan.FromSeconds(5));
