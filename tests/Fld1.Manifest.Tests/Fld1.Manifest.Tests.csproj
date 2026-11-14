@@ -15,7 +15,6 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Fld1.Manifest\Fld1.Manifest.csproj" />
-    <ProjectReference Include="..\..\src\Fld1.Core\Fld1.Core.csproj" />
-  </ItemGroup>
+    <ProjectReference Include="..\..\src\Fld1.Database\Fld1.Database.csproj" />
+      </ItemGroup>
 </Project>

@@ -1,0 +1,729 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using Fld1.Run.Builder;
+using Fld1.Run.Reader;
+using Fld1.Storage.Engine;
+using Fld1.Manifest.Format;
+
+namespace Fld1.Engine.Db;
+
+/// <summary>Durable progress for one staged provider-generation replacement.</summary>
+public sealed record FldFullReplaceProgress(
+    Guid Generation,
+    ulong SourceFeedWatermark,
+    int ExpectedEntryCount,
+    int NextIndex,
+    byte[] ExpectedDigest,
+    bool IsCommitted);
+
+public sealed partial class FldDatabase
+{
+    private const uint FullReplaceStageMagic = 0x31524646; // "FFR1"
+    private const ushort FullReplaceStageVersion = 2;
+    private const int FullReplaceStagePageLimit = 4096;
+    private const int FullReplaceStagePageMaxBytes = 16 * 1024 * 1024;
+
+    private sealed record FullReplaceStageRun(
+        int StartIndex, int EntryCount, ulong RunId, byte[] MinRecordId, byte[] MaxRecordId);
+
+    private sealed record FullReplaceStageState(
+        Guid Generation,
+        uint NamespaceId,
+        ulong BaseManifestGeneration,
+        ulong BaseLastSealedCommitSeq,
+        ulong SourceFeedWatermark,
+        int ExpectedEntryCount,
+        int NextIndex,
+        byte[] ExpectedDigest,
+        byte[] LastSortKey,
+        ulong[] BaseRunIds,
+        FullReplaceStageRun[] Runs,
+        bool IsCommitted,
+        bool IsAborting,
+        int AbortRunIndex);
+
+    /// <summary>
+    /// Begin or idempotently resume a durable FLD provider replacement. The expected
+    /// digest is opaque to FLD; the protocol adapter verifies it before commit.
+    /// </summary>
+    public void BeginProviderReplacement(
+        Guid generation,
+        ulong sourceFeedWatermark,
+        int expectedEntryCount,
+        ReadOnlyMemory<byte> expectedDigest)
+    {
+        if (generation == Guid.Empty) throw new ArgumentException("Generation is required.", nameof(generation));
+        if (expectedEntryCount < 0) throw new ArgumentOutOfRangeException(nameof(expectedEntryCount));
+        if (expectedDigest.Length != 32) throw new ArgumentException("Expected digest must be SHA-256.", nameof(expectedDigest));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string path = FullReplaceStagePath(generation);
+            if (File.Exists(path))
+            {
+                FullReplaceStageState existing = ReadFullReplaceStage(path);
+                if (existing.NamespaceId != _namespaceId)
+                    throw new InvalidDataException("FULL_REPLACE stage namespace does not match its path.");
+                if (existing.IsAborting)
+                    throw new InvalidOperationException("FULL_REPLACE generation is being aborted and cannot be resumed.");
+                if (existing.Generation != generation ||
+                    existing.SourceFeedWatermark != sourceFeedWatermark ||
+                    existing.ExpectedEntryCount != expectedEntryCount ||
+                    !existing.ExpectedDigest.AsSpan().SequenceEqual(expectedDigest.Span))
+                    throw new InvalidDataException("FULL_REPLACE generation was reused with conflicting manifest data.");
+                return;
+            }
+
+            ManifestDocument manifest = _manifestStore.Load();
+            ulong[] baseRuns = manifest.Runs.Where(run => run.Ns == _namespaceId)
+                .Select(run => run.RunId).OrderBy(id => id).ToArray();
+            if (baseRuns.Length > 1_000_000)
+                throw new InvalidOperationException("FLD namespace Run set exceeds the bounded FULL_REPLACE staging index.");
+            var state = new FullReplaceStageState(
+                generation, _namespaceId, manifest.Generation, _lastSealedCommitSeq,
+                sourceFeedWatermark, expectedEntryCount, 0,
+                expectedDigest.ToArray(), new byte[19], baseRuns,
+                Array.Empty<FullReplaceStageRun>(), false, false, 0);
+            WriteFullReplaceStage(path, state);
+        }
+    }
+
+    /// <summary>Persist one contiguous, canonically ordered page as an immutable FLD Run.</summary>
+    public void StageProviderReplacementPage(
+        Guid generation,
+        int startIndex,
+        IReadOnlyList<FldProviderSnapshotEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        if (generation == Guid.Empty) throw new ArgumentException("Generation is required.", nameof(generation));
+        if (startIndex < 0) throw new ArgumentOutOfRangeException(nameof(startIndex));
+        if (entries.Count == 0 || entries.Count > FullReplaceStagePageLimit)
+            throw new ArgumentOutOfRangeException(nameof(entries), "Replacement page must contain 1..4096 entries.");
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string statePath = FullReplaceStagePath(generation);
+            if (!File.Exists(statePath)) throw new InvalidOperationException("FULL_REPLACE generation has not been begun.");
+            FullReplaceStageState state = ReadFullReplaceStage(statePath);
+            if (state.NamespaceId != _namespaceId)
+                throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
+            if (state.IsAborting)
+                throw new InvalidOperationException("Aborting FULL_REPLACE generation cannot accept more pages.");
+            if (IsFullReplaceStageCommitted(state, _manifestStore.Load()))
+                throw new InvalidOperationException("Committed FULL_REPLACE generation cannot accept more pages.");
+            if (startIndex != state.NextIndex)
+                throw new InvalidDataException("FULL_REPLACE page is not contiguous with the durable staging cursor.");
+            if (entries.Count > state.ExpectedEntryCount - state.NextIndex)
+                throw new InvalidDataException("FULL_REPLACE page exceeds the declared snapshot entry count.");
+
+            var builder = new RunBuilder(_namespaceId);
+            byte[] lastSortKey = state.LastSortKey.ToArray();
+            int pageBytes = 0;
+            ValidateReplacementEntry(entries[0]
+                ?? throw new ArgumentException("Replacement page contains a null entry.", nameof(entries)));
+            for (int i = 0; i < entries.Count; i++)
+            {
+                FldProviderSnapshotEntry entry = entries[i]
+                    ?? throw new ArgumentException("Replacement page contains a null entry.", nameof(entries));
+                ValidateReplacementEntry(entry);
+                pageBytes = checked(pageBytes + entry.Value.Length + 128);
+                if (pageBytes > FullReplaceStagePageMaxBytes)
+                    throw new InvalidDataException("FULL_REPLACE staging page exceeds the bounded 16 MiB payload budget.");
+                byte[] sortKey = FullReplaceSortKey(entry);
+                if (state.NextIndex + i > 0 && lastSortKey.AsSpan().SequenceCompareTo(sortKey) >= 0)
+                    throw new InvalidDataException("FULL_REPLACE entries must be strictly ordered and unique.");
+                byte[] value = entry.IsRecordTombstone
+                    ? FldLifecycle.DeadValue.ToArray()
+                    : entry.IsTombstone ? Array.Empty<byte>() : entry.Value;
+                builder.Add(new FieldWrite(
+                    entry.RecordId, entry.FieldId, value,
+                    entry.HlcWall, entry.HlcLogical, entry.AuthorNodeId,
+                    entry.IsRecordTombstone ? (ushort)0 : entry.KeyEpoch,
+                    isTombstone: !entry.IsRecordTombstone && entry.IsTombstone,
+                    changeId: entry.ChangeId,
+                    originAuthorEpoch: entry.OriginAuthorEpoch,
+                    originSequence: entry.OriginSequence));
+                lastSortKey = sortKey;
+            }
+
+            if (state.Runs.Length >= 1_000_000)
+                throw new InvalidOperationException("FULL_REPLACE staged Run index exceeds its bounded capacity.");
+            byte[] firstRecord = entries[0].RecordId;
+            byte[] lastRecord = entries[^1].RecordId;
+            byte[] runBytes = builder.Build();
+            var reader = new RunReader(runBytes);
+            if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+                throw new InvalidDataException($"FULL_REPLACE staging produced an invalid Run: {verify.Status} {verify.Detail}");
+            ulong runId = AllocateFullReplaceRunId();
+            string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
+            // Keep the legacy Run mirror until an explicit storage-format cutover.
+            // Publishing the mirror before the stage cursor means a crash cannot leave
+            // a durable stage reference whose compatibility file was never materialized.
+            WriteRunAtomically(runPath, runBytes);
+
+            var stagedRun = new FullReplaceStageRun(
+                startIndex, entries.Count, runId, firstRecord.ToArray(), lastRecord.ToArray());
+            FullReplaceStageState updated = state with
+            {
+                NextIndex = checked(state.NextIndex + entries.Count),
+                LastSortKey = lastSortKey,
+                Runs = state.Runs.Append(stagedRun).ToArray()
+            };
+            WriteFullReplaceStage(statePath, updated);
+        }
+    }
+
+    /// <summary>Read a bounded page from the durable staged generation for digest verification.</summary>
+    public FldProviderSnapshotPage ReadProviderReplacementPage(Guid generation, int afterIndex, int limit = 1024)
+    {
+        if (generation == Guid.Empty) throw new ArgumentException("Generation is required.", nameof(generation));
+        if (afterIndex < 0) throw new ArgumentOutOfRangeException(nameof(afterIndex));
+        if (limit <= 0 || limit > FullReplaceStagePageLimit) throw new ArgumentOutOfRangeException(nameof(limit));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string path = FullReplaceStagePath(generation);
+            if (!File.Exists(path)) throw new KeyNotFoundException("FULL_REPLACE staging generation does not exist.");
+            FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.NamespaceId != _namespaceId)
+                throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
+            if (state.IsAborting) throw new InvalidOperationException("FULL_REPLACE generation is being aborted.");
+            if (afterIndex > state.NextIndex) throw new ArgumentOutOfRangeException(nameof(afterIndex));
+            var result = new List<FldProviderSnapshotEntry>(Math.Min(limit, state.NextIndex - afterIndex));
+            int low = 0;
+            int high = state.Runs.Length;
+            while (low < high)
+            {
+                int middle = low + ((high - low) >> 1);
+                int runEnd = checked(state.Runs[middle].StartIndex + state.Runs[middle].EntryCount);
+                if (runEnd <= afterIndex) low = middle + 1;
+                else high = middle;
+            }
+            for (int runIndex = low; runIndex < state.Runs.Length && result.Count < limit; runIndex++)
+            {
+                FullReplaceStageRun run = state.Runs[runIndex];
+                if (run.StartIndex >= state.NextIndex) break;
+                IReadOnlyList<FldProviderSnapshotEntry> page = ReadFullReplaceRun(run);
+                int offset = Math.Max(0, afterIndex - run.StartIndex);
+                int count = Math.Min(page.Count - offset, limit - result.Count);
+                for (int i = 0; i < count; i++) result.Add(page[offset + i]);
+            }
+            int next = checked(afterIndex + result.Count);
+            return new FldProviderSnapshotPage(next, next < state.NextIndex, result);
+        }
+    }
+
+    public bool TryGetProviderReplacementProgress(Guid generation, out FldFullReplaceProgress? progress)
+    {
+        if (generation == Guid.Empty) throw new ArgumentException("Generation is required.", nameof(generation));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string path = FullReplaceStagePath(generation);
+            if (!File.Exists(path)) { progress = null; return false; }
+            FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.IsAborting) throw new InvalidOperationException("Aborting FULL_REPLACE generation cannot be committed.");
+            ManifestDocument manifest = _manifestStore.Load();
+            bool committed = IsFullReplaceStageCommitted(state, manifest);
+            if (committed && !state.IsCommitted)
+            {
+                state = state with { IsCommitted = true };
+                WriteFullReplaceStage(path, state);
+            }
+            progress = new FldFullReplaceProgress(
+                generation, state.SourceFeedWatermark, state.ExpectedEntryCount,
+                state.NextIndex, state.ExpectedDigest.ToArray(), committed);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Atomically replaces the active namespace Run set. The caller must verify the
+    /// staged canonical provider digest before passing the matching digest here.
+    /// </summary>
+    public void CommitProviderReplacement(Guid generation, ReadOnlyMemory<byte> verifiedDigest)
+    {
+        if (generation == Guid.Empty) throw new ArgumentException("Generation is required.", nameof(generation));
+        if (verifiedDigest.Length != 32) throw new ArgumentException("Verified digest must be SHA-256.", nameof(verifiedDigest));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string statePath = FullReplaceStagePath(generation);
+            if (!File.Exists(statePath)) throw new InvalidOperationException("FULL_REPLACE generation has not been begun.");
+            FullReplaceStageState state = ReadFullReplaceStage(statePath);
+            ManifestDocument manifest = _manifestStore.Load();
+            if (IsFullReplaceStageCommitted(state, manifest)) return;
+            if (!state.ExpectedDigest.AsSpan().SequenceEqual(verifiedDigest.Span))
+                throw new InvalidDataException("FULL_REPLACE commit proof does not match the staged manifest digest.");
+            if (state.NextIndex != state.ExpectedEntryCount)
+                throw new InvalidOperationException("FULL_REPLACE snapshot is incomplete.");
+            if (_dirty.Count != 0 || _overlay.Count != 0 || _manifestDirty ||
+                _pendingFlushedCommitSeq != _lastSealedCommitSeq)
+                throw new InvalidOperationException("FLD local writes must be committed and checkpointed before FULL_REPLACE generation switch.");
+            if (_databaseHasUnpublishedLocalChanges())
+                throw new InvalidOperationException("FLD unpublished Outbox entries block FULL_REPLACE generation switch.");
+
+            ulong[] currentRuns = manifest.Runs.Where(run => run.Ns == _namespaceId)
+                .Select(run => run.RunId).OrderBy(id => id).ToArray();
+            if (manifest.Generation < state.BaseManifestGeneration ||
+                !currentRuns.AsSpan().SequenceEqual(state.BaseRunIds) ||
+                _lastSealedCommitSeq != state.BaseLastSealedCommitSeq)
+                throw new InvalidOperationException("FLD active namespace generation changed while FULL_REPLACE was staged.");
+
+            if (state.Runs.Length == 0)
+            {
+                byte[] emptyRun = new RunBuilder(_namespaceId).Build();
+                ulong markerRunId = AllocateFullReplaceRunId();
+                string markerPath = Path.Combine(_dbDir, "runs", $"{markerRunId}.fld1");
+                _runBlobStore.PutImmutableBlob(RunBlobId(markerRunId), emptyRun);
+                WriteRunAtomically(markerPath, emptyRun);
+                state = state with
+                {
+                    Runs = [new FullReplaceStageRun(0, 0, markerRunId, new byte[16], new byte[16])]
+                };
+                WriteFullReplaceStage(statePath, state);
+            }
+
+            var replacementEntries = state.Runs.Select(run => new RunEntry
+            {
+                RunId = run.RunId,
+                Level = 0,
+                Ns = _namespaceId,
+                MinRec = run.MinRecordId,
+                MaxRec = run.MaxRecordId,
+                SeqLo = 0,
+                SeqHi = state.BaseLastSealedCommitSeq
+            }).ToList();
+            var oldRuns = _runs.Select(run => (run.runId, run.path)).ToArray();
+            var replacementRuns = new List<(ulong runId, string path, byte[]? cached)>(state.Runs.Length);
+            foreach (FullReplaceStageRun run in state.Runs)
+            {
+                string runPath = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
+                if (!_runBlobStore.TryOpenRead(RunBlobId(run.RunId), out StorageBlobReader? blobReader) ||
+                    blobReader is null)
+                    throw new InvalidDataException($"FULL_REPLACE staged Run {run.RunId} blob is missing or incomplete.");
+                byte[] runBytes;
+                using (blobReader)
+                    runBytes = blobReader.ReadAllBytes();
+                var runReader = new RunReader(runBytes);
+                if (!runReader.TryValidate(out var runVerify) || runReader.NamespaceId != _namespaceId)
+                    throw new InvalidDataException($"FULL_REPLACE staged Run failed pre-switch validation: {runVerify.Status} {runVerify.Detail}");
+                WriteRunAtomically(runPath, runBytes); // Keep the legacy FLD1 Run mirror until an explicit format cutover.
+                replacementRuns.Add((run.RunId, runPath, runBytes));
+            }
+
+            var updatedRuns = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
+            updatedRuns.AddRange(replacementEntries);
+            _manifestStore.Update(current => CloneManifest(
+                current, lastFlushed: state.BaseLastSealedCommitSeq, runs: updatedRuns));
+
+            _runs.Clear();
+            _runs.AddRange(replacementRuns);
+            state = state with { IsCommitted = true };
+            try { WriteFullReplaceStage(statePath, state); }
+            catch { _faulted = true; throw; }
+
+            HashSet<ulong>? pinned = GetPinnedProviderSnapshotRunIds();
+            foreach (var oldRun in oldRuns)
+            {
+                if (pinned is null || pinned.Contains(oldRun.runId)) continue;
+                try
+                {
+                    _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
+                    if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
+                }
+                catch { /* The manifest is authoritative; orphan collection retries later. */ }
+            }
+        }
+    }
+
+    /// <summary>Discard a staged, uncommitted generation in bounded run-file batches.</summary>
+    public bool AbortProviderReplacement(Guid generation, int limit)
+    {
+        if (generation == Guid.Empty) throw new ArgumentException("Generation is required.", nameof(generation));
+        if (limit <= 0 || limit > FullReplaceStagePageLimit) throw new ArgumentOutOfRangeException(nameof(limit));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            string path = FullReplaceStagePath(generation);
+            if (!File.Exists(path)) return true;
+            if (!RecoverFullReplaceStageCommitMarkers()) return false;
+            FullReplaceStageState state = ReadFullReplaceStage(path);
+            if (state.NamespaceId != _namespaceId)
+                throw new InvalidDataException("FULL_REPLACE stage belongs to a different FLD namespace.");
+            if (state.IsCommitted || IsFullReplaceStageCommitted(state, _manifestStore.Load()))
+                throw new InvalidOperationException("Committed FULL_REPLACE generation cannot be aborted.");
+            if (!state.IsAborting)
+            {
+                state = state with { IsAborting = true, AbortRunIndex = 0 };
+                WriteFullReplaceStage(path, state);
+            }
+            int start = state.AbortRunIndex;
+            int end = Math.Min(state.Runs.Length, checked(start + limit));
+
+            // Persist the abort cursor before deleting any bytes. A crash can then
+            // leave only unreferenced orphans, never a stage cursor that still points
+            // at a Run ID whose blob/mirror may already have been deleted.
+            state = state with { AbortRunIndex = end };
+            WriteFullReplaceStage(path, state);
+
+            for (int i = start; i < end; i++)
+            {
+                string runPath = Path.Combine(_dbDir, "runs", $"{state.Runs[i].RunId}.fld1");
+                try
+                {
+                    _runBlobStore.DeleteBlob(RunBlobId(state.Runs[i].RunId));
+                    if (File.Exists(runPath)) File.Delete(runPath);
+                }
+                catch
+                {
+                    // Retry the first failed Run when possible. If persisting this
+                    // rewind also fails, the stage metadata becomes untrusted and
+                    // future Run allocation fails closed.
+                    try { WriteFullReplaceStage(path, state with { AbortRunIndex = i }); }
+                    catch { _fullReplaceStageMetadataHealthy = false; }
+                    return false;
+                }
+            }
+
+            if (end == state.Runs.Length)
+            {
+                File.Delete(path);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    private bool _databaseHasUnpublishedLocalChanges()
+    {
+        FldDraftHorizon horizon = ReadUnpublishedLocalDraftHorizon();
+        return horizon.Count != 0 || GetOutboxHighWatermark() != GetOutboxWatermark();
+    }
+
+    private ulong AllocateFullReplaceRunId() => AllocateRunId();
+
+    private string FullReplaceStagePath(Guid generation)
+        => Path.Combine(_dbDir, "full-replace-staging", $"ns_{_namespaceId}_{generation:N}.bin");
+
+    private static byte[] FullReplaceSortKey(FldProviderSnapshotEntry entry)
+    {
+        byte[] key = new byte[19];
+        entry.RecordId.CopyTo(key, 0);
+        key[16] = entry.IsRecordTombstone ? (byte)0 : (byte)1;
+        BinaryPrimitives.WriteUInt16BigEndian(key.AsSpan(17), entry.IsRecordTombstone ? (ushort)0 : entry.FieldId);
+        return key;
+    }
+
+    private static void ValidateReplacementEntry(FldProviderSnapshotEntry entry)
+    {
+        if (entry.RecordId is null || entry.RecordId.Length != 16 ||
+            entry.AuthorNodeId is null || entry.AuthorNodeId.Length != 16 ||
+            entry.Value is null || entry.ChangeId is null ||
+            entry.ChangeId.Length is not (0 or 16) ||
+            (entry.OriginAuthorEpoch == 0) != (entry.OriginSequence == 0) ||
+            (entry.OriginAuthorEpoch != 0 && entry.ChangeId.Length != 16) ||
+            entry.HlcWall == 0)
+            throw new InvalidDataException("FULL_REPLACE entry violates the canonical FLD provider snapshot contract.");
+        if (entry.IsRecordTombstone)
+        {
+            if (entry.FieldId != FldLifecycle.FieldId || entry.IsTombstone ||
+                entry.KeyEpoch != 0 || entry.Value.Length != 0)
+                throw new InvalidDataException("FULL_REPLACE record tombstone is not canonical.");
+        }
+        else if (entry.FieldId == FldLifecycle.FieldId ||
+            (entry.IsTombstone && entry.Value.Length != 0))
+            throw new InvalidDataException("FULL_REPLACE field entry is not canonical.");
+    }
+
+    private IReadOnlyList<FldProviderSnapshotEntry> ReadFullReplaceRun(FullReplaceStageRun run)
+    {
+        if (!_runBlobStore.TryOpenRead(RunBlobId(run.RunId), out StorageBlobReader? blobReader) ||
+            blobReader is null)
+            throw new InvalidDataException("FULL_REPLACE staged Run blob is missing or incomplete.");
+        byte[] runBytes;
+        using (blobReader)
+            runBytes = blobReader.ReadAllBytes();
+        var reader = new RunReader(runBytes);
+        if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+            throw new InvalidDataException($"FULL_REPLACE staged Run is invalid: {verify.Status} {verify.Detail}");
+        var result = new List<FldProviderSnapshotEntry>(run.EntryCount);
+        byte[] recordId = new byte[16];
+        for (uint i = 0; i < reader.NumClusters; i++)
+        {
+            if (!reader.TryReadRecordIdAt(i, recordId))
+                throw new InvalidDataException("FULL_REPLACE staged Run has an invalid RecordId index.");
+            var recordEntries = new List<FldProviderSnapshotEntry>();
+            reader.ScanFieldIds(recordId, fieldId =>
+            {
+                if (!reader.TryGetField(recordId, fieldId, out RunFieldState field))
+                    throw new InvalidDataException("FULL_REPLACE staged Run field index is inconsistent.");
+                if (fieldId == FldLifecycle.FieldId)
+                {
+                    if (field.Value.Span.SequenceEqual(FldLifecycle.DeadValue))
+                    {
+                        recordEntries.Add(new FldProviderSnapshotEntry(
+                            recordId.ToArray(), FldLifecycle.FieldId, Array.Empty<byte>(),
+                            field.Wall, field.Logical, field.AuthorNodeId.ToArray(), 0,
+                            false, field.ChangeId.ToArray(), field.OriginAuthorEpoch,
+                            field.OriginSequence, true));
+                    }
+                    else if (!field.Value.Span.SequenceEqual(FldLifecycle.AliveValue))
+                        throw new InvalidDataException("FULL_REPLACE staged lifecycle value is not canonical.");
+                    return;
+                }
+                recordEntries.Add(new FldProviderSnapshotEntry(
+                    recordId.ToArray(), fieldId, field.Value.ToArray(),
+                    field.Wall, field.Logical, field.AuthorNodeId.ToArray(), field.KeyEpoch,
+                    field.IsTombstone, field.ChangeId.ToArray(), field.OriginAuthorEpoch,
+                    field.OriginSequence, false));
+            });
+            result.AddRange(recordEntries);
+        }
+        if (result.Count != run.EntryCount)
+            throw new InvalidDataException("FULL_REPLACE staged Run entry count differs from its durable page index.");
+        if (result.Count != 0 &&
+            (!result[0].RecordId.AsSpan().SequenceEqual(run.MinRecordId) ||
+             !result[^1].RecordId.AsSpan().SequenceEqual(run.MaxRecordId)))
+            throw new InvalidDataException("FULL_REPLACE staged Run record bounds differ from its durable page index.");
+        byte[] previousSortKey = new byte[19];
+        for (int i = 0; i < result.Count; i++)
+        {
+            byte[] sortKey = FullReplaceSortKey(result[i]);
+            if (i != 0 && previousSortKey.AsSpan().SequenceCompareTo(sortKey) >= 0)
+                throw new InvalidDataException("FULL_REPLACE staged Run entries are not in canonical unique order.");
+            previousSortKey = sortKey;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Recover the commit marker if the atomic manifest switch completed immediately
+    /// before a process crash. Called during database open before orphan Run collection.
+    /// </summary>
+    private bool RecoverFullReplaceStageCommitMarkers()
+    {
+        string directory = Path.Combine(_dbDir, "full-replace-staging");
+        if (!Directory.Exists(directory))
+        {
+            _fullReplaceStageMetadataHealthy = true;
+            return true;
+        }
+        try
+        {
+            ManifestDocument manifest = _manifestStore.Load();
+            foreach (string path in Directory.EnumerateFiles(directory, "*.bin"))
+            {
+                FullReplaceStageState state = ReadFullReplaceStage(path);
+                bool changed = false;
+
+                if (state.IsAborting)
+                {
+                    // Recover old abort batches that deleted a prefix before persisting
+                    // AbortRunIndex. Only a contiguous missing prefix can be skipped:
+                    // the old deleter stopped at the first failed Run.
+                    int next = state.AbortRunIndex;
+                    while (next < state.Runs.Length)
+                    {
+                        FullReplaceStageRun run = state.Runs[next];
+                        string runPath = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
+                        if (File.Exists(runPath) || _runBlobStore.ContainsBlob(RunBlobId(run.RunId)))
+                            break;
+                        next++;
+                    }
+                    if (next != state.AbortRunIndex)
+                    {
+                        state = state with { AbortRunIndex = next };
+                        changed = true;
+                    }
+                }
+
+                if (!state.IsCommitted && IsFullReplaceStageCommitted(state, manifest))
+                {
+                    state = state with { IsCommitted = true };
+                    changed = true;
+                }
+
+                if (changed) WriteFullReplaceStage(path, state);
+            }
+            _fullReplaceStageMetadataHealthy = true;
+            return true;
+        }
+        catch
+        {
+            // Corrupt stage metadata must never make its Run files eligible for GC or
+            // allow the root-global Run allocator to reuse an unknown staged identity.
+            _fullReplaceStageMetadataHealthy = false;
+            return false;
+        }
+    }
+
+    private HashSet<ulong>? GetUncommittedFullReplaceRunIds()
+    {
+        if (!RecoverFullReplaceStageCommitMarkers()) return null;
+        string directory = Path.Combine(_dbDir, "full-replace-staging");
+        var result = new HashSet<ulong>();
+        if (!Directory.Exists(directory)) return result;
+        try
+        {
+            foreach (string path in Directory.EnumerateFiles(directory, "*.bin"))
+            {
+                FullReplaceStageState state = ReadFullReplaceStage(path);
+                if (state.IsCommitted) continue;
+                // The abort cursor is write-ahead: its prefix is no longer live stage
+                // state and may be reclaimed even if a crash left orphan bytes behind.
+                int firstUnreleasedRun = state.IsAborting ? state.AbortRunIndex : 0;
+                for (int i = firstUnreleasedRun; i < state.Runs.Length; i++)
+                    result.Add(state.Runs[i].RunId);
+            }
+            return result;
+        }
+        catch
+        {
+            _fullReplaceStageMetadataHealthy = false;
+            return null;
+        }
+    }
+
+    private bool IsFullReplaceStageCommitted(FullReplaceStageState state, ManifestDocument manifest)
+    {
+        if (state.IsCommitted) return true;
+        if (state.IsAborting) return false;
+        var active = manifest.Runs.Where(run => run.Ns == state.NamespaceId)
+            .Select(run => run.RunId).ToHashSet();
+        return state.Runs.Length != 0 &&
+            state.Runs.All(run => active.Contains(run.RunId)) &&
+            state.BaseRunIds.All(runId => !active.Contains(runId));
+    }
+
+    private static void WriteFullReplaceStage(string path, FullReplaceStageState state)
+    {
+        string directory = Path.GetDirectoryName(path)!;
+        bool directoryExisted = Directory.Exists(directory);
+        Directory.CreateDirectory(directory);
+        if (!directoryExisted)
+            StorageDirectorySync.Flush(Path.GetDirectoryName(directory)!);
+        byte[] bytes = EncodeFullReplaceStage(state);
+        string temporary = path + ".tmp";
+        using (var stream = new FileStream(
+            temporary, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 4096, FileOptions.WriteThrough))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temporary, path, true);
+        StorageDirectorySync.Flush(directory);
+    }
+
+    private static FullReplaceStageState ReadFullReplaceStage(string path)
+        => DecodeFullReplaceStage(File.ReadAllBytes(path));
+
+    private static byte[] EncodeFullReplaceStage(FullReplaceStageState state)
+    {
+        int length = checked(4 + 2 + 2 + 16 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 +
+            4 + state.BaseRunIds.Length * 8 + 4 + state.Runs.Length * 48 + 32);
+        byte[] bytes = new byte[length];
+        int offset = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), FullReplaceStageMagic); offset += 4;
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), FullReplaceStageVersion); offset += 2;
+        ushort flags = (ushort)((state.IsCommitted ? 1 : 0) | (state.IsAborting ? 2 : 0));
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), flags); offset += 2;
+        state.Generation.TryWriteBytes(bytes.AsSpan(offset, 16)); offset += 16;
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), state.NamespaceId); offset += 4;
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.BaseManifestGeneration); offset += 8;
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.BaseLastSealedCommitSeq); offset += 8;
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), state.SourceFeedWatermark); offset += 8;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.ExpectedEntryCount); offset += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.NextIndex); offset += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.AbortRunIndex); offset += 4;
+        state.ExpectedDigest.CopyTo(bytes, offset); offset += 32;
+        state.LastSortKey.CopyTo(bytes, offset); offset += 19;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.BaseRunIds.Length); offset += 4;
+        foreach (ulong runId in state.BaseRunIds) { BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), runId); offset += 8; }
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), state.Runs.Length); offset += 4;
+        foreach (FullReplaceStageRun run in state.Runs)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), run.StartIndex); offset += 4;
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), run.EntryCount); offset += 4;
+            BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), run.RunId); offset += 8;
+            run.MinRecordId.CopyTo(bytes, offset); offset += 16;
+            run.MaxRecordId.CopyTo(bytes, offset); offset += 16;
+        }
+        SHA256.HashData(bytes.AsSpan(0, offset)).CopyTo(bytes, offset);
+        return bytes;
+    }
+
+    private static FullReplaceStageState DecodeFullReplaceStage(byte[] bytes)
+    {
+        if (bytes.Length < 4 + 2 + 2 + 16 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + 32 + 19 + 4 + 4 + 32)
+            throw new InvalidDataException("FULL_REPLACE stage state is truncated.");
+        int checksumOffset = bytes.Length - 32;
+        byte[] checksum = SHA256.HashData(bytes.AsSpan(0, checksumOffset));
+        if (!CryptographicOperations.FixedTimeEquals(checksum, bytes.AsSpan(checksumOffset)))
+            throw new InvalidDataException("FULL_REPLACE stage state checksum mismatch.");
+        int offset = 0;
+        if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset)) != FullReplaceStageMagic) throw new InvalidDataException("FULL_REPLACE stage magic mismatch."); offset += 4;
+        if (BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)) != FullReplaceStageVersion) throw new InvalidDataException("FULL_REPLACE stage version mismatch."); offset += 2;
+        ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset)); offset += 2;
+        if ((flags & ~3) != 0 || flags == 3) throw new InvalidDataException("FULL_REPLACE stage flags are invalid.");
+        Guid generation = new(bytes.AsSpan(offset, 16)); offset += 16;
+        uint namespaceId = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        ulong baseManifestGeneration = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
+        ulong baseSealed = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
+        ulong watermark = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
+        int expected = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        int next = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        int abortRunIndex = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        byte[] digest = bytes.AsSpan(offset, 32).ToArray(); offset += 32;
+        byte[] lastSortKey = bytes.AsSpan(offset, 19).ToArray(); offset += 19;
+        int baseCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        if (generation == Guid.Empty || namespaceId > 0xFFFF || expected < 0 || next < 0 || next > expected || abortRunIndex < 0 || baseCount < 0 || baseCount > 1_000_000 || ((flags & 2) == 0 && abortRunIndex != 0))
+            throw new InvalidDataException("FULL_REPLACE stage scalar fields are invalid.");
+        if (offset + (long)baseCount * 8 + 4 > checksumOffset)
+            throw new InvalidDataException("FULL_REPLACE stage base-run index is truncated.");
+        var baseRuns = new ulong[baseCount];
+        ulong previousBaseRun = 0;
+        for (int i = 0; i < baseCount; i++)
+        {
+            baseRuns[i] = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
+            if (baseRuns[i] == 0 || (i != 0 && baseRuns[i] <= previousBaseRun))
+                throw new InvalidDataException("FULL_REPLACE base Run index is not strictly ordered.");
+            previousBaseRun = baseRuns[i];
+        }
+        int runCount = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+        if (runCount < 0 || runCount > 1_000_000 || abortRunIndex > runCount || offset + (long)runCount * 48 != checksumOffset)
+            throw new InvalidDataException("FULL_REPLACE stage run index is invalid.");
+        var runs = new FullReplaceStageRun[runCount];
+        int expectedStart = 0;
+        var uniqueRunIds = new HashSet<ulong>(baseRuns);
+        for (int i = 0; i < runCount; i++)
+        {
+            int start = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+            int count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset)); offset += 4;
+            ulong runId = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset)); offset += 8;
+            byte[] min = bytes.AsSpan(offset, 16).ToArray(); offset += 16;
+            byte[] max = bytes.AsSpan(offset, 16).ToArray(); offset += 16;
+            bool emptyMarker = expected == 0 && runCount == 1 && i == 0 && count == 0;
+            if (start != expectedStart || count < 0 || count > FullReplaceStagePageLimit ||
+                (count == 0 && !emptyMarker) || runId == 0 || !uniqueRunIds.Add(runId) ||
+                min.AsSpan().SequenceCompareTo(max) > 0)
+                throw new InvalidDataException("FULL_REPLACE stage page index is not canonical.");
+            expectedStart = checked(expectedStart + count);
+            runs[i] = new FullReplaceStageRun(start, count, runId, min, max);
+        }
+        if (expectedStart != next || abortRunIndex > runCount || digest.Length != 32 || lastSortKey.Length != 19 ||
+            ((flags & 1) != 0 && (next != expected || runCount == 0)))
+            throw new InvalidDataException("FULL_REPLACE stage cursor does not match its page index.");
+        return new FullReplaceStageState(
+            generation, namespaceId, baseManifestGeneration, baseSealed, watermark, expected, next,
+            digest, lastSortKey, baseRuns, runs, (flags & 1) != 0, (flags & 2) != 0, abortRunIndex);
+    }
+}

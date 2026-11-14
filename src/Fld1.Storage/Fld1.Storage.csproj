@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Fld1.Storage</RootNamespace>
+    <AssemblyName>Fld1.Storage</AssemblyName>
+    <Version>0.1.0-alpha</Version>
+    <Description>Domain-neutral durable storage primitives for embedded applications.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fld1.Storage.Tests" />
+    <InternalsVisibleTo Include="BinSync.Storage.Integration" />
+  </ItemGroup>
+</Project>

@@ -47,6 +47,28 @@ public class RunBuilderTests
     }
 
     [Fact]
+    public void Unpublished_identity_draft_with_epoch_and_zero_sequence_is_valid_provenance()
+    {
+        byte[] record = Rec(0xA6);
+        byte[] author = Author(0xA6);
+        byte[] changeId = new byte[16];
+        changeId[0] = 0xA7;
+
+        byte[] run = new RunBuilder(1)
+            .Add(record, 7, "draft"u8, wall: 124, logical: 0, author,
+                changeId: changeId, originAuthorEpoch: 6, originSequence: 0)
+            .Build();
+
+        RunVerifyResult verify = RunVerify.Verify(run);
+        Assert.True(verify.IsOk, verify.Detail);
+        var reader = new RunReader(run);
+        Assert.True(reader.TryGetField(record, 7, out RunFieldState state));
+        Assert.Equal(changeId, state.ChangeId.ToArray());
+        Assert.Equal(6U, state.OriginAuthorEpoch);
+        Assert.Equal(0UL, state.OriginSequence);
+    }
+
+    [Fact]
     public void Two_records_sorted_and_get()
     {
         // Ensure record order independent of insert order
