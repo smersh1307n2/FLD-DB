@@ -96,6 +96,19 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             }
         }
 
+        if (operation.OperationCode == FldDatabaseIpcOperationCodes.RenewGcLease)
+        {
+            Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(operation.Payload);
+            lock (_gcLeaseGate)
+            {
+                EnsureGcLeaseOwner(context);
+                if (_gcLeaseToken != token)
+                    throw new InvalidDataException("FLD GC lease renewal token is unknown.");
+                RenewGcLeaseLocked();
+            }
+            return ReadOnlyMemory<byte>.Empty;
+        }
+
         if (operation.OperationCode == FldDatabaseIpcOperationCodes.ReleaseGcLease)
         {
             Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(operation.Payload);
@@ -137,7 +150,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         if (ownsGcLease && operation.OperationCode is not (
             FldDatabaseIpcOperationCodes.OpenGcReferenceScan or
             FldDatabaseIpcOperationCodes.QueryGcReferenceScan or
-            FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan))
+            FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan or
+            FldDatabaseIpcOperationCodes.RenewGcLease))
             throw new InvalidOperationException(
                 "The FLD GC lease owner may only access its reference scan until the Host-wide lease is released.");
         IDisposable? dispatchLease = ownsGcLease

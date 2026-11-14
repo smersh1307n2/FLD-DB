@@ -339,6 +339,17 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcProtocol.DecodeGcLeaseToken(response);
     }
 
+    /// <summary>Renews the idle deadline of the exclusive Host-wide GC boundary.</summary>
+    public async Task RenewGcLeaseAsync(Guid token, CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeGcLeaseToken(token);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.RenewGcLease,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("FLD GC lease renewal response must be empty.");
+    }
+
     /// <summary>Releases the exclusive Host-wide GC boundary.</summary>
     public async Task ReleaseGcLeaseAsync(Guid token, CancellationToken cancellationToken = default)
     {
