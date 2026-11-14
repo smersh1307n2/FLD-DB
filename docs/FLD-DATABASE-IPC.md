@@ -89,14 +89,17 @@ that authenticated IPC session owns the lease, it may open one immutable referen
 index (0x211A), issue bounded exact-identity queries (0x211B), and release the index
 (0x211C). The index captures the unpublished local draft horizon, unsealed-WAL
 barrier, active/persisted provider snapshot-pin state, Outbox identities and
-ApplyJournal field references and the unsealed-WAL barrier in one Host commit-lock snapshot.
+ApplyJournal field references in one Host commit-lock snapshot.
 
 Scan tokens are bound to both ClientId and the live IPC session generation. A token
 from another client/session, an unknown token, or a query without the owning GC lease
 is rejected. Receipt queries are scoped to the Database Host's configured namespace.
-The caller must release the scan before releasing the GC lease. If the client
-disconnects or the Host stops, the dispatcher disposes every scan and releases the
-exclusive boundary; tokens are process-local and are never resumed after restart.
+The caller releases the scan before the lease in the normal path; releasing the lease
+also disposes any remaining scan. The lease has a five-minute idle timeout, refreshed
+by each owner scan operation. Expiry disposes the scan and releases the exclusive
+boundary even if the IPC pipe remains open. The caller must acquire a new lease and
+open a new scan after expiry; old tokens are never resumed. Disconnect and Host stop
+perform the same cleanup, and tokens are process-local across Host generations.
 
 The Host GC lease excludes other IPC sessions for the entire reference-scan and
 metadata-compaction interval, while allowing the lease owner to issue scan queries.
