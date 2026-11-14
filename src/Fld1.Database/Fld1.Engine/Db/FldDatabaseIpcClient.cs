@@ -350,6 +350,63 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
             throw new InvalidDataException("FLD GC lease release response must be empty.");
     }
 
+    /// <summary>Opens one immutable Host reference index while the caller owns the GC lease.</summary>
+    public async Task<FldDatabaseIpcGcReferenceScan> OpenGcReferenceScanAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.OpenGcReferenceScan,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeScanResponse(response);
+    }
+
+    public async Task<bool> HasGcChangeIdReferenceAsync(
+        Guid token, ReadOnlyMemory<byte> changeId,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcGcProtocol.EncodeChangeIdQuery(token, changeId.Span);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.QueryGcReferenceScan,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeBooleanResponse(response);
+    }
+
+    public async Task<bool> HasGcRecordReferenceAsync(
+        Guid token, ReadOnlyMemory<byte> recordId, ReadOnlyMemory<byte> tombstoneChangeId,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcGcProtocol.EncodeRecordQuery(
+            token, recordId.Span, tombstoneChangeId.Span);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.QueryGcReferenceScan,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeBooleanResponse(response);
+    }
+
+    public async Task<bool> HasGcReceiptReferenceAsync(
+        Guid token, ReadOnlyMemory<byte> senderPeer, uint authorEpoch,
+        uint transportPeerEpoch, ReadOnlyMemory<byte> batchId,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcGcProtocol.EncodeReceiptQuery(
+            token, senderPeer.Span, authorEpoch, transportPeerEpoch, batchId.Span);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.QueryGcReferenceScan,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeBooleanResponse(response);
+    }
+
+    public async Task ReleaseGcReferenceScanAsync(
+        Guid token, CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcGcProtocol.EncodeToken(token);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("FLD GC reference-scan release response must be empty.");
+    }
+
     private async Task<ReadOnlyMemory<byte>> SendAsync(
         Guid operationId,
         ushort operationCode,

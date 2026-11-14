@@ -51,6 +51,12 @@ All integers are little-endian. The Storage IPC operation envelope carries Opera
 | CommitPublishedOrigins | 0x2114 | Versioned bounded list of RecordId/FieldId/ChangeId/OriginAuthorEpoch/OriginSequence stamps; identity-only and idempotent |
 | TryGetMetadataStoreOwnedPublicationCutover | 0x2115 | empty payload; returns Exists (u8) + NodeOutboxHighWatermark (u64) |
 | EnableMetadataStoreOwnedPublication | 0x2116 | NodeOutboxHighWatermark (u64); immutable durable cutover, empty response |
+| CompactTombstones | 0x2117 | Bounded exact-candidate list; Host revalidates under the database commit monitor |
+| AcquireGcLease | 0x2118 | empty; returns a session-owned Host-wide exclusive GC lease token |
+| ReleaseGcLease | 0x2119 | GC lease token (16 B); releases the Host-wide boundary |
+| OpenGcReferenceScan | 0x211A | empty; requires the GC lease and returns scan token + draft horizon + snapshot-pin state |
+| QueryGcReferenceScan | 0x211B | Reference kind + scan token + exact ChangeId, RecordId/ChangeId pair, or receipt identity; returns one boolean |
+| ReleaseGcReferenceScan | 0x211C | scan token (16 B); releases the immutable Host reference index |
 | ReadCurrentMetadata | 0x210F | RecordId (16 bytes), FieldId (u16); fixed metadata response includes value length, HLC, author, key epoch, tombstone, ChangeId and origin coordinates |
 | ReadCurrentValueChunk | 0x2110 | RecordId (16 bytes), FieldId (u16), expected ChangeId (16 bytes), ValueOffset (u32), MaxChunkBytes (u32); returns Data, Missing or Changed plus one bounded value slice |
 
@@ -75,6 +81,30 @@ A WriteBatch is applied to the private Database overlay while the commit lock is
 ReadField is serialized under the same Database commit lock. Its encoded found/value response is committed as a receipt-only operation, so retry returns the original read result even if the field changes later. A receipt-only read does not fabricate a local field mutation or Outbox entry.
 
 AcknowledgeReceipts advances the client's durable contiguous receipt watermark. It does not acknowledge or compact the synchronization Outbox. The two mechanisms have different consumers and retention semantics.
+
+## Host GC reference-scan IPC (implemented)
+
+Physical-GC clients first acquire the exclusive Host-wide GC lease (0x2118). While
+that authenticated IPC session owns the lease, it may open one immutable reference
+index (0x211A), issue bounded exact-identity queries (0x211B), and release the index
+(0x211C). The index captures the unpublished local draft horizon, unsealed-WAL
+barrier, active/persisted provider snapshot-pin state, Outbox identities and
+ApplyJournal field/receipt references in one Host commit-lock snapshot.
+
+Scan tokens are bound to both ClientId and the live IPC session generation. A token
+from another client/session, an unknown token, or a query without the owning GC lease
+is rejected. Receipt queries are scoped to the Database Host's configured namespace.
+The caller must release the scan before releasing the GC lease. If the client
+disconnects or the Host stops, the dispatcher disposes every scan and releases the
+exclusive boundary; tokens are process-local and are never resumed after restart.
+
+The Host GC lease excludes other IPC sessions for the entire reference-scan and
+metadata-compaction interval, while allowing the lease owner to issue scan queries.
+The reference index is immutable and query operations do not rescan WAL, Outbox or
+ApplyJournal per candidate. A positive query means the exact identity remains
+referenced; callers must fail closed on any IPC error or uncertain completion.
+This mechanism supplies reference evidence, not a retention horizon: signed roster,
+frontier, checkpoint and feature-flag checks remain independently mandatory.
 
 ## Snapshot IPC (implemented)
 

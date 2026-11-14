@@ -23,6 +23,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private Guid _gcLeaseToken;
     private Guid _gcLeaseClientId;
     private ulong _gcLeaseSessionGeneration;
+    private readonly Dictionary<Guid, GcReferenceScanHandle> _gcReferenceScans = new();
+
+    private sealed record GcReferenceScanHandle(
+        Guid ClientId, ulong SessionGeneration, FldReferenceSnapshot Snapshot);
 
     private sealed class IpcSnapshotHandle(Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot)
     {
@@ -88,6 +92,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 if (_gcLeaseToken != token || _gcLeaseClientId != context.ClientId ||
                     _gcLeaseSessionGeneration != context.SessionGeneration)
                     throw new InvalidDataException("FLD GC lease token is unknown or belongs to another IPC session.");
+                foreach (Guid scanToken in _gcReferenceScans
+                    .Where(pair => pair.Value.ClientId == context.ClientId &&
+                        pair.Value.SessionGeneration == context.SessionGeneration)
+                    .Select(pair => pair.Key).ToArray())
+                {
+                    _gcReferenceScans[scanToken].Snapshot.Dispose();
+                    _gcReferenceScans.Remove(scanToken);
+                }
                 _gcLeaseToken = Guid.Empty;
                 _gcLeaseClientId = Guid.Empty;
                 _gcLeaseSessionGeneration = 0;
@@ -132,6 +144,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover => HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
                 FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication => HandleEnableMetadataStoreOwnedPublication(operation.Payload),
                 FldDatabaseIpcOperationCodes.CompactTombstones => HandleCompactTombstones(operation.Payload),
+                FldDatabaseIpcOperationCodes.OpenGcReferenceScan => HandleOpenGcReferenceScan(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.QueryGcReferenceScan => HandleQueryGcReferenceScan(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan => HandleReleaseGcReferenceScan(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.GetOutboxHighWatermark => HandleGetOutboxHighWatermark(operation.Payload),
                 FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
                 FldDatabaseIpcOperationCodes.ReadCurrentValueChunk => HandleReadCurrentValueChunk(operation.Payload),
@@ -150,6 +165,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         IDisposable? boundaryLease = null;
         lock (_gcLeaseGate)
         {
+            foreach (Guid scanToken in _gcReferenceScans
+                .Where(pair => pair.Value.ClientId == clientId &&
+                    pair.Value.SessionGeneration == sessionGeneration)
+                .Select(pair => pair.Key).ToArray())
+            {
+                _gcReferenceScans[scanToken].Snapshot.Dispose();
+                _gcReferenceScans.Remove(scanToken);
+            }
             if (_gcLeaseToken != Guid.Empty && _gcLeaseClientId == clientId &&
                 _gcLeaseSessionGeneration == sessionGeneration)
             {
@@ -161,6 +184,76 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             }
         }
         boundaryLease?.Dispose();
+    }
+
+    private byte[] HandleOpenGcReferenceScan(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        if (!payload.IsEmpty)
+            throw new InvalidDataException("FLD GC reference-scan open payload must be empty.");
+        lock (_gcLeaseGate)
+        {
+            EnsureGcLeaseOwner(context);
+            FldReferenceSnapshot snapshot = _database.OpenReferenceSnapshot();
+            Guid token = Guid.NewGuid();
+            _gcReferenceScans.Add(token,
+                new GcReferenceScanHandle(context.ClientId, context.SessionGeneration, snapshot));
+            return FldDatabaseIpcGcProtocol.EncodeScanResponse(
+                new FldDatabaseIpcGcReferenceScan(
+                    token, snapshot.UnpublishedLocalDraftHorizon, snapshot.HasSnapshotPin));
+        }
+    }
+
+    private byte[] HandleQueryGcReferenceScan(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        FldDatabaseIpcGcReferenceQuery query = FldDatabaseIpcGcProtocol.DecodeQuery(payload);
+        lock (_gcLeaseGate)
+        {
+            EnsureGcLeaseOwner(context);
+            if (!_gcReferenceScans.TryGetValue(query.Token, out GcReferenceScanHandle? handle) ||
+                handle.ClientId != context.ClientId ||
+                handle.SessionGeneration != context.SessionGeneration)
+                throw new InvalidDataException("FLD GC reference-scan token is unknown or belongs to another IPC session.");
+
+            bool referenced = query.Kind switch
+            {
+                FldDatabaseIpcGcReferenceKind.ChangeId =>
+                    handle.Snapshot.HasChangeIdReference(query.FirstId),
+                FldDatabaseIpcGcReferenceKind.Record =>
+                    handle.Snapshot.HasRecordReference(query.FirstId, query.SecondId!),
+                FldDatabaseIpcGcReferenceKind.Receipt =>
+                    handle.Snapshot.HasReceiptReference(
+                        query.FirstId, query.AuthorEpoch, query.TransportPeerEpoch,
+                        checked((ushort)_database.NamespaceId), query.SecondId!),
+                _ => throw new InvalidDataException("FLD GC reference query kind is invalid.")
+            };
+            return FldDatabaseIpcGcProtocol.EncodeBooleanResponse(referenced);
+        }
+    }
+
+    private byte[] HandleReleaseGcReferenceScan(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        Guid token = FldDatabaseIpcGcProtocol.DecodeToken(payload);
+        lock (_gcLeaseGate)
+        {
+            EnsureGcLeaseOwner(context);
+            if (!_gcReferenceScans.TryGetValue(token, out GcReferenceScanHandle? handle) ||
+                handle.ClientId != context.ClientId ||
+                handle.SessionGeneration != context.SessionGeneration)
+                throw new InvalidDataException("FLD GC reference-scan token is unknown or belongs to another IPC session.");
+            _gcReferenceScans.Remove(token);
+            handle.Snapshot.Dispose();
+        }
+        return Array.Empty<byte>();
+    }
+
+    private void EnsureGcLeaseOwner(StorageIpcRequestContext context)
+    {
+        if (_gcLeaseToken == Guid.Empty || _gcLeaseClientId != context.ClientId ||
+            _gcLeaseSessionGeneration != context.SessionGeneration)
+            throw new InvalidOperationException("FLD GC reference scans require the active Host-wide GC lease.");
     }
 
     private byte[] HandleWriteBatch(
@@ -659,6 +752,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         IDisposable? boundaryLease;
         lock (_gcLeaseGate)
         {
+            foreach (GcReferenceScanHandle scan in _gcReferenceScans.Values)
+                scan.Snapshot.Dispose();
+            _gcReferenceScans.Clear();
             _gcLeaseToken = Guid.Empty;
             _gcLeaseClientId = Guid.Empty;
             _gcLeaseSessionGeneration = 0;
