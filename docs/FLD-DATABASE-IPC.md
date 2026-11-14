@@ -89,7 +89,7 @@ that authenticated IPC session owns the lease, it may open one immutable referen
 index (0x211A), issue bounded exact-identity queries (0x211B), and release the index
 (0x211C). The index captures the unpublished local draft horizon, unsealed-WAL
 barrier, active/persisted provider snapshot-pin state, Outbox identities and
-ApplyJournal field/receipt references in one Host commit-lock snapshot.
+ApplyJournal field references and the unsealed-WAL barrier in one Host commit-lock snapshot.
 
 Scan tokens are bound to both ClientId and the live IPC session generation. A token
 from another client/session, an unknown token, or a query without the owning GC lease
@@ -101,10 +101,20 @@ exclusive boundary; tokens are process-local and are never resumed after restart
 The Host GC lease excludes other IPC sessions for the entire reference-scan and
 metadata-compaction interval, while allowing the lease owner to issue scan queries.
 The reference index is immutable and query operations do not rescan WAL, Outbox or
-ApplyJournal per candidate. A positive query means the exact identity remains
-referenced; callers must fail closed on any IPC error or uncertain completion.
-This mechanism supplies reference evidence, not a retention horizon: signed roster,
-frontier, checkpoint and feature-flag checks remain independently mandatory.
+ApplyJournal per candidate. ChangeId and RecordId queries include dirty, unacknowledged
+Outbox and retained ApplyJournal field identities; active/persisted provider snapshot
+pins conservatively veto both horizons. Receipt queries report the global unsealed-WAL
+barrier only. A sealed ApplyJournal receipt is FLD's independent durable replay/recovery
+evidence, not a reference to the separate BIN-SYNC Metadata receipt row, so it does not
+block BIN-SYNC receipt compaction. This preserves independent ownership: FLD keeps its
+own APPLY replay evidence while BIN-SYNC retires transport receipts behind its signed
+retention checkpoint and durable receive-chain fence.
+
+A positive ChangeId/RecordId query means the exact identity remains referenced; a
+positive receipt query means an unsealed WAL could still replay an uncommitted receipt.
+Callers must fail closed on any IPC error or uncertain completion. This mechanism
+supplies reference evidence, not a retention horizon: signed roster, frontier,
+checkpoint and feature-flag checks remain independently mandatory.
 
 ## Snapshot IPC (implemented)
 
