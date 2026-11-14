@@ -43,8 +43,7 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
             protocolStateDelta: [0xA1]);
 
         using FldDatabase database = FldDatabase.Open(root, namespaceId, author);
-        ProviderApplyReceipt receipt = database.ApplyRemoteBatch(batch);
-        Assert.False(receipt.IsDuplicate);
+        Assert.False(database.ApplyRemoteBatch(batch).IsDuplicate);
         Assert.NotEqual(0UL, database.Checkpoint());
 
         var dispatcher = new FldDatabaseIpcDispatcher(database);
