@@ -57,6 +57,12 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             if (!operation.Payload.IsEmpty)
                 throw new InvalidDataException("FLD GC lease acquisition payload must be empty.");
+            lock (_gcLeaseGate)
+            {
+                if (_gcLeaseToken != Guid.Empty && _gcLeaseClientId == context.ClientId &&
+                    _gcLeaseSessionGeneration == context.SessionGeneration)
+                    throw new InvalidOperationException("This IPC session already owns the FLD GC lease.");
+            }
             IDisposable boundaryLease = await _gcBoundary.EnterWriteAsync(cancellationToken).ConfigureAwait(false);
             lock (_gcLeaseGate)
             {
