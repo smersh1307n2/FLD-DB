@@ -1749,7 +1749,7 @@ public sealed partial class FldDatabase : IDisposable
     private static FldTombstoneGcCandidate CreateTombstoneGcCandidate(
         ReadOnlySpan<byte> recordId, ushort fieldId, FieldResolver.Resolved resolved,
         bool isRecordTombstone, bool isFieldTombstone)
-        => new(
+        => FldTombstoneGcCandidate.CreateOwned(
             recordId.ToArray(),
             fieldId,
             resolved.ChangeId?.ToArray() ?? Array.Empty<byte>(),
