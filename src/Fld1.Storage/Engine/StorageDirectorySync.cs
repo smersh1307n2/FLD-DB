@@ -249,7 +249,7 @@ public static class StorageDirectorySync
     {
         EnsureSupportedWindowsNtfsVolume(sourcePath);
         string source = ToWindowsExtendedPath(sourcePath);
-        string destination = ToWindowsExtendedPath(destinationPath);
+        string destination = Path.GetFullPath(destinationPath);
         uint access = WindowsDeleteAccess;
         uint flags = WindowsFileFlagWriteThrough;
         if (directory)
@@ -276,7 +276,7 @@ public static class StorageDirectorySync
             nameof(WindowsFileRenameInfoHeader.RootDirectory)).ToInt32();
         int lengthOffset = Marshal.OffsetOf<WindowsFileRenameInfoHeader>(
             nameof(WindowsFileRenameInfoHeader.FileNameLength)).ToInt32();
-        int bufferLength = checked(nameOffset + destinationBytes.Length);
+        int bufferLength = checked(nameOffset + destinationBytes.Length + sizeof(char));
         IntPtr info = Marshal.AllocHGlobal(bufferLength);
         try
         {
@@ -287,6 +287,7 @@ public static class StorageDirectorySync
             Marshal.WriteIntPtr(info, rootOffset, IntPtr.Zero);
             Marshal.WriteInt32(info, lengthOffset, destinationBytes.Length);
             Marshal.Copy(destinationBytes, 0, IntPtr.Add(info, nameOffset), destinationBytes.Length);
+            Marshal.WriteInt16(info, nameOffset + destinationBytes.Length, 0);
             if (!WindowsSetFileInformationByHandle(
                     handle, WindowsFileRenameInfo, info, checked((uint)bufferLength)))
                 throw new IOException(
