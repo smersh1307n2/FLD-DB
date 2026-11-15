@@ -83,7 +83,8 @@ public class TombstoneGcSweepBench
     {
         Console.WriteLine(
             $"TOMBSTONE_GC_SWEEP_ALLOCATED_BYTES Count={TombstoneCount} PageLimit={PageLimit} Bytes={_lastGcAllocatedBytes}");
-        _database.Dispose();
+        if (_database is not null)
+            _database.Dispose();
         try { Directory.Delete(_directory, recursive: true); } catch { }
     }
 
@@ -125,26 +126,58 @@ public class TombstoneGcSweepBench
         return reclaimed;
     }
 
-    [Benchmark(Description = "Diagnostic: single-pass Tombstone-GC sampled peak memory")]
+    [Benchmark(Description = "Diagnostic: isolated single-pass Tombstone-GC peak memory")]
     public int ReclaimAllTombstonesInSinglePassWithPeakSampling()
     {
+        // Setup is performed by the BenchmarkDotNet parent process. Dispose its
+        // database before launching a fresh process so setup RSS cannot contaminate
+        // the measured process high-water mark.
+        _database.Dispose();
+        _database = null!;
+
+        string assembly = typeof(TombstoneGcSweepBench).Assembly.Location;
+        var startInfo = new System.Diagnostics.ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add(assembly);
+        startInfo.ArgumentList.Add("--tombstone-gc-probe-child");
+        startInfo.ArgumentList.Add(_directory);
+        startInfo.ArgumentList.Add(TombstoneCount.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        using var process = System.Diagnostics.Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start isolated Tombstone-GC peak probe process.");
+        string output = process.StandardOutput.ReadToEnd();
+        string error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (!string.IsNullOrWhiteSpace(output))
+            Console.WriteLine(output.TrimEnd());
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"Isolated Tombstone-GC peak probe exited with {process.ExitCode}: {error}");
+        return TombstoneCount;
+    }
+
+    public static int RunPeakProbeChild(string directory, int tombstoneCount)
+    {
+        using var database = FldDatabase.Open(directory, 0);
         using var sampler = new PeakMemorySampler();
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        int reclaimed = _database.CompactTombstones(static _ => true, TombstoneCount);
-        _lastGcAllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        int reclaimed = database.CompactTombstones(static _ => true, tombstoneCount);
         sampler.Stop();
         Console.WriteLine(
-            $"TOMBSTONE_GC_PEAK_SAMPLE Count={TombstoneCount} IntervalMs=2 " +
+            $"TOMBSTONE_GC_PEAK_SAMPLE Count={tombstoneCount} IntervalMs=2 " +
             $"BaselineWorkingSetBytes={sampler.BaselineWorkingSetBytes} " +
             $"PeakWorkingSetBytes={sampler.PeakWorkingSetBytes} " +
             $"WorkingSetDeltaBytes={sampler.PeakWorkingSetBytes - sampler.BaselineWorkingSetBytes} " +
             $"BaselineManagedHeapBytes={sampler.BaselineManagedHeapBytes} " +
             $"PeakManagedHeapBytes={sampler.PeakManagedHeapBytes} " +
             $"ManagedHeapDeltaBytes={sampler.PeakManagedHeapBytes - sampler.BaselineManagedHeapBytes}");
-        if (reclaimed != TombstoneCount)
+        if (reclaimed != tombstoneCount)
             throw new InvalidOperationException(
-                $"Peak-memory probe reclaimed {reclaimed}/{TombstoneCount} entries.");
-        return reclaimed;
+                $"Isolated peak-memory probe reclaimed {reclaimed}/{tombstoneCount} entries.");
+        return 0;
     }
 
     /// <summary>
