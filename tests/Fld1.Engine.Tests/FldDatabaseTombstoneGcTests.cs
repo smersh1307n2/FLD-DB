@@ -263,6 +263,56 @@ public sealed class FldDatabaseTombstoneGcTests
         }
     }
 
+    [Fact]
+    public void Tombstone_gc_reclaims_only_one_bounded_page_and_repeats_until_empty()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-pages-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x758;
+        byte[][] recordIds = Enumerable.Range(0, 3)
+            .Select(_ => FldDatabase.NewRecordId())
+            .ToArray();
+
+        try
+        {
+            using (var database = FldDatabase.Open(root, namespaceId, Id(0x71)))
+            {
+                foreach (byte[] recordId in recordIds)
+                    database.Put(recordId, 7, "live-value"u8);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+
+                foreach (byte[] recordId in recordIds)
+                    database.Delete(recordId, 7);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+                SealAndAcknowledgeOutbox(database);
+
+                for (int page = 0; page < recordIds.Length; page++)
+                {
+                    int reclaimed = database.CompactTombstones(
+                        static _ => true, limit: 1);
+                    Assert.Equal(1, reclaimed);
+
+                    int remaining = recordIds.Count(recordId =>
+                        database.TryResolve(recordId, 7, out var current) && current.IsTombstone);
+                    Assert.Equal(recordIds.Length - page - 1, remaining);
+                }
+
+                Assert.Equal(0, database.CompactTombstones(static _ => true, limit: 1));
+                foreach (byte[] recordId in recordIds)
+                    Assert.False(database.TryResolve(recordId, 7, out _));
+            }
+
+            using var reopened = FldDatabase.Open(root, namespaceId, Id(0x71));
+            foreach (byte[] recordId in recordIds)
+                Assert.False(reopened.TryResolve(recordId, 7, out _));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     private static void SealAndAcknowledgeOutbox(FldDatabase database)
     {
         ulong highWatermark = database.GetOutboxHighWatermark();
