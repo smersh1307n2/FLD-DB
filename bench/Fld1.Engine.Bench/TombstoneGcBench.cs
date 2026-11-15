@@ -53,7 +53,7 @@ public sealed class TombstoneGcBench
             _database.AcknowledgeOutbox(highWatermark, lease);
         }
 
-        if (_database.GetOutboxHighWatermark() != _database.GetOutboxAckedThrough())
+        if (_database.GetOutboxHighWatermark() != _database.GetOutboxWatermark())
             throw new InvalidOperationException("Tombstone benchmark Outbox prefix was not fully acknowledged.");
     }
 
