@@ -172,7 +172,7 @@ public sealed class RunBuilder
             var blob = new byte[clusterSize];
             var span = blob.AsSpan();
 
-            recordId.CopyTo(span.Slice(0, 16));
+            recordId.AsSpan().CopyTo(span.Slice(0, 16));
             BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(16), (ushort)fields.Length);
             ushort cflags = 0;
             if (dead) cflags |= (ushort)ClusterFlags.Dead;
