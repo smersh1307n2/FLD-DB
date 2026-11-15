@@ -88,6 +88,7 @@ public sealed partial class FldDatabase : IDisposable
     private readonly int _autoCheckpointOverlayFields;
     private readonly bool _truncateSealedWal;
     private readonly int _autoCompactRunCount;
+    private readonly Action<FldCompactionFaultPoint>? _compactionFaultInjector;
     private bool _disposed;
     private bool _faulted;
     private bool _fullReplaceStageMetadataHealthy = true;
@@ -112,7 +113,8 @@ public sealed partial class FldDatabase : IDisposable
         AtomicManifestStore manifestStore,
         int autoCheckpointOverlayFields = 0,
         bool truncateSealedWal = true,
-        int autoCompactRunCount = 0)
+        int autoCompactRunCount = 0,
+        Action<FldCompactionFaultPoint>? compactionFaultInjector = null)
     {
         _dbDir = dbDir;
         _namespaceId = namespaceId;
@@ -128,6 +130,7 @@ public sealed partial class FldDatabase : IDisposable
         _autoCheckpointOverlayFields = autoCheckpointOverlayFields;
         _truncateSealedWal = truncateSealedWal;
         _autoCompactRunCount = autoCompactRunCount;
+        _compactionFaultInjector = compactionFaultInjector;
         Uuid7.NewUuid7(_clientInstanceId);
     }
 
@@ -208,7 +211,8 @@ public sealed partial class FldDatabase : IDisposable
                     runStorage, runBlobStore, manifestStore,
                     options.AutoCheckpointOverlayFields,
                     options.TruncateSealedWal,
-                    options.AutoCompactRunCount);
+                    options.AutoCompactRunCount,
+                    options.CompactionFaultInjector);
 
                 db.LoadRunsFromManifest(manifest);
                 db.RecoverFullReplaceStageCommitMarkers();
@@ -1853,6 +1857,7 @@ public sealed partial class FldDatabase : IDisposable
             path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
             WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
+            InjectCompactionFault(FldCompactionFaultPoint.AfterReplacementRunDurable);
             outputRecordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
         }
 
@@ -1893,6 +1898,7 @@ public sealed partial class FldDatabase : IDisposable
             _faulted = true;
             throw;
         }
+        InjectCompactionFault(FldCompactionFaultPoint.AfterManifestAndOutboxPublished);
 
         _manifestDirty = false;
         _pendingFlushedCommitSeq = seqHi;
@@ -1906,17 +1912,22 @@ public sealed partial class FldDatabase : IDisposable
         HashSet<ulong>? pinnedRunIds = GetPinnedProviderSnapshotRunIds();
         foreach (var oldRun in oldRuns)
         {
+            bool deleted = false;
             try
             {
                 if (oldRun.runId == runId || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
                     continue;
                 _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
                 if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
+                deleted = true;
             }
             catch
             {
                 // Manifest already points at the replacement Run; stale files are collected on next open.
             }
+
+            if (deleted)
+                InjectCompactionFault(FldCompactionFaultPoint.AfterOldRunDeleted);
         }
 
         if (_truncateSealedWal)
@@ -3115,6 +3126,24 @@ public sealed partial class FldDatabase : IDisposable
         {
             EnsureHealthy();
             _wal.Rotate();
+        }
+    }
+
+    private void InjectCompactionFault(FldCompactionFaultPoint point)
+    {
+        if (_compactionFaultInjector is null)
+            return;
+        try
+        {
+            _compactionFaultInjector(point);
+        }
+        catch
+        {
+            // A failed durable compaction boundary is ambiguous until recovery
+            // selects the authoritative manifest generation. Do not continue using
+            // this in-memory instance after an injected or real boundary failure.
+            _faulted = true;
+            throw;
         }
     }
 

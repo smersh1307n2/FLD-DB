@@ -17,6 +17,9 @@
     <Fld1StorageProject Condition="'$(Fld1StorageProject)' == ''">$(MSBuildThisFileDirectory)../Fld1.Storage/Fld1.Storage.csproj</Fld1StorageProject>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Fld1.Engine.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Blake3.Managed" Version="1.10.0" />
     <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
     <ProjectReference Include="$(Fld1StorageProject)" />

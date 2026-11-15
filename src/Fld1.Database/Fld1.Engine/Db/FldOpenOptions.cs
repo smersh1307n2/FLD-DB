@@ -22,4 +22,7 @@ public sealed class FldOpenOptions
 
     /// <summary>Auto Compact when run count for ns ≥ N (0 = off).</summary>
     public int AutoCompactRunCount { get; init; }
+
+    // Deterministic provider-compaction crash cuts; internal and test-assembly only.
+    internal Action<FldCompactionFaultPoint>? CompactionFaultInjector { get; init; }
 }
