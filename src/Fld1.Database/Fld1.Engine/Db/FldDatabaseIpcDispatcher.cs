@@ -150,6 +150,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         if (ownsGcLease && operation.OperationCode is not (
             FldDatabaseIpcOperationCodes.OpenGcReferenceScan or
             FldDatabaseIpcOperationCodes.QueryGcReferenceScan or
+            FldDatabaseIpcOperationCodes.QueryGcChangeIdBatch or
             FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan or
             FldDatabaseIpcOperationCodes.RenewGcLease))
             throw new InvalidOperationException(
@@ -186,6 +187,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 FldDatabaseIpcOperationCodes.CompactTombstones => HandleCompactTombstones(operation.Payload),
                 FldDatabaseIpcOperationCodes.OpenGcReferenceScan => HandleOpenGcReferenceScan(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.QueryGcReferenceScan => HandleQueryGcReferenceScan(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.QueryGcChangeIdBatch => HandleQueryGcChangeIdBatch(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan => HandleReleaseGcReferenceScan(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.GetOutboxHighWatermark => HandleGetOutboxHighWatermark(operation.Payload),
                 FldDatabaseIpcOperationCodes.ReadCurrentMetadata => HandleReadCurrentMetadata(operation.Payload),
@@ -275,6 +277,26 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             };
             return FldDatabaseIpcGcProtocol.EncodeBooleanResponse(referenced);
         }
+    }
+
+
+    private byte[] HandleQueryGcChangeIdBatch(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        (Guid token, byte[][] changeIds) =
+            FldDatabaseIpcGcProtocol.DecodeChangeIdBatchQuery(payload);
+        var referenced = new bool[changeIds.Length];
+        lock (_gcLeaseGate)
+        {
+            EnsureGcLeaseOwner(context);
+            if (!_gcReferenceScans.TryGetValue(token, out GcReferenceScanHandle? handle) ||
+                handle.ClientId != context.ClientId ||
+                handle.SessionGeneration != context.SessionGeneration)
+                throw new InvalidDataException("FLD GC reference-scan token is unknown or belongs to another IPC session.");
+            for (int i = 0; i < changeIds.Length; i++)
+                referenced[i] = handle.Snapshot.HasChangeIdReference(changeIds[i]);
+        }
+        return FldDatabaseIpcGcProtocol.EncodeChangeIdBatchResponse(referenced);
     }
 
     private byte[] HandleReleaseGcReferenceScan(
