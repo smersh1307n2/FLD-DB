@@ -45,7 +45,7 @@ public sealed class FldDatabaseTombstoneGcTests
                 {
                     Assert.True(candidate.IsFieldTombstone);
                     return true;
-                });
+                }, limit: 4097);
                 Assert.Equal(1, reclaimed);
                 Assert.False(database.TryGetBytes(recordId, 7, out _));
             }
