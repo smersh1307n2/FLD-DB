@@ -313,6 +313,27 @@ public sealed class FldDatabaseTombstoneGcTests
         }
     }
 
+    [Fact]
+    public void Public_tombstone_gc_candidate_constructor_defensively_copies_identity_arrays()
+    {
+        byte[] recordId = Enumerable.Repeat((byte)0x11, 16).ToArray();
+        byte[] changeId = Enumerable.Repeat((byte)0x22, 16).ToArray();
+        byte[] authorNodeId = Enumerable.Repeat((byte)0x33, 16).ToArray();
+
+        var candidate = new FldTombstoneGcCandidate(
+            recordId, 7, changeId, authorNodeId,
+            hlcWall: 123, hlcLogical: 4, originAuthorEpoch: 5,
+            originSequence: 6, isRecordTombstone: false, isFieldTombstone: true);
+
+        Array.Fill(recordId, (byte)0xA1);
+        Array.Fill(changeId, (byte)0xA2);
+        Array.Fill(authorNodeId, (byte)0xA3);
+
+        Assert.All(candidate.RecordId.ToArray(), value => Assert.Equal(0x11, value));
+        Assert.All(candidate.ChangeId.ToArray(), value => Assert.Equal(0x22, value));
+        Assert.All(candidate.AuthorNodeId.ToArray(), value => Assert.Equal(0x33, value));
+    }
+
     private static void SealAndAcknowledgeOutbox(FldDatabase database)
     {
         ulong highWatermark = database.GetOutboxHighWatermark();
