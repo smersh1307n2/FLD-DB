@@ -33,17 +33,27 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
         ulong originSequence,
         bool isRecordTombstone,
         bool isFieldTombstone)
+        : this(
+            CopyAndValidate(recordId, fieldId, changeId, authorNodeId,
+                isRecordTombstone, isFieldTombstone),
+            fieldId, hlcWall, hlcLogical, originAuthorEpoch, originSequence,
+            isRecordTombstone, isFieldTombstone)
     {
-        if (recordId.Length != 16 || changeId.Length is not (0 or 16) ||
-            authorNodeId.Length is not (0 or 16) ||
-            isRecordTombstone == isFieldTombstone ||
-            (isRecordTombstone && fieldId != FldLifecycle.FieldId) ||
-            (isFieldTombstone && fieldId == FldLifecycle.FieldId))
-            throw new ArgumentException("FLD tombstone candidate identity or kind is invalid.");
+    }
 
-        _recordId = recordId.ToArray();
-        _changeId = changeId.ToArray();
-        _authorNodeId = authorNodeId.ToArray();
+    private FldTombstoneGcCandidate(
+        (byte[] RecordId, byte[] ChangeId, byte[] AuthorNodeId) identity,
+        ushort fieldId,
+        ulong hlcWall,
+        uint hlcLogical,
+        uint originAuthorEpoch,
+        ulong originSequence,
+        bool isRecordTombstone,
+        bool isFieldTombstone)
+    {
+        _recordId = identity.RecordId;
+        _changeId = identity.ChangeId;
+        _authorNodeId = identity.AuthorNodeId;
         FieldId = fieldId;
         HlcWall = hlcWall;
         HlcLogical = hlcLogical;
@@ -51,6 +61,54 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
         OriginSequence = originSequence;
         IsRecordTombstone = isRecordTombstone;
         IsFieldTombstone = isFieldTombstone;
+    }
+
+    internal static FldTombstoneGcCandidate CreateOwned(
+        byte[] recordId,
+        ushort fieldId,
+        byte[] changeId,
+        byte[] authorNodeId,
+        ulong hlcWall,
+        uint hlcLogical,
+        uint originAuthorEpoch,
+        ulong originSequence,
+        bool isRecordTombstone,
+        bool isFieldTombstone)
+    {
+        ValidateIdentity(recordId.Length, fieldId, changeId.Length, authorNodeId.Length,
+            isRecordTombstone, isFieldTombstone);
+        return new FldTombstoneGcCandidate(
+            (recordId, changeId, authorNodeId), fieldId, hlcWall, hlcLogical,
+            originAuthorEpoch, originSequence, isRecordTombstone, isFieldTombstone);
+    }
+
+    private static (byte[] RecordId, byte[] ChangeId, byte[] AuthorNodeId) CopyAndValidate(
+        ReadOnlyMemory<byte> recordId,
+        ushort fieldId,
+        ReadOnlyMemory<byte> changeId,
+        ReadOnlyMemory<byte> authorNodeId,
+        bool isRecordTombstone,
+        bool isFieldTombstone)
+    {
+        ValidateIdentity(recordId.Length, fieldId, changeId.Length, authorNodeId.Length,
+            isRecordTombstone, isFieldTombstone);
+        return (recordId.ToArray(), changeId.ToArray(), authorNodeId.ToArray());
+    }
+
+    private static void ValidateIdentity(
+        int recordIdLength,
+        ushort fieldId,
+        int changeIdLength,
+        int authorNodeIdLength,
+        bool isRecordTombstone,
+        bool isFieldTombstone)
+    {
+        if (recordIdLength != 16 || changeIdLength is not (0 or 16) ||
+            authorNodeIdLength is not (0 or 16) ||
+            isRecordTombstone == isFieldTombstone ||
+            (isRecordTombstone && fieldId != FldLifecycle.FieldId) ||
+            (isFieldTombstone && fieldId == FldLifecycle.FieldId))
+            throw new ArgumentException("FLD tombstone candidate identity or kind is invalid.");
     }
 
     public bool Equals(FldTombstoneGcCandidate other)
