@@ -80,6 +80,9 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
                 scan.Token, sender, authorEpoch: 8, transportPeerEpoch: 6, batchId),
                 "A sealed ApplyJournal receipt is independent FLD replay evidence, not a BIN-SYNC Metadata reference.");
             Assert.False(await clientA.HasGcChangeIdReferenceAsync(scan.Token, Id(0x79)));
+            bool[] batchReferences = await clientA.HasGcChangeIdReferencesAsync(
+                scan.Token, [retainedChangeId, Id(0x79), retainedChangeId]);
+            Assert.Equal(new[] { true, false, true }, batchReferences);
 
             // The exclusive lease blocks unrelated sessions, but its owner can query
             // the immutable scan without reacquiring the Host boundary.
