@@ -61,3 +61,23 @@ The corrected isolated child-process run completed on FLD-DB HEAD `8109aecb61045
 | 250,000 | 190.91 MiB | 8 |
 
 All samples reported `WorkingSetDeltaBytes=0`. This is an inconclusive working-set measurement, not evidence of zero resident-memory growth. The current sampler/platform high-water reporting does not provide a trustworthy process peak; a reliable OS-level peak metric is still required before making physical-memory capacity claims. Managed-heap deltas are sampled live-heap observations and must not be confused with cumulative allocations in the BenchmarkDotNet tables above.
+
+### Reproducibility rerun on FLD-DB HEAD 6c5e195 (2026-11-15)
+
+The dedicated benchmark was rerun after the documentation update (GitHub Actions run [43701205145](https://github.com/smersh1307n2/FLD-DB/actions/runs/43701205145), artifact [14157261073](https://github.com/smersh1307n2/FLD-DB/actions/runs/43701205145)). The artifact completed successfully and includes both the single-page and full-sweep matrices.
+
+The latest full-sweep run reported:
+
+| Tombstones | Repeated 4,096-page sweep | Single rewrite | Repeated allocations | Single-rewrite allocations |
+|---:|---:|---:|---:|---:|
+| 1,000 | 8.804 ms | 8.585 ms | 477.57 KB | 477.57 KB |
+| 10,000 | 78.973 ms | 39.163 ms | 13,428.57 KB | 4,145.43 KB |
+| 50,000 | 1,223.288 ms | 42.882 ms | 366,657.19 KB | 18,925.49 KB |
+| 100,000 | 5,062.187 ms | 93.866 ms | 1,474,991.23 KB | 38,246.41 KB |
+| 250,000 | 34,036.699 ms | 266.557 ms | 9,206,992.61 KB | 87,937.09 KB |
+
+At 250k, this rerun measured approximately 128x lower elapsed time and 105x lower cumulative managed allocation for one rewrite than for repeated 4,096-entry pages. The small 1k result remains noise-sensitive. These values are a separate run, not a replacement for the earlier baseline table above.
+
+The child-process diagnostic again produced eight samples per cardinality. At 250k, sampled managed-heap delta ranged around 190.1–191.0 MiB (mean approximately 190.9 MiB). Every sample still reported `WorkingSetDeltaBytes=0`; process RSS remains unmeasured reliably. The diagnostic must not be used as an RSS/capacity bound.
+
+This remains an FLD-only physical compaction measurement. The signed Metadata proof + real Host IPC reference scan + coordinator scheduling benchmark is still open and is tracked in BIN-SYNC Roadmap V3 §1.168.
