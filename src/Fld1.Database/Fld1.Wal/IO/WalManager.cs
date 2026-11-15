@@ -1,5 +1,6 @@
 using Fld1.Wal.Format;
 using Fld1.Wal.Recovery;
+using Fld1.Storage.Engine;
 
 namespace Fld1.Wal.IO;
 
@@ -50,15 +51,22 @@ public sealed class WalManager : IDisposable
         ulong namespaceId,
         long rotateAfterBytes = 64L * 1024 * 1024)
     {
-        Directory.CreateDirectory(walDir);
+        StorageDirectorySync.CreateDirectoryDurable(walDir);
         var segs = ListSegments(walDir, namespaceId);
         var allRecords = new List<WalRecoveredRecord>();
 
         if (segs.Count == 0)
         {
             string path = SegmentPath(walDir, namespaceId, 0);
-            var w = WalWriter.Create(path, namespaceId, firstCommitSeq: 1);
-            return (new WalManager(walDir, namespaceId, rotateAfterBytes, w, 0), allRecords);
+            string tempPath = path + ".tmp";
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+            using (WalWriter.Create(tempPath, namespaceId, firstCommitSeq: 1))
+            {
+            }
+            StorageDirectorySync.AtomicCreateFile(tempPath, path);
+            var writer = WalWriter.OpenForAppend(path, namespaceId, WalHeader.Size, nextCommitSeq: 1);
+            return (new WalManager(walDir, namespaceId, rotateAfterBytes, writer, 0), allRecords);
         }
 
         ulong? expectedNextSeq = null;
@@ -207,9 +215,8 @@ public sealed class WalManager : IDisposable
             {
             }
 
-            File.Move(tempPath, finalPath);
+            StorageDirectorySync.AtomicCreateFile(tempPath, finalPath);
             published = true;
-            TryFsyncDirectory(_walDir);
 
             var nextWriter = WalWriter.OpenForAppend(
                 finalPath, _namespaceId, WalHeader.Size, nextSeq);
@@ -222,8 +229,8 @@ public sealed class WalManager : IDisposable
         }
         catch
         {
-            if (published)
-                _faulted = true; // segment set changed; reopen performs authoritative recovery
+            if (published || File.Exists(finalPath))
+                _faulted = true; // segment set changed or publication completion is uncertain; reopen performs authoritative recovery
             else if (File.Exists(tempPath))
             {
                 try { File.Delete(tempPath); } catch { /* best effort */ }

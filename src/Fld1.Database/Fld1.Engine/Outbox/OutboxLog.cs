@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using Fld1.Core.Hash;
+using Fld1.Storage.Engine;
 
 namespace Fld1.Engine.Outbox;
 
@@ -115,7 +116,7 @@ public sealed class OutboxLog : IDisposable
     public static OutboxLog Open(
         string dir, uint namespaceId, ulong checkpointedThroughCommitSeq = 0)
     {
-        Directory.CreateDirectory(dir);
+        StorageDirectorySync.CreateDirectoryDurable(dir);
 
         string path = Path.Combine(dir, $"ns_{namespaceId}.obx");
         string ackPath = Path.Combine(dir, $"ns_{namespaceId}.obx.ack");
@@ -226,18 +227,29 @@ public sealed class OutboxLog : IDisposable
 
     private static FileStream CreateNew(string path)
     {
-        var fs = new FileStream(
-            path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read,
-            bufferSize: 64 * 1024, FileOptions.None);
+        string tempPath = path + ".tmp";
+        if (File.Exists(tempPath))
+            File.Delete(tempPath);
 
-        Span<byte> header = stackalloc byte[HeaderSize];
-        header.Clear();
-        Magic.CopyTo(header);
-        BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(4, 2), Version);
-        BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8, 8), 1);
-        fs.Write(header);
-        fs.Flush(flushToDisk: true);
-        return fs;
+        using (var output = new FileStream(
+            tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            bufferSize: 64 * 1024, FileOptions.WriteThrough))
+        {
+            Span<byte> header = stackalloc byte[HeaderSize];
+            header.Clear();
+            Magic.CopyTo(header);
+            BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(4, 2), Version);
+            BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8, 8), 1);
+            output.Write(header);
+            output.Flush(flushToDisk: true);
+        }
+
+        StorageDirectorySync.AtomicCreateFile(tempPath, path);
+        var stream = new FileStream(
+            path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
+            bufferSize: 64 * 1024, FileOptions.None);
+        stream.Seek(0, SeekOrigin.End);
+        return stream;
     }
 
     private static (ulong Epoch, byte[] OwnerId) LoadLease(string path)
@@ -302,7 +314,8 @@ public sealed class OutboxLog : IDisposable
                 throw new InvalidOperationException("Outbox lease epoch space is exhausted.");
             ulong nextEpoch = _leaseEpoch + 1;
             byte[] nextOwner = ownerId.ToArray();
-            WriteLease(_leasePath, nextEpoch, nextOwner);
+            try { WriteLease(_leasePath, nextEpoch, nextOwner); }
+            catch { _faulted = true; throw; }
             _leaseEpoch = nextEpoch;
             _leaseOwnerId = nextOwner;
             return new OutboxLease(nextEpoch, nextOwner);
@@ -320,7 +333,8 @@ public sealed class OutboxLog : IDisposable
                 throw new InvalidOperationException("Outbox lease epoch space is exhausted.");
             ulong nextEpoch = _leaseEpoch + 1;
             byte[] noOwner = new byte[16];
-            WriteLease(_leasePath, nextEpoch, noOwner);
+            try { WriteLease(_leasePath, nextEpoch, noOwner); }
+            catch { _faulted = true; throw; }
             _leaseEpoch = nextEpoch;
             _leaseOwnerId = noOwner;
         }
@@ -794,7 +808,8 @@ public sealed class OutboxLog : IDisposable
                 return;
 
             _fs.Flush(flushToDisk: true);
-            WriteMaterializedWatermark(_statePath, throughCommitSeq);
+            try { WriteMaterializedWatermark(_statePath, throughCommitSeq); }
+            catch { _faulted = true; throw; }
             _materializedThroughCommitSeq = throughCommitSeq;
 
             _entryKeys.RemoveWhere(key => key.CommitSeq <= throughCommitSeq);
@@ -837,7 +852,8 @@ public sealed class OutboxLog : IDisposable
         BinaryPrimitives.WriteUInt32LittleEndian(
             ack.Slice(8, 4), Hashes.Crc32C(ack.Slice(0, 8)));
 
-        WriteAtomic(_ackPath, ack);
+        try { WriteAtomic(_ackPath, ack); }
+        catch { _faulted = true; throw; }
         _ackedThrough = throughSeq;
     }
 
@@ -928,14 +944,15 @@ public sealed class OutboxLog : IDisposable
 
             if (maxCommitSeq > _materializedThroughCommitSeq)
             {
-                WriteMaterializedWatermark(_statePath, maxCommitSeq);
+                try { WriteMaterializedWatermark(_statePath, maxCommitSeq); }
+                catch { _faulted = true; throw; }
                 _materializedThroughCommitSeq = maxCommitSeq;
             }
 
             _fs.Dispose();
             try
             {
-                File.Move(tempPath, _path, overwrite: true);
+                StorageDirectorySync.AtomicReplaceFile(tempPath, _path);
                 _fs = new FileStream(
                     _path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
                     bufferSize: 64 * 1024, FileOptions.None);
@@ -944,6 +961,7 @@ public sealed class OutboxLog : IDisposable
             }
             catch
             {
+                _faulted = true;
                 if (File.Exists(_path))
                 {
                     _fs = new FileStream(
@@ -958,7 +976,6 @@ public sealed class OutboxLog : IDisposable
                 throw;
             }
 
-            TryFsyncDirectory(Path.GetDirectoryName(_path)!);
             // Every retained entry is now covered by the durable materialization watermark.
             // Keep no per-entry replay-dedupe keys for this sealed prefix.
             _entryKeys = new HashSet<EntryKey>();
@@ -992,24 +1009,7 @@ public sealed class OutboxLog : IDisposable
             fs.Flush(flushToDisk: true);
         }
 
-        File.Move(tempPath, path, overwrite: true);
-        TryFsyncDirectory(Path.GetDirectoryName(path)!);
-    }
-
-    private static void TryFsyncDirectory(string directory)
-    {
-        try
-        {
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            {
-                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                fs.Flush(flushToDisk: true);
-            }
-        }
-        catch
-        {
-            // Directory handles cannot be flushed on every supported filesystem.
-        }
+        StorageDirectorySync.AtomicReplaceFile(tempPath, path);
     }
 
     private void EnsureUsable()

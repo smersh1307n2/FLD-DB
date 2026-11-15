@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using Fld1.Core.Hash;
 using Fld1.Wal.Codec;
 using Fld1.Wal.Format;
+using Fld1.Storage.Engine;
 
 namespace Fld1.Engine.Outbox;
 
@@ -75,21 +76,43 @@ internal sealed class ApplyJournal : IDisposable
         _path = path;
         _relayAckPath = path + ".relayack";
         _namespaceId = namespaceId;
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        StorageDirectorySync.CreateDirectoryDurable(Path.GetDirectoryName(path)!);
         bool exists = File.Exists(path);
         if (!exists && File.Exists(_relayAckPath))
             throw new InvalidDataException("ApplyJournal relay-ACK sidecar exists without its journal.");
+
+        if (!exists)
+        {
+            string tempPath = path + ".tmp";
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+            using (var output = new FileStream(
+                tempPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
+                bufferSize: 4096, FileOptions.WriteThrough))
+            {
+                WriteHeader(output);
+                output.Flush(flushToDisk: true);
+            }
+            try
+            {
+                StorageDirectorySync.AtomicCreateFile(tempPath, path);
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+            }
+        }
+
         _stream = OpenJournalStream(path);
         try
         {
-            if (!exists)
-            {
-                WriteHeader();
-                _stream.Flush(flushToDisk: true);
-            }
+            if (exists)
+                LoadAndRepairTail();
             else
             {
-                LoadAndRepairTail();
+                _writeOffset = HeaderSize;
+                _stream.Position = HeaderSize;
             }
             LoadRelayAckFile();
         }
@@ -108,7 +131,7 @@ internal sealed class ApplyJournal : IDisposable
     }
 
     private static FileStream OpenJournalStream(string path)
-        => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        => new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
 
     internal void ValidateRelayAckWatermarks()
     {
@@ -164,6 +187,7 @@ internal sealed class ApplyJournal : IDisposable
             }
             catch
             {
+                _faulted = true;
                 if (hadPrevious) _relayAckedThrough[key] = previous;
                 else _relayAckedThrough.Remove(key);
                 throw;
@@ -236,28 +260,11 @@ internal sealed class ApplyJournal : IDisposable
                 output.Write(bytes);
                 output.Flush(true);
             }
-            File.Move(temp, _relayAckPath, overwrite: true);
-            TryFsyncDirectory(Path.GetDirectoryName(_relayAckPath)!);
+            StorageDirectorySync.AtomicReplaceFile(temp, _relayAckPath);
         }
         finally
         {
             if (File.Exists(temp)) File.Delete(temp);
-        }
-    }
-
-    private static void TryFsyncDirectory(string directory)
-    {
-        try
-        {
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            {
-                using var fs = new FileStream(directory, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                fs.Flush(flushToDisk: true);
-            }
-        }
-        catch
-        {
-            // Same best-effort directory durability policy as the manifest and WAL rotation.
         }
     }
 
@@ -473,14 +480,14 @@ internal sealed class ApplyJournal : IDisposable
                 _stream.Dispose();
                 try
                 {
-                    File.Move(tempPath, _path, overwrite: true);
-                    TryFsyncDirectory(Path.GetDirectoryName(_path)!);
+                    StorageDirectorySync.AtomicReplaceFile(tempPath, _path);
                     replaced = true;
                     _stream = OpenJournalStream(_path);
                     _stream.Position = newWriteOffset;
                 }
                 catch
                 {
+                    _faulted = true;
                     try
                     {
                         _stream = OpenJournalStream(_path);

@@ -140,6 +140,32 @@ public static class StorageDirectorySync
             Flush(Path.GetDirectoryName(destinationPath)!);
     }
 
+    /// <summary>
+    /// Publishes a new file without replacing an existing destination. The source
+    /// file must already be flushed by its writer.
+    /// </summary>
+    public static void AtomicCreateFile(
+        string temporaryPath,
+        string destinationPath,
+        bool flushParent = true)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(temporaryPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        if (OperatingSystem.IsWindows())
+        {
+            if (!WindowsMoveFileEx(ToWindowsExtendedPath(temporaryPath), ToWindowsExtendedPath(destinationPath),
+                    WindowsMoveFileWriteThrough))
+                throw new IOException(
+                    $"Unable to durably create '{destinationPath}'.",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+            return;
+        }
+
+        File.Move(temporaryPath, destinationPath, overwrite: false);
+        if (flushParent)
+            Flush(Path.GetDirectoryName(destinationPath)!);
+    }
+
     private static void CreateDirectoryDurableWindows(string fullPath)
     {
         var missing = new Stack<string>();
