@@ -20,7 +20,7 @@ public class TombstoneGcSweepBench
     private readonly byte[] _value = new byte[64];
     private long _lastGcAllocatedBytes;
 
-    [Params(1_000, 10_000, 50_000)]
+    [Params(1_000, 10_000, 50_000, 100_000, 250_000)]
     public int TombstoneCount { get; set; }
 
     [IterationSetup]
