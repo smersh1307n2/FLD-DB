@@ -1653,14 +1653,16 @@ public sealed partial class FldDatabase : IDisposable
     /// <summary>
     /// Reclaim current field/record tombstones only when the caller's retention proof
     /// approves the exact current identity. The caller must hold the composed
-    /// application/Metadata/FLD commit lease for the entire call.
+    /// application/Metadata/FLD commit lease for the entire call. The limit bounds
+    /// reclaimed candidates, not scan size; a larger limit avoids repeatedly rewriting
+    /// the complete namespace when a full maintenance sweep is intentionally requested.
     /// </summary>
     public int CompactTombstones(
         Func<FldTombstoneGcCandidate, bool> canReclaim,
         int limit = 4096)
     {
         ArgumentNullException.ThrowIfNull(canReclaim);
-        if (limit <= 0 || limit > 4096)
+        if (limit <= 0 || limit > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(limit));
         ObjectDisposedException.ThrowIf(_disposed, this);
 
