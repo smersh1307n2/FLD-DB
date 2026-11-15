@@ -2,7 +2,7 @@ namespace Fld1.Run.Builder;
 
 /// <summary>
 /// One logical field version to place into a STATE run.
-/// Value is copied; max inline 256, larger → external (later).
+/// Public construction owns copies; internal compaction construction may borrow immutable memory.
 /// </summary>
 public sealed class FieldWrite
 {
