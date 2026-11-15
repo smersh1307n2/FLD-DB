@@ -40,7 +40,7 @@ public static class StorageDirectorySync
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool WindowsMoveFileEx(string existingFileName, string newFileName, uint flags);
 
-    /// <summary>Creates a directory and durably flushes newly created parent entries on Unix.</summary>
+    /// <summary>Creates directories with durable parent-entry publication on supported platforms.</summary>
     public static void CreateDirectoryDurable(string path)
     {
         string fullPath = Path.GetFullPath(path);
@@ -85,7 +85,7 @@ public static class StorageDirectorySync
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (OperatingSystem.IsWindows())
-            return; // Windows directory-entry durability is not claimed by this engine.
+            return; // Direct directory fsync is unavailable; use the write-through publication helpers.
 
         bool macOs = OperatingSystem.IsMacOS();
         if (!macOs && !OperatingSystem.IsLinux())
@@ -125,7 +125,7 @@ public static class StorageDirectorySync
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         if (OperatingSystem.IsWindows())
         {
-            if (!WindowsMoveFileEx(temporaryPath, destinationPath,
+            if (!WindowsMoveFileEx(ToWindowsExtendedPath(temporaryPath), ToWindowsExtendedPath(destinationPath),
                     WindowsMoveFileReplaceExisting | WindowsMoveFileWriteThrough))
                 throw new IOException(
                     $"Unable to durably replace '{destinationPath}'.",
@@ -157,7 +157,7 @@ public static class StorageDirectorySync
             string temporary = Path.Combine(
                 parent, "." + Path.GetFileName(created) + ".create-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(temporary);
-            if (WindowsMoveFileEx(temporary, created, WindowsMoveFileWriteThrough))
+            if (WindowsMoveFileEx(ToWindowsExtendedPath(temporary), ToWindowsExtendedPath(created), WindowsMoveFileWriteThrough))
                 continue;
 
             int error = Marshal.GetLastPInvokeError();
@@ -168,6 +168,16 @@ public static class StorageDirectorySync
                 $"Unable to durably create directory '{created}' with MOVEFILE_WRITE_THROUGH.",
                 new Win32Exception(error));
         }
+    }
+
+    private static string ToWindowsExtendedPath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith(@"\\?\\", StringComparison.Ordinal))
+            return fullPath;
+        if (fullPath.StartsWith(@"\\\\", StringComparison.Ordinal))
+            return @"\\?\\UNC\\" + fullPath[2..];
+        return @"\\?\\" + fullPath;
     }
 
     private static IOException CreateIoException(string operation, string directory)
