@@ -18,6 +18,11 @@ public sealed class FieldWrite
     public uint OriginAuthorEpoch { get; }
     public ulong OriginSequence { get; }
 
+    internal ReadOnlyMemory<byte> RecordIdMemory { get; }
+    internal ReadOnlyMemory<byte> ValueMemory { get; }
+    internal ReadOnlyMemory<byte> AuthorNodeIdMemory { get; }
+    internal ReadOnlyMemory<byte> ChangeIdMemory { get; }
+
     public FieldWrite(
         ReadOnlySpan<byte> recordId,
         ushort fieldId,
@@ -64,5 +69,66 @@ public sealed class FieldWrite
         ChangeId = changeId.ToArray();
         OriginAuthorEpoch = originAuthorEpoch;
         OriginSequence = originSequence;
+
+        RecordIdMemory = RecordId;
+        ValueMemory = Value;
+        AuthorNodeIdMemory = AuthorNodeId;
+        ChangeIdMemory = ChangeId;
+    }
+
+    // Internal compaction path: borrow immutable Run-backed slices instead of
+    // copying RecordId/value/author/provenance into four new arrays per field.
+    internal FieldWrite(
+        ReadOnlyMemory<byte> recordId,
+        ushort fieldId,
+        ReadOnlyMemory<byte> value,
+        ulong wall,
+        uint logical,
+        ReadOnlyMemory<byte> authorNodeId,
+        ushort keyEpoch,
+        bool isTombstone,
+        ReadOnlyMemory<byte> changeId,
+        uint originAuthorEpoch,
+        ulong originSequence)
+    {
+        ReadOnlySpan<byte> recordIdSpan = recordId.Span;
+        ReadOnlySpan<byte> valueSpan = value.Span;
+        ReadOnlySpan<byte> authorNodeIdSpan = authorNodeId.Span;
+        ReadOnlySpan<byte> changeIdSpan = changeId.Span;
+        if (recordIdSpan.Length != 16) throw new ArgumentException("RecordId must be 16 bytes");
+        if (authorNodeIdSpan.Length != 16) throw new ArgumentException("AuthorNodeId must be 16 bytes");
+        if (valueSpan.Length > Format.RunConstants.MaxBlobLen)
+            throw new ArgumentException("value > 4 MB");
+        if (wall == 0) throw new ArgumentException("HLC wall must be > 0", nameof(wall));
+        if (changeIdSpan.Length is not (0 or 16))
+            throw new ArgumentException("ChangeId must be empty or 16 bytes.", nameof(changeId));
+        if (changeIdSpan.Length == 16)
+        {
+            byte aggregate = 0;
+            foreach (byte part in changeIdSpan) aggregate |= part;
+            if (aggregate == 0)
+                throw new ArgumentException("ChangeId must be nonzero.", nameof(changeId));
+        }
+        if (originAuthorEpoch == 0 && originSequence != 0)
+            throw new ArgumentException("Origin sequence requires an author epoch.");
+        if (originAuthorEpoch != 0 && changeIdSpan.IsEmpty)
+            throw new ArgumentException("OperationOrigin requires a stable ChangeId.");
+
+        RecordId = Array.Empty<byte>();
+        Value = Array.Empty<byte>();
+        AuthorNodeId = Array.Empty<byte>();
+        ChangeId = Array.Empty<byte>();
+        FieldId = fieldId;
+        Wall = wall;
+        Logical = logical;
+        KeyEpoch = keyEpoch;
+        IsTombstone = isTombstone;
+        OriginAuthorEpoch = originAuthorEpoch;
+        OriginSequence = originSequence;
+
+        RecordIdMemory = recordId;
+        ValueMemory = value;
+        AuthorNodeIdMemory = authorNodeId;
+        ChangeIdMemory = changeId;
     }
 }
