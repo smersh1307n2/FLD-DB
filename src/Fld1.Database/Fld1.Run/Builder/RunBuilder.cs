@@ -37,31 +37,9 @@ public sealed class RunBuilder
 
     public RunBuilder Add(FieldWrite write)
     {
-        if (write.ValueMemory.Length > RunConstants.MaxBlobLen)
+        if (write.Value.Length > RunConstants.MaxBlobLen)
             throw new ArgumentException("value > 4 MB");
         _writes.Add(write);
-        return this;
-    }
-
-    // Internal FLD compaction path. Source Run/overlay buffers remain immutable
-    // until Build completes, so retain memory slices rather than cloning every field.
-    internal RunBuilder AddBorrowed(
-        ReadOnlyMemory<byte> recordId,
-        ushort fieldId,
-        ReadOnlyMemory<byte> value,
-        ulong wall,
-        uint logical,
-        ReadOnlyMemory<byte> authorNodeId,
-        ushort keyEpoch = 0,
-        bool isTombstone = false,
-        ReadOnlyMemory<byte> changeId = default,
-        uint originAuthorEpoch = 0,
-        ulong originSequence = 0)
-    {
-        if (value.Length > RunConstants.MaxBlobLen)
-            throw new ArgumentException("value > 4 MB");
-        _writes.Add(new FieldWrite(recordId, fieldId, value, wall, logical,
-            authorNodeId, keyEpoch, isTombstone, changeId, originAuthorEpoch, originSequence));
         return this;
     }
 
@@ -89,20 +67,20 @@ public sealed class RunBuilder
         var winners = new Dictionary<(IdKey, ushort), FieldWrite>();
         foreach (var w in _writes)
         {
-            var key = (new IdKey(w.RecordIdMemory), w.FieldId);
+            var key = (new IdKey(w.RecordId), w.FieldId);
             if (!winners.TryGetValue(key, out var cur) || CompareHlc(w, cur) > 0)
                 winners[key] = w;
         }
 
         var byRecord = winners.Values
-            .GroupBy(w => new IdKey(w.RecordIdMemory))
+            .GroupBy(w => new IdKey(w.RecordId))
             .OrderBy(g => g.Key, IdKeyComparer.Instance)
             .ToList();
 
         // Intern authors ASC
         var authorSet = new SortedSet<IdKey>(AuthorIdComparer.Instance);
         foreach (var w in winners.Values)
-            authorSet.Add(new IdKey(w.AuthorNodeIdMemory));
+            authorSet.Add(new IdKey(w.AuthorNodeId));
         var authors = authorSet.ToList();
         var authorToIntern = new Dictionary<IdKey, uint>(IdKeyComparer.Instance);
         for (int i = 0; i < authors.Count; i++)
@@ -114,7 +92,7 @@ public sealed class RunBuilder
         var provenanceEntries = new List<FieldWrite>();
 
         var clusterBlobs = new List<byte[]>();
-        var clusterRecordIds = new List<ReadOnlyMemory<byte>>();
+        var clusterRecordIds = new List<byte[]>();
         uint totalFields = 0;
         uint aliveFields = 0;
         bool anyHlcOverride = false;
@@ -125,7 +103,7 @@ public sealed class RunBuilder
         {
             var fields = group.OrderBy(f => f.FieldId).ToList();
             foreach (FieldWrite field in fields)
-                if (field.ChangeIdMemory.Length == 16)
+                if (field.ChangeId.Length == 16)
                     provenanceEntries.Add(field);
             totalFields += (uint)fields.Count;
             var mode = ComputeMode(fields, authorToIntern);
@@ -134,7 +112,7 @@ public sealed class RunBuilder
             for (int i = 0; i < fields.Count; i++)
             {
                 var f = fields[i];
-                uint iid = authorToIntern[new IdKey(f.AuthorNodeIdMemory)];
+                uint iid = authorToIntern[new IdKey(f.AuthorNodeId)];
                 bool need = f.Wall != mode.Wall || f.Logical != mode.Logical
                             || iid != mode.InternId || f.KeyEpoch != 0;
                 if (need) overrides.Add((i, f, iid));
@@ -143,7 +121,7 @@ public sealed class RunBuilder
             if (fields.Any(f => f.KeyEpoch != 0)) anyKeyEpoch = true;
 
             bool dead = fields.Any(f =>
-                f.FieldId == 0 && f.ValueMemory.Length == 1 && f.ValueMemory.Span[0] == 0x01);
+                f.FieldId == 0 && f.Value.Length == 1 && f.Value[0] == 0x01);
 
             bool clusterHasExternal = false;
             int payloadLen = 0;
@@ -151,14 +129,14 @@ public sealed class RunBuilder
             {
                 if (!f.IsTombstone) aliveFields++;
                 if (f.IsTombstone) continue;
-                if ((uint)f.ValueMemory.Length > _inlinePolicy)
+                if ((uint)f.Value.Length > _inlinePolicy)
                 {
                     clusterHasExternal = true;
                     anyExternal = true;
                 }
                 else
                 {
-                    payloadLen += f.ValueMemory.Length;
+                    payloadLen += f.Value.Length;
                 }
             }
             if (payloadLen > RunConstants.MaxPayloadArea)
@@ -199,18 +177,18 @@ public sealed class RunBuilder
                     valLen = 0;
                     off = 0;
                 }
-                else if ((uint)f.ValueMemory.Length > _inlinePolicy)
+                else if ((uint)f.Value.Length > _inlinePolicy)
                 {
                     valLen = RunConstants.ExternalValLen;
                     // ValueRef index assigned after all clusters — store placeholder, fix up later
                     off = (ushort)externalEntries.Count;
-                    externalEntries.Add(new ExternalEntry(group.Key.Memory.ToArray(), f.FieldId, f.ValueMemory.ToArray()));
+                    externalEntries.Add(new ExternalEntry(group.Key.Bytes, f.FieldId, f.Value));
                 }
                 else
                 {
-                    valLen = (ushort)f.ValueMemory.Length;
+                    valLen = (ushort)f.Value.Length;
                     off = (ushort)payloadOff;
-                    payloadOff += f.ValueMemory.Length;
+                    payloadOff += f.Value.Length;
                 }
                 if (overrides.Any(o => o.idx == i))
                     fdFlags |= (byte)FieldDescFlags.HasHlcOverride;
@@ -238,13 +216,13 @@ public sealed class RunBuilder
             foreach (var f in fields)
             {
                 if (f.IsTombstone) continue;
-                if ((uint)f.ValueMemory.Length > _inlinePolicy) continue;
-                f.ValueMemory.Span.CopyTo(span.Slice(payBase + cursor, f.ValueMemory.Length));
-                cursor += f.ValueMemory.Length;
+                if ((uint)f.Value.Length > _inlinePolicy) continue;
+                f.Value.CopyTo(span.Slice(payBase + cursor, f.Value.Length));
+                cursor += f.Value.Length;
             }
 
             clusterBlobs.Add(blob);
-            clusterRecordIds.Add(group.Key.Memory);
+            clusterRecordIds.Add(group.Key.Bytes);
         }
 
         // Sort external entries by (RecordId, FieldId) for ValueRef catalog — already insertion order
@@ -315,7 +293,7 @@ public sealed class RunBuilder
 
         // Intern
         for (int i = 0; i < authors.Count; i++)
-            authors[i].CopyTo(fs.Slice((int)internOff + i * 16, 16));
+            authors[i].Bytes.CopyTo(fs.Slice((int)internOff + i * 16, 16));
 
         // PGM segments
         for (int s = 0; s < pgmSegs.Count; s++)
@@ -336,7 +314,7 @@ public sealed class RunBuilder
         {
             int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
             BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(slotPos, 8), (ulong)dataCursor);
-            clusterRecordIds[i].Span.Slice(12, 4).CopyTo(fs.Slice(slotPos + 8, 4));
+            clusterRecordIds[i].AsSpan(12, 4).CopyTo(fs.Slice(slotPos + 8, 4));
             clusterBlobs[i].CopyTo(fs.Slice(dataCursor));
             dataCursor += clusterBlobs[i].Length;
         }
@@ -371,10 +349,10 @@ public sealed class RunBuilder
             int pos = checked((int)provenanceOff);
             foreach (FieldWrite entry in provenanceEntries)
             {
-                entry.RecordIdMemory.Span.CopyTo(fs.Slice(pos, 16));
+                entry.RecordId.CopyTo(fs.Slice(pos, 16));
                 BinaryPrimitives.WriteUInt16LittleEndian(fs.Slice(pos + 16, 2), entry.FieldId);
                 // bytes 18..19 are reserved and remain zero.
-                entry.ChangeIdMemory.Span.CopyTo(fs.Slice(pos + 20, 16));
+                entry.ChangeId.CopyTo(fs.Slice(pos + 20, 16));
                 BinaryPrimitives.WriteUInt32LittleEndian(fs.Slice(pos + 36, 4), entry.OriginAuthorEpoch);
                 BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(pos + 40, 8), entry.OriginSequence);
                 pos += RunConstants.ProvenanceEntrySize;
@@ -440,14 +418,14 @@ public sealed class RunBuilder
     /// <summary>
     /// Greedy PGM segments with dup-group indivisibility. Spec §2.1 / [K-PGM-DUP-RANGE].
     /// </summary>
-    private static List<PgmSeg> BuildPgm(List<ReadOnlyMemory<byte>> recordIds, uint defaultEps)
+    private static List<PgmSeg> BuildPgm(List<byte[]> recordIds, uint defaultEps)
     {
         var segs = new List<PgmSeg>();
         if (recordIds.Count == 0) return segs;
 
         var keys = new ulong[recordIds.Count];
         for (int i = 0; i < recordIds.Count; i++)
-            keys[i] = Uuid7.ProjectK(recordIds[i].Span);
+            keys[i] = Uuid7.ProjectK(recordIds[i]);
 
         // Build dup-group boundaries: [start, end) ranges of equal K
         var groups = new List<(int start, int end)>();
@@ -542,7 +520,7 @@ public sealed class RunBuilder
         if (c != 0) return c;
         c = a.Logical.CompareTo(b.Logical);
         if (c != 0) return c;
-        return ByteUtil.CompareAuthorNodeId(a.AuthorNodeIdMemory.Span, b.AuthorNodeIdMemory.Span);
+        return ByteUtil.CompareAuthorNodeId(a.AuthorNodeId, b.AuthorNodeId);
     }
 
     private static (ulong Wall, uint Logical, uint InternId) ComputeMode(
@@ -554,7 +532,7 @@ public sealed class RunBuilder
         bool hasFirst = false;
         foreach (var f in fields)
         {
-            uint iid = authorToIntern[new IdKey(f.AuthorNodeIdMemory)];
+            uint iid = authorToIntern[new IdKey(f.AuthorNodeId)];
             var t = (f.Wall, f.Logical, iid);
             if (!hasFirst) { first = t; hasFirst = true; }
             counts[t] = counts.GetValueOrDefault(t) + 1;
@@ -586,15 +564,15 @@ public sealed class RunBuilder
 
     private readonly struct IdKey : IComparable<IdKey>
     {
-        public readonly ReadOnlyMemory<byte> Memory;
-        public IdKey(ReadOnlyMemory<byte> memory) => Memory = memory;
-        public int CompareTo(IdKey other) => ByteUtil.CompareUnsigned16(Memory.Span, other.Memory.Span);
-        public void CopyTo(Span<byte> dest) => Memory.Span.CopyTo(dest);
-        public override bool Equals(object? obj) => obj is IdKey k && ByteUtil.Equals16(Memory.Span, k.Memory.Span);
+        public readonly byte[] Bytes;
+        public IdKey(byte[] bytes) => Bytes = bytes;
+        public int CompareTo(IdKey other) => ByteUtil.CompareUnsigned16(Bytes, other.Bytes);
+        public void CopyTo(Span<byte> dest) => Bytes.CopyTo(dest);
+        public override bool Equals(object? obj) => obj is IdKey k && ByteUtil.Equals16(Bytes, k.Bytes);
         public override int GetHashCode()
         {
-            ulong a = BinaryPrimitives.ReadUInt64LittleEndian(Memory.Span);
-            ulong b = BinaryPrimitives.ReadUInt64LittleEndian(Memory.Span.Slice(8));
+            ulong a = BinaryPrimitives.ReadUInt64LittleEndian(Bytes);
+            ulong b = BinaryPrimitives.ReadUInt64LittleEndian(Bytes.AsSpan(8));
             return HashCode.Combine(a, b);
         }
     }
@@ -603,7 +581,7 @@ public sealed class RunBuilder
     {
         public static readonly IdKeyComparer Instance = new();
         public int Compare(IdKey x, IdKey y) => x.CompareTo(y);
-        public bool Equals(IdKey x, IdKey y) => ByteUtil.Equals16(x.Memory.Span, y.Memory.Span);
+        public bool Equals(IdKey x, IdKey y) => ByteUtil.Equals16(x.Bytes, y.Bytes);
         public int GetHashCode(IdKey obj) => obj.GetHashCode();
     }
 
@@ -611,8 +589,8 @@ public sealed class RunBuilder
     private sealed class AuthorIdComparer : IComparer<IdKey>, IEqualityComparer<IdKey>
     {
         public static readonly AuthorIdComparer Instance = new();
-        public int Compare(IdKey x, IdKey y) => ByteUtil.CompareAuthorNodeId(x.Memory.Span, y.Memory.Span);
-        public bool Equals(IdKey x, IdKey y) => ByteUtil.Equals16(x.Memory.Span, y.Memory.Span);
+        public int Compare(IdKey x, IdKey y) => ByteUtil.CompareAuthorNodeId(x.Bytes, y.Bytes);
+        public bool Equals(IdKey x, IdKey y) => ByteUtil.Equals16(x.Bytes, y.Bytes);
         public int GetHashCode(IdKey obj) => obj.GetHashCode();
     }
 }
