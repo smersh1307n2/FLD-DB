@@ -1681,6 +1681,47 @@ public sealed partial class FldDatabase : IDisposable
         }
     }
 
+    private struct CompactFieldIdSet
+    {
+        private ushort _first;
+        private bool _hasFirst;
+        private List<ushort>? _additional;
+
+        public readonly int Count => (_hasFirst ? 1 : 0) + (_additional?.Count ?? 0);
+
+        public readonly ushort this[int index]
+        {
+            get
+            {
+                if (!_hasFirst || index < 0 || index >= Count)
+                    throw new ArgumentOutOfRangeException(nameof(index));
+                return index == 0 ? _first : _additional![index - 1];
+            }
+        }
+
+        public readonly bool Contains(ushort fieldId)
+        {
+            if (_hasFirst && _first == fieldId)
+                return true;
+            return _additional?.Contains(fieldId) == true;
+        }
+
+        public void Add(ushort fieldId)
+        {
+            if (!_hasFirst)
+            {
+                _first = fieldId;
+                _hasFirst = true;
+                return;
+            }
+
+            if (Contains(fieldId))
+                return;
+
+            (_additional ??= new List<ushort>(2)).Add(fieldId);
+        }
+    }
+
     private sealed class TombstoneGcFilter
     {
         private readonly Func<FldTombstoneGcCandidate, bool> _canReclaim;
@@ -1815,7 +1856,6 @@ public sealed partial class FldDatabase : IDisposable
             for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
             {
                 ushort fieldId = fieldIds[fieldIndex];
-            {
                 if (!TryResolveUnlocked(recordId, fieldId, out var resolved) || !resolved.Found)
                     continue;
 
