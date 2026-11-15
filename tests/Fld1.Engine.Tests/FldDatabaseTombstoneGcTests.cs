@@ -152,14 +152,17 @@ public sealed class FldDatabaseTombstoneGcTests
     }
 
     [Theory]
-    [InlineData((int)FldCompactionFaultPoint.AfterReplacementRunDurable, false)]
-    [InlineData((int)FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true)]
-    [InlineData((int)FldCompactionFaultPoint.AfterOldRunDeleted, true)]
+    [InlineData((int)FldCompactionFaultPoint.AfterReplacementRunDurable, false, false)]
+    [InlineData((int)FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true, false)]
+    [InlineData((int)FldCompactionFaultPoint.AfterOldRunDeleted, true, false)]
+    [InlineData((int)FldCompactionFaultPoint.AfterReplacementRunDurable, false, true)]
+    [InlineData((int)FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true, true)]
+    [InlineData((int)FldCompactionFaultPoint.AfterOldRunDeleted, true, true)]
     public void Tombstone_gc_compaction_crash_cuts_recover_one_authoritative_generation(
-        int faultPointValue, bool tombstoneMustBeGone)
+        int faultPointValue, bool tombstoneMustBeGone, bool recordTombstone)
     {
         FldCompactionFaultPoint faultPoint = (FldCompactionFaultPoint)faultPointValue;
-        string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-crash-" + faultPoint + "-" + Guid.NewGuid().ToString("N"));
+        string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-crash-" + faultPoint + "-" + recordTombstone + "-" + Guid.NewGuid().ToString("N"));
         const uint namespaceId = 0x754;
         byte[] recordId = FldDatabase.NewRecordId();
         try
@@ -184,17 +187,28 @@ public sealed class FldDatabaseTombstoneGcTests
                 Assert.NotEqual(0UL, database.Commit());
                 Assert.NotEqual(0UL, database.Checkpoint());
 
-                database.Delete(recordId, 7);
-                Assert.NotEqual(0UL, database.Commit());
-                Assert.NotEqual(0UL, database.Checkpoint());
+                if (recordTombstone)
+                {
+                    database.DeleteRecord(recordId);
+                    Assert.NotEqual(0UL, database.Commit());
+                    Assert.NotEqual(0UL, database.Checkpoint());
+                }
+                else
+                {
+                    database.Delete(recordId, 7);
+                    Assert.NotEqual(0UL, database.Commit());
+                    Assert.NotEqual(0UL, database.Checkpoint());
+                }
 
                 database.Put(recordId, 9, "newer-field"u8);
                 Assert.NotEqual(0UL, database.Commit());
                 Assert.NotEqual(0UL, database.Checkpoint());
                 SealAndAcknowledgeOutbox(database);
 
-                Assert.Throws<IOException>(() => database.CompactTombstones(
-                    candidate => candidate.FieldId == 7 && candidate.IsFieldTombstone));
+                Assert.Throws<IOException>(() => database.CompactTombstones(candidate =>
+                    recordTombstone
+                        ? candidate.IsRecordTombstone
+                        : candidate.FieldId == 7 && candidate.IsFieldTombstone));
             }
 
             using (var recovered = FldDatabase.Open(root, namespaceId, Id(0x61)))
@@ -204,16 +218,32 @@ public sealed class FldDatabaseTombstoneGcTests
 
                 if (tombstoneMustBeGone)
                 {
-                    Assert.False(recovered.TryGetBytes(recordId, 7, out _));
-                    Assert.False(recovered.TryResolve(recordId, 7, out _));
+                    if (recordTombstone)
+                        Assert.False(recovered.IsRecordDead(recordId));
+                    else
+                    {
+                        Assert.False(recovered.TryGetBytes(recordId, 7, out _));
+                        Assert.False(recovered.TryResolve(recordId, 7, out _));
+                    }
                 }
                 else
                 {
-                    Assert.True(recovered.TryResolve(recordId, 7, out var retained));
-                    Assert.True(retained.IsTombstone);
-                    Assert.Equal(1, recovered.CompactTombstones(
-                        candidate => candidate.FieldId == 7 && candidate.IsFieldTombstone));
-                    Assert.False(recovered.TryGetBytes(recordId, 7, out _));
+                    if (recordTombstone)
+                        Assert.True(recovered.IsRecordDead(recordId));
+                    else
+                    {
+                        Assert.True(recovered.TryResolve(recordId, 7, out var retained));
+                        Assert.True(retained.IsTombstone);
+                    }
+
+                    Assert.Equal(1, recovered.CompactTombstones(candidate =>
+                        recordTombstone
+                            ? candidate.IsRecordTombstone
+                            : candidate.FieldId == 7 && candidate.IsFieldTombstone));
+                    if (recordTombstone)
+                        Assert.False(recovered.IsRecordDead(recordId));
+                    else
+                        Assert.False(recovered.TryGetBytes(recordId, 7, out _));
                 }
             }
 
@@ -221,6 +251,7 @@ public sealed class FldDatabaseTombstoneGcTests
             Assert.False(reopened.TryGetBytes(recordId, 7, out _));
             Assert.True(reopened.TryGetBytes(recordId, 9, out byte[]? finalValue));
             Assert.Equal("newer-field"u8.ToArray(), finalValue);
+            Assert.False(reopened.IsRecordDead(recordId));
         }
         finally
         {
