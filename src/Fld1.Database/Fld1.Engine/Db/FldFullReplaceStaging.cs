@@ -611,7 +611,7 @@ public sealed partial class FldDatabase
             state.BaseRunIds.All(runId => !active.Contains(runId));
     }
 
-    private static void WriteFullReplaceStage(string path, FullReplaceStageState state)
+    private void WriteFullReplaceStage(string path, FullReplaceStageState state)
     {
         string directory = Path.GetDirectoryName(path)!;
         StorageDirectorySync.CreateDirectoryDurable(directory);
@@ -624,7 +624,17 @@ public sealed partial class FldDatabase
             stream.Write(bytes);
             stream.Flush(flushToDisk: true);
         }
-        StorageDirectorySync.AtomicReplaceFile(temporary, path);
+        try
+        {
+            StorageDirectorySync.AtomicReplaceFile(temporary, path);
+        }
+        catch
+        {
+            // The stage file may have been renamed before a durability barrier failed.
+            // Its persisted cursor can now differ from the in-memory caller's view.
+            _faulted = true;
+            throw;
+        }
     }
 
     private static FullReplaceStageState ReadFullReplaceStage(string path)
