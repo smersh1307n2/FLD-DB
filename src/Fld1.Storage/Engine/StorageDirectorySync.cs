@@ -280,7 +280,10 @@ public static class StorageDirectorySync
         IntPtr info = Marshal.AllocHGlobal(bufferLength);
         try
         {
-            Marshal.WriteByte(info, 0, replaceExisting ? (byte)1 : (byte)0);
+            // FILE_RENAME_INFO begins with a union (BOOLEAN ReplaceIfExists / DWORD Flags).
+            // Clear the complete union and all structure padding before setting fields.
+            Marshal.Copy(new byte[bufferLength], 0, info, bufferLength);
+            Marshal.WriteInt32(info, 0, replaceExisting ? 1 : 0);
             Marshal.WriteIntPtr(info, rootOffset, IntPtr.Zero);
             Marshal.WriteInt32(info, lengthOffset, destinationBytes.Length);
             Marshal.Copy(destinationBytes, 0, IntPtr.Add(info, nameOffset), destinationBytes.Length);
