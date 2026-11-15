@@ -36,6 +36,7 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort QueryGcReferenceScan = 0x211B;
     public const ushort ReleaseGcReferenceScan = 0x211C;
     public const ushort RenewGcLease = 0x211D;
+    public const ushort QueryGcChangeIdBatch = 0x211E;
 }
 
 public sealed record FldDatabaseIpcMutation(
