@@ -1,5 +1,8 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Fld1.Storage.Engine;
 
@@ -15,8 +18,15 @@ public static class StorageDirectorySync
     private static readonly HashSet<string> PendingDirectoryEntries = new(StringComparer.Ordinal);
     private const int LinuxODirectory = 0x10000;
     private const int MacOsODirectory = 0x00100000;
-    private const uint WindowsMoveFileReplaceExisting = 0x00000001;
-    private const uint WindowsMoveFileWriteThrough = 0x00000008;
+    private const uint WindowsGenericRead = 0x80000000;
+    private const uint WindowsGenericWrite = 0x40000000;
+    private const uint WindowsDeleteAccess = 0x00010000;
+    private const uint WindowsOpenExisting = 3;
+    private const uint WindowsFileFlagWriteThrough = 0x80000000;
+    private const uint WindowsFileFlagBackupSemantics = 0x02000000;
+    private const int WindowsFileRenameInfo = 3;
+    private const uint WindowsDriveFixed = 3;
+    private static readonly ConcurrentDictionary<string, bool> SupportedWindowsVolumes = new(StringComparer.OrdinalIgnoreCase);
 
     [DllImport("libc", EntryPoint = "open", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int LinuxOpen(string path, int flags);
@@ -36,9 +46,43 @@ public static class StorageDirectorySync
     [DllImport("libSystem.B.dylib", EntryPoint = "close", SetLastError = true)]
     private static extern int MacOsClose(int fileDescriptor);
 
-    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", SetLastError = true, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern SafeFileHandle WindowsCreateFile(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+        uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", EntryPoint = "FlushFileBuffers", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool WindowsMoveFileEx(string existingFileName, string newFileName, uint flags);
+    private static extern bool WindowsFlushFileBuffers(SafeFileHandle fileHandle);
+
+    [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WindowsSetFileInformationByHandle(
+        SafeFileHandle fileHandle, int fileInformationClass, IntPtr fileInformation, uint bufferSize);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumePathNameW", SetLastError = true, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WindowsGetVolumePathName(string fileName, StringBuilder volumePathName, uint bufferLength);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", SetLastError = true, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint WindowsGetDriveType(string rootPathName);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumeInformationW", SetLastError = true, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WindowsGetVolumeInformation(
+        string rootPathName, StringBuilder? volumeNameBuffer, uint volumeNameSize,
+        out uint volumeSerialNumber, out uint maximumComponentLength, out uint fileSystemFlags,
+        StringBuilder fileSystemNameBuffer, uint fileSystemNameSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowsFileRenameInfoHeader
+    {
+        [MarshalAs(UnmanagedType.U1)]
+        public byte ReplaceIfExists;
+        public IntPtr RootDirectory;
+        public uint FileNameLength;
+        public char FileName;
+    }
 
     /// <summary>Creates directories using platform-specific namespace publication; Windows remains subject to the power-loss proof gate.</summary>
     public static void CreateDirectoryDurable(string path)
@@ -79,7 +123,7 @@ public static class StorageDirectorySync
 
     /// <summary>
     /// Flushes directory-entry updates on Linux/macOS. Windows publication uses
-    /// MOVEFILE_WRITE_THROUGH through AtomicReplaceFile and CreateDirectoryDurable.
+    /// NTFS FILE_FLAG_WRITE_THROUGH handle-scoped renames through AtomicReplaceFile and CreateDirectoryDurable.
     /// </summary>
     public static void Flush(string directory)
     {
@@ -112,9 +156,8 @@ public static class StorageDirectorySync
 
     /// <summary>
     /// Atomically replaces a file after its caller has flushed the temporary file.
-    /// Unix additionally fsyncs the containing directory; Windows requests
-    /// MOVEFILE_WRITE_THROUGH, but this is not proof of same-volume parent-namespace
-    /// power-loss durability (see the Windows GC release gate).
+    /// Unix additionally fsyncs the containing directory; Windows uses an NTFS
+    /// FILE_FLAG_WRITE_THROUGH handle-scoped rename. Other Windows filesystems are rejected.
     /// </summary>
     public static void AtomicReplaceFile(
         string temporaryPath,
@@ -126,11 +169,7 @@ public static class StorageDirectorySync
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         if (OperatingSystem.IsWindows())
         {
-            if (!WindowsMoveFileEx(ToWindowsExtendedPath(temporaryPath), ToWindowsExtendedPath(destinationPath),
-                    WindowsMoveFileReplaceExisting | WindowsMoveFileWriteThrough))
-                throw new IOException(
-                    $"Unable to publish replacement '{destinationPath}' with MOVEFILE_WRITE_THROUGH.",
-                    new Win32Exception(Marshal.GetLastPInvokeError()));
+            WindowsRenameByHandle(temporaryPath, destinationPath, replaceExisting: true, directory: false);
             afterReplace?.Invoke();
             return;
         }
@@ -155,11 +194,7 @@ public static class StorageDirectorySync
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         if (OperatingSystem.IsWindows())
         {
-            if (!WindowsMoveFileEx(ToWindowsExtendedPath(temporaryPath), ToWindowsExtendedPath(destinationPath),
-                    WindowsMoveFileWriteThrough))
-                throw new IOException(
-                    $"Unable to publish new file '{destinationPath}' with MOVEFILE_WRITE_THROUGH.",
-                    new Win32Exception(Marshal.GetLastPInvokeError()));
+            WindowsRenameByHandle(temporaryPath, destinationPath, replaceExisting: false, directory: false);
             afterMove?.Invoke();
             return;
         }
@@ -187,17 +222,105 @@ public static class StorageDirectorySync
             string temporary = Path.Combine(
                 parent, "." + Path.GetFileName(created) + ".create-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(temporary);
-            if (WindowsMoveFileEx(ToWindowsExtendedPath(temporary), ToWindowsExtendedPath(created), WindowsMoveFileWriteThrough))
-                continue;
-
-            int error = Marshal.GetLastPInvokeError();
-            try { Directory.Delete(temporary); } catch { }
-            if (Directory.Exists(created))
-                continue; // Another opener won the create race.
-            throw new IOException(
-                $"Unable to publish directory '{created}' with MOVEFILE_WRITE_THROUGH.",
-                new Win32Exception(error));
+            try
+            {
+                WindowsRenameByHandle(temporary, created, replaceExisting: false, directory: true);
+            }
+            catch (IOException)
+            {
+                try { Directory.Delete(temporary); } catch { }
+                if (Directory.Exists(created))
+                    continue; // Another opener won the create race.
+                throw;
+            }
         }
+    }
+
+    private static void WindowsRenameByHandle(
+        string sourcePath,
+        string destinationPath,
+        bool replaceExisting,
+        bool directory)
+    {
+        EnsureSupportedWindowsNtfsVolume(sourcePath);
+        string source = ToWindowsExtendedPath(sourcePath);
+        string destination = ToWindowsExtendedPath(destinationPath);
+        uint access = WindowsDeleteAccess;
+        uint flags = WindowsFileFlagWriteThrough;
+        if (directory)
+            flags |= WindowsFileFlagBackupSemantics;
+        else
+            access |= WindowsGenericRead | WindowsGenericWrite;
+
+        using SafeFileHandle handle = WindowsCreateFile(
+            source, access, shareMode: 0, IntPtr.Zero, WindowsOpenExisting, flags, IntPtr.Zero);
+        if (handle.IsInvalid)
+            throw new IOException(
+                $"Unable to open '{sourcePath}' for a write-through rename.",
+                new Win32Exception(Marshal.GetLastPInvokeError()));
+
+        if (!directory && !WindowsFlushFileBuffers(handle))
+            throw new IOException(
+                $"Unable to flush temporary file '{sourcePath}' before rename.",
+                new Win32Exception(Marshal.GetLastPInvokeError()));
+
+        byte[] destinationBytes = Encoding.Unicode.GetBytes(destination);
+        int nameOffset = Marshal.OffsetOf<WindowsFileRenameInfoHeader>(
+            nameof(WindowsFileRenameInfoHeader.FileName)).ToInt32();
+        int rootOffset = Marshal.OffsetOf<WindowsFileRenameInfoHeader>(
+            nameof(WindowsFileRenameInfoHeader.RootDirectory)).ToInt32();
+        int lengthOffset = Marshal.OffsetOf<WindowsFileRenameInfoHeader>(
+            nameof(WindowsFileRenameInfoHeader.FileNameLength)).ToInt32();
+        int bufferLength = checked(nameOffset + destinationBytes.Length);
+        IntPtr info = Marshal.AllocHGlobal(bufferLength);
+        try
+        {
+            Marshal.WriteByte(info, 0, replaceExisting ? (byte)1 : (byte)0);
+            Marshal.WriteIntPtr(info, rootOffset, IntPtr.Zero);
+            Marshal.WriteInt32(info, lengthOffset, destinationBytes.Length);
+            Marshal.Copy(destinationBytes, 0, IntPtr.Add(info, nameOffset), destinationBytes.Length);
+            if (!WindowsSetFileInformationByHandle(
+                    handle, WindowsFileRenameInfo, info, checked((uint)bufferLength)))
+                throw new IOException(
+                    $"Unable to publish '{destinationPath}' with a write-through handle rename.",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(info);
+        }
+    }
+
+    private static void EnsureSupportedWindowsNtfsVolume(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string volumePath;
+        if (!SupportedWindowsVolumes.TryGetValue(fullPath, out bool supported))
+        {
+            var volumeBuffer = new StringBuilder(32768);
+            if (!WindowsGetVolumePathName(fullPath, volumeBuffer, (uint)volumeBuffer.Capacity))
+                throw new IOException(
+                    $"Unable to resolve the volume for '{path}'.",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+
+            volumePath = volumeBuffer.ToString();
+            supported = WindowsGetDriveType(volumePath) == WindowsDriveFixed;
+            if (supported)
+            {
+                var fileSystemName = new StringBuilder(64);
+                if (!WindowsGetVolumeInformation(
+                        volumePath, null, 0, out _, out _, out _, fileSystemName, (uint)fileSystemName.Capacity))
+                    throw new IOException(
+                        $"Unable to query the filesystem for '{path}'.",
+                        new Win32Exception(Marshal.GetLastPInvokeError()));
+                supported = string.Equals(fileSystemName.ToString(), "NTFS", StringComparison.OrdinalIgnoreCase);
+            }
+            SupportedWindowsVolumes.TryAdd(fullPath, supported);
+        }
+
+        if (!supported)
+            throw new PlatformNotSupportedException(
+                $"Durable Windows namespace publication is currently restricted to local fixed NTFS volumes; '{path}' is not on a supported volume.");
     }
 
     private static string ToWindowsExtendedPath(string path)
