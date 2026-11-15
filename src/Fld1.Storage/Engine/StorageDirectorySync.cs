@@ -40,7 +40,7 @@ public static class StorageDirectorySync
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool WindowsMoveFileEx(string existingFileName, string newFileName, uint flags);
 
-    /// <summary>Creates directories with durable parent-entry publication on supported platforms.</summary>
+    /// <summary>Creates directories using platform-specific namespace publication; Windows remains subject to the power-loss proof gate.</summary>
     public static void CreateDirectoryDurable(string path)
     {
         string fullPath = Path.GetFullPath(path);
@@ -112,8 +112,9 @@ public static class StorageDirectorySync
 
     /// <summary>
     /// Atomically replaces a file after its caller has flushed the temporary file.
-    /// Unix additionally fsyncs the containing directory; Windows uses
-    /// MOVEFILE_WRITE_THROUGH so the rename is durable before returning.
+    /// Unix additionally fsyncs the containing directory; Windows requests
+    /// MOVEFILE_WRITE_THROUGH, but this is not proof of same-volume parent-namespace
+    /// power-loss durability (see the Windows GC release gate).
     /// </summary>
     public static void AtomicReplaceFile(
         string temporaryPath,
@@ -128,7 +129,7 @@ public static class StorageDirectorySync
             if (!WindowsMoveFileEx(ToWindowsExtendedPath(temporaryPath), ToWindowsExtendedPath(destinationPath),
                     WindowsMoveFileReplaceExisting | WindowsMoveFileWriteThrough))
                 throw new IOException(
-                    $"Unable to durably replace '{destinationPath}'.",
+                    $"Unable to publish replacement '{destinationPath}' with MOVEFILE_WRITE_THROUGH.",
                     new Win32Exception(Marshal.GetLastPInvokeError()));
             afterReplace?.Invoke();
             return;
@@ -157,7 +158,7 @@ public static class StorageDirectorySync
             if (!WindowsMoveFileEx(ToWindowsExtendedPath(temporaryPath), ToWindowsExtendedPath(destinationPath),
                     WindowsMoveFileWriteThrough))
                 throw new IOException(
-                    $"Unable to durably create '{destinationPath}'.",
+                    $"Unable to publish new file '{destinationPath}' with MOVEFILE_WRITE_THROUGH.",
                     new Win32Exception(Marshal.GetLastPInvokeError()));
             afterMove?.Invoke();
             return;
@@ -194,7 +195,7 @@ public static class StorageDirectorySync
             if (Directory.Exists(created))
                 continue; // Another opener won the create race.
             throw new IOException(
-                $"Unable to durably create directory '{created}' with MOVEFILE_WRITE_THROUGH.",
+                $"Unable to publish directory '{created}' with MOVEFILE_WRITE_THROUGH.",
                 new Win32Exception(error));
         }
     }
