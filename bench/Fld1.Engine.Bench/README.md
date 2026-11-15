@@ -49,3 +49,15 @@ BenchmarkDotNet settings are 1 warmup and 5 measured iterations for this sweep. 
 The full-sweep matrix also includes `ReclaimAllTombstonesInSinglePassWithPeakSampling`. It forces a full collection after setup, records baseline process working set and managed heap, then samples both every 2 ms while one single-pass rewrite runs. The output line `TOMBSTONE_GC_PEAK_SAMPLE` reports baseline, sampled peak and delta for each measure.
 
 This is a diagnostic estimate, not an exact allocator high-water mark: a 2 ms sampler can miss shorter-lived peaks, and the background sampler adds some CPU and memory overhead. Do not use this method's BenchmarkDotNet timing as a performance comparison. Its purpose is to distinguish peak working-set/heap behavior from `MemoryDiagnoser` cumulative allocation.
+
+The corrected isolated child-process run completed on FLD-DB HEAD `8109aecb61045a151f31905c1bf0f8cacd0931d6` (GitHub Actions run `43699646746`, artifact `14155834102`). Each cardinality has eight samples. Mean sampled managed-heap delta after opening the prepared namespace:
+
+| Tombstones | Mean managed-heap delta | Samples |
+|---:|---:|---:|
+| 1,000 | 1.09 MiB | 8 |
+| 10,000 | 5.93 MiB | 8 |
+| 50,000 | 46.05 MiB | 8 |
+| 100,000 | 88.30 MiB | 8 |
+| 250,000 | 190.91 MiB | 8 |
+
+All samples reported `WorkingSetDeltaBytes=0`. This is an inconclusive working-set measurement, not evidence of zero resident-memory growth. The current sampler/platform high-water reporting does not provide a trustworthy process peak; a reliable OS-level peak metric is still required before making physical-memory capacity claims. Managed-heap deltas are sampled live-heap observations and must not be confused with cumulative allocations in the BenchmarkDotNet tables above.
