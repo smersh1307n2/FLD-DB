@@ -43,3 +43,9 @@ The paired full-sweep run on FLD-DB commit `201710cfa461b3f94013cd0e273c4a6beda2
 The 250k single rewrite is about 114x faster than repeating 4,096-entry pages and allocates about 105x less than that repeated-page strategy. Against the previous single-rewrite run before the owned-array factory (250k: 252.594 ms / 117,233.96 KB), the candidate identity change reduced cumulative allocation by about 25.0%, with no timing regression (248.692 ms; the small time difference is not treated as a speed claim). At 50k and 100k, cumulative allocation fell by about 23.6% and 23.5%, respectively.
 
 BenchmarkDotNet settings are 1 warmup and 5 measured iterations for this sweep. The small 1k case is noisy. All allocation values are cumulative managed bytes per measured operation, not peak live heap or process working set. This benchmark remains FLD-only and does not include BIN-SYNC signed proof, Metadata reference scan, transport, or Host orchestration. It is not GC enablement approval.
+
+### Sampled peak-memory diagnostic
+
+The full-sweep matrix also includes `ReclaimAllTombstonesInSinglePassWithPeakSampling`. It forces a full collection after setup, records baseline process working set and managed heap, then samples both every 2 ms while one single-pass rewrite runs. The output line `TOMBSTONE_GC_PEAK_SAMPLE` reports baseline, sampled peak and delta for each measure.
+
+This is a diagnostic estimate, not an exact allocator high-water mark: a 2 ms sampler can miss shorter-lived peaks, and the background sampler adds some CPU and memory overhead. Do not use this method's BenchmarkDotNet timing as a performance comparison. Its purpose is to distinguish peak working-set/heap behavior from `MemoryDiagnoser` cumulative allocation.
