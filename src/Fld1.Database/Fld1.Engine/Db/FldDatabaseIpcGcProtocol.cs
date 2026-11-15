@@ -149,6 +149,83 @@ public static class FldDatabaseIpcGcProtocol
             kind, token, first, second, authorEpoch, transportPeerEpoch);
     }
 
+
+    public const int MaxChangeIdBatchCount = 256;
+
+    public static byte[] EncodeChangeIdBatchQuery(Guid token, IReadOnlyList<byte[]> changeIds)
+    {
+        ArgumentNullException.ThrowIfNull(changeIds);
+        if (token == Guid.Empty || changeIds.Count is < 1 or > MaxChangeIdBatchCount)
+            throw new ArgumentOutOfRangeException(nameof(changeIds));
+        byte[] payload = new byte[checked(18 + changeIds.Count * 16)];
+        token.TryWriteBytes(payload.AsSpan(0, 16), bigEndian: true, out _);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(16), checked((ushort)changeIds.Count));
+        int offset = 18;
+        foreach (byte[] id in changeIds)
+        {
+            if (id is null || id.Length != 16 || id.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                throw new ArgumentException("GC ChangeId batch identities must be nonzero 16-byte values.", nameof(changeIds));
+            id.CopyTo(payload, offset);
+            offset += 16;
+        }
+        return payload;
+    }
+
+    public static (Guid Token, byte[][] ChangeIds) DecodeChangeIdBatchQuery(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length < 34)
+            throw new InvalidDataException("FLD GC ChangeId batch query is truncated.");
+        Guid token = new(payload.Span[..16], bigEndian: true);
+        ushort count = BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[16..]);
+        if (token == Guid.Empty || count is < 1 or > MaxChangeIdBatchCount ||
+            payload.Length != 18 + count * 16)
+            throw new InvalidDataException("FLD GC ChangeId batch query header or length is invalid.");
+        var ids = new byte[count][];
+        int offset = 18;
+        for (int i = 0; i < count; i++)
+        {
+            ReadOnlySpan<byte> id = payload.Span.Slice(offset, 16);
+            if (id.IndexOfAnyExcept((byte)0) < 0)
+                throw new InvalidDataException("FLD GC ChangeId batch contains a zero identity.");
+            ids[i] = id.ToArray();
+            offset += 16;
+        }
+        return (token, ids);
+    }
+
+    public static byte[] EncodeChangeIdBatchResponse(IReadOnlyList<bool> referenced)
+    {
+        ArgumentNullException.ThrowIfNull(referenced);
+        if (referenced.Count is < 1 or > MaxChangeIdBatchCount)
+            throw new ArgumentOutOfRangeException(nameof(referenced));
+        int bitmapBytes = (referenced.Count + 7) / 8;
+        byte[] payload = new byte[2 + bitmapBytes];
+        BinaryPrimitives.WriteUInt16LittleEndian(payload, checked((ushort)referenced.Count));
+        for (int i = 0; i < referenced.Count; i++)
+            if (referenced[i]) payload[2 + i / 8] |= (byte)(1 << (i % 8));
+        return payload;
+    }
+
+    public static bool[] DecodeChangeIdBatchResponse(ReadOnlyMemory<byte> payload, int expectedCount)
+    {
+        if (expectedCount is < 1 or > MaxChangeIdBatchCount)
+            throw new ArgumentOutOfRangeException(nameof(expectedCount));
+        int bitmapBytes = (expectedCount + 7) / 8;
+        if (payload.Length != 2 + bitmapBytes ||
+            BinaryPrimitives.ReadUInt16LittleEndian(payload.Span) != expectedCount)
+            throw new InvalidDataException("FLD GC ChangeId batch response length or count is invalid.");
+        if (expectedCount % 8 != 0)
+        {
+            byte unusedMask = (byte)~((1 << (expectedCount % 8)) - 1);
+            if ((payload.Span[^1] & unusedMask) != 0)
+                throw new InvalidDataException("FLD GC ChangeId batch response has nonzero padding bits.");
+        }
+        var result = new bool[expectedCount];
+        for (int i = 0; i < expectedCount; i++)
+            result[i] = (payload.Span[2 + i / 8] & (1 << (i % 8))) != 0;
+        return result;
+    }
+
     public static byte[] EncodeBooleanResponse(bool value) => [value ? (byte)1 : (byte)0];
 
     public static bool DecodeBooleanResponse(ReadOnlyMemory<byte> payload)
