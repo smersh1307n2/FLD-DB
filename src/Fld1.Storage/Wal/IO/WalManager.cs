@@ -86,10 +86,10 @@ internal sealed class WalManager : IDisposable
                 StorageDirectorySync.AtomicCreateFile(
                     tempPath, path,
                     afterMove: () => faultInjector?.Invoke(StorageFaultPoint.BeforeWalDirectoryFsync));
-                var writer = faultInjector is null
+                var initialWriter = faultInjector is null
                     ? WalWriter.OpenForAppend(path, partitionId, WalHeader.Size, nextCommitSeq: 1)
                     : WalWriter.OpenForAppendForTesting(path, partitionId, WalHeader.Size, nextCommitSeq: 1, faultInjector);
-                return (new WalManager(walDir, partitionId, rotateAfterBytes, writer, 0,
+                return (new WalManager(walDir, partitionId, rotateAfterBytes, initialWriter, 0,
                     writerFence, faultInjector), allRecords);
             }
 
