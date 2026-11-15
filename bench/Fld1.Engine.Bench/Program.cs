@@ -11,7 +11,7 @@ if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
     // Each invocation compacts one bounded page from a freshly seeded on-disk namespace.
     // Keep the iteration count modest because setup intentionally writes 50k records.
     var gcConfig = DefaultConfig.Instance.AddJob(
-        Job.Default.WithWarmupCount(1).WithIterationCount(3));
+        Job.Default.WithWarmupCount(2).WithIterationCount(10));
     BenchmarkRunner.Run<TombstoneGcBench>(gcConfig);
     BenchmarkRunner.Run<TombstoneGcSweepBench>(gcConfig);
 }
