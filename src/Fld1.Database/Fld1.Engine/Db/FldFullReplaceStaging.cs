@@ -614,10 +614,7 @@ public sealed partial class FldDatabase
     private static void WriteFullReplaceStage(string path, FullReplaceStageState state)
     {
         string directory = Path.GetDirectoryName(path)!;
-        bool directoryExisted = Directory.Exists(directory);
-        Directory.CreateDirectory(directory);
-        if (!directoryExisted)
-            StorageDirectorySync.Flush(Path.GetDirectoryName(directory)!);
+        StorageDirectorySync.CreateDirectoryDurable(directory);
         byte[] bytes = EncodeFullReplaceStage(state);
         string temporary = path + ".tmp";
         using (var stream = new FileStream(
@@ -627,8 +624,7 @@ public sealed partial class FldDatabase
             stream.Write(bytes);
             stream.Flush(flushToDisk: true);
         }
-        File.Move(temporary, path, true);
-        StorageDirectorySync.Flush(directory);
+        StorageDirectorySync.AtomicReplaceFile(temporary, path);
     }
 
     private static FullReplaceStageState ReadFullReplaceStage(string path)

@@ -3175,10 +3175,9 @@ public sealed partial class FldDatabase : IDisposable
             fs.Flush(flushToDisk: true);
         }
 
-        File.Move(tempPath, path, overwrite: true);
         // The compatibility mirror must be durable before the FLD manifest or
         // FULL_REPLACE stage cursor can publish a reference to it.
-        StorageDirectorySync.Flush(directory);
+        StorageDirectorySync.AtomicReplaceFile(tempPath, path);
     }
 
     public void Dispose()

@@ -444,7 +444,7 @@ public sealed class StorageBlobStore
             stream.Write(page);
             stream.Flush(flushToDisk: true);
         }
-        File.Move(temporary, path, overwrite: true);
+        StorageDirectorySync.AtomicReplaceFile(temporary, path, flushParent: false);
     }
 
     private sealed class SharedState

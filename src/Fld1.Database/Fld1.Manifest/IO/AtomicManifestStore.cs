@@ -70,9 +70,8 @@ public sealed class AtomicManifestStore
             }
             // Atomic replace. A failure after rename is an uncertain completion:
             // callers must fault their in-memory transaction owner and recover by reopening.
-            File.Move(_tmpPath, _path, overwrite: true);
-            _afterManifestRenameBeforeDirectoryFlush?.Invoke();
-            StorageDirectorySync.Flush(_dir);
+            StorageDirectorySync.AtomicReplaceFile(
+                _tmpPath, _path, afterReplace: _afterManifestRenameBeforeDirectoryFlush);
             return doc.Generation;
         }
     }
