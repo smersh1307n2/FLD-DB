@@ -465,6 +465,41 @@ public readonly struct RunReader
     }
 
     /// <summary>
+    /// Enumerate every stored (RecordId, FieldId) pair, including tombstone
+    /// descriptors. RecordId memory slices point into this immutable Run buffer;
+    /// callers must not retain them beyond the lifetime of the backing memory.
+    /// </summary>
+    public void ScanAllFieldIds(Action<ReadOnlyMemory<byte>, ushort> onFieldId)
+    {
+        ArgumentNullException.ThrowIfNull(onFieldId);
+        if (IsEmpty) return;
+
+        ReadOnlySpan<byte> file = _file.Span;
+        uint clusterCount = RunHeader.ReadNumClusters(file);
+        ulong slotOffset = RunHeader.ReadSlotOff(file);
+        for (uint clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++)
+        {
+            int slotPosition = checked((int)slotOffset +
+                checked((int)clusterIndex) * RunConstants.CompactSlotSize);
+            ulong clusterOffset = BinaryPrimitives.ReadUInt64LittleEndian(
+                file.Slice(slotPosition, sizeof(ulong)));
+            int cluster = checked((int)clusterOffset);
+            ReadOnlyMemory<byte> recordId = _file.Slice(cluster, 16);
+
+            ushort fieldCount = BinaryPrimitives.ReadUInt16LittleEndian(
+                file.Slice(cluster + 16, sizeof(ushort)));
+            int descriptorBase = cluster + RunConstants.ClusterHeaderSize;
+            for (int fieldIndex = 0; fieldIndex < fieldCount; fieldIndex++)
+            {
+                int descriptor = descriptorBase + fieldIndex * RunConstants.FieldDescSize;
+                ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(
+                    file.Slice(descriptor, sizeof(ushort)));
+                onFieldId(recordId, fieldId);
+            }
+        }
+    }
+
+    /// <summary>
     /// Reads one RecordId by its canonical run slot index without allocating or
     /// scanning preceding clusters. Run slots are emitted in canonical RecordId
     /// order by RunBuilder; callers can use this primitive for bounded k-way
