@@ -12,8 +12,10 @@ if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
     // Keep the iteration count modest because setup intentionally writes 50k records.
     var gcConfig = DefaultConfig.Instance.AddJob(
         Job.Default.WithWarmupCount(2).WithIterationCount(10));
+    var sweepConfig = DefaultConfig.Instance.AddJob(
+        Job.Default.WithWarmupCount(1).WithIterationCount(5));
     BenchmarkRunner.Run<TombstoneGcBench>(gcConfig);
-    BenchmarkRunner.Run<TombstoneGcSweepBench>(gcConfig);
+    BenchmarkRunner.Run<TombstoneGcSweepBench>(sweepConfig);
 }
 else
 {
