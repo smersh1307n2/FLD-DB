@@ -23,4 +23,6 @@ It then measures exactly one call to `FldDatabase.CompactTombstones` for each pa
 
 The invocation verifies that the number physically reclaimed equals `min(namespace cardinality, page limit)`. BenchmarkDotNet reports elapsed time and managed allocation; the harness also emits `TOMBSTONE_GC_ALLOCATED_BYTES` for each case.
 
+The same command also runs `TombstoneGcSweepBench`: for 1k / 10k / 50k tombstones it repeatedly calls the physical compactor with the production page limit of 4,096 until every tombstone has been reclaimed. It verifies the exact page count and reports total sweep time and allocations (`TOMBSTONE_GC_SWEEP_ALLOCATED_BYTES`). This captures repeated whole-namespace rewrites that the single-page benchmark does not.
+
 This isolates FLD's physical compaction cost. It does not benchmark signature verification, namespace-roster exchange, Metadata reference scans, transport, or the end-to-end BIN-SYNC proof path. A passing benchmark is not authorization to enable GC. All production GC feature switches remain default-off.
