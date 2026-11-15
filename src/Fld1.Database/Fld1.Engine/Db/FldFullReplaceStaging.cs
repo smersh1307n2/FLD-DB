@@ -320,8 +320,16 @@ public sealed partial class FldDatabase
 
             var updatedRuns = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
             updatedRuns.AddRange(replacementEntries);
-            _manifestStore.Update(current => CloneManifest(
-                current, lastFlushed: state.BaseLastSealedCommitSeq, runs: updatedRuns));
+            try
+            {
+                _manifestStore.Update(current => CloneManifest(
+                    current, lastFlushed: state.BaseLastSealedCommitSeq, runs: updatedRuns));
+            }
+            catch
+            {
+                _faulted = true;
+                throw;
+            }
 
             _runs.Clear();
             _runs.AddRange(replacementRuns);

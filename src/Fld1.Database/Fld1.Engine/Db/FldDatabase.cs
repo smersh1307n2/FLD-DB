@@ -1403,26 +1403,25 @@ public sealed partial class FldDatabase : IDisposable
                 seqHi = _manifestStore.Load().LastFlushedCommitSeq;
             if (seqHi == 0) seqHi = _lastSealedCommitSeq;
 
-            _manifestStore.Update(m =>
-            {
-                var runs = m.Runs.ToList();
-                runs.Add(new RunEntry
-                {
-                    RunId = runId,
-                    Level = 0,
-                    Ns = _namespaceId,
-                    MinRec = recs[0],
-                    MaxRec = recs[^1],
-                    SeqLo = _lastSealedCommitSeq + 1,
-                    SeqHi = seqHi
-                });
-                return CloneManifest(m, runs: runs, lastFlushed: seqHi,
-                    localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
-                localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients));
-            });
-
             try
             {
+                _manifestStore.Update(m =>
+                {
+                    var runs = m.Runs.ToList();
+                    runs.Add(new RunEntry
+                    {
+                        RunId = runId,
+                        Level = 0,
+                        Ns = _namespaceId,
+                        MinRec = recs[0],
+                        MaxRec = recs[^1],
+                        SeqLo = _lastSealedCommitSeq + 1,
+                        SeqHi = seqHi
+                    });
+                    return CloneManifest(m, runs: runs, lastFlushed: seqHi,
+                        localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
+                        localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients));
+                });
                 _outbox.MarkMaterialized(seqHi);
             }
             catch
@@ -2098,9 +2097,17 @@ public sealed partial class FldDatabase : IDisposable
         {
             EnsureHealthy();
             if (!_manifestDirty) return;
-            _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq,
-                localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
-                localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients)));
+            try
+            {
+                _manifestStore.Update(m => CloneManifest(m, lastFlushed: _pendingFlushedCommitSeq,
+                    localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
+                    localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients)));
+            }
+            catch
+            {
+                _faulted = true;
+                throw;
+            }
             _manifestDirty = false;
         }
     }

@@ -5,7 +5,7 @@ namespace Fld1.Manifest.IO;
 
 /// <summary>
 /// Atomic manifest.fldm persistence. Spec [M-ATOMIC]:
-/// temp → fsync → atomic rename → fsync directory.
+/// temp → fsync → atomic rename → directory fsync on Linux/macOS (Windows directory durability is not claimed).
 /// Reader sees old or new whole; a present CRC-invalid file fails closed.
 /// </summary>
 public sealed class AtomicManifestStore
