@@ -113,6 +113,18 @@ public class TombstoneGcSweepBench
         return reclaimedTotal;
     }
 
+    [Benchmark(Description = "Complete FLD tombstone-GC sweep in one namespace rewrite")]
+    public int ReclaimAllTombstonesInSinglePass()
+    {
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        int reclaimed = _database.CompactTombstones(static _ => true, TombstoneCount);
+        _lastGcAllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        if (reclaimed != TombstoneCount)
+            throw new InvalidOperationException(
+                $"Single-pass tombstone sweep reclaimed {reclaimed}/{TombstoneCount} entries.");
+        return reclaimed;
+    }
+
     private static byte[] Id(byte value)
     {
         byte[] id = new byte[16];
