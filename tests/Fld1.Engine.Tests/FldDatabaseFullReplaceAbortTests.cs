@@ -80,6 +80,70 @@ public sealed class FldDatabaseFullReplaceAbortTests
         }
     }
 
+    [Fact]
+    public void Full_replace_manifest_rename_uncertain_completion_recovers_as_committed_not_abortable()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-full-replace-rename-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x757;
+        byte[] originalRecordId = Id(0x01);
+        byte[] replacementRecordId = Id(0x10);
+        Guid generation = Guid.Parse("bbccdde0-ff11-4223-8334-455667788990");
+        byte[] digest = SHA256.HashData("installed-full-replace"u8);
+        bool injectFault = false;
+
+        try
+        {
+            using (var database = FldDatabase.Open(new FldOpenOptions
+            {
+                Path = root,
+                NamespaceId = namespaceId,
+                LocalAuthor = Id(0x61),
+                CompactionFaultInjector = point =>
+                {
+                    if (injectFault && point == FldCompactionFaultPoint.AfterManifestRenameBeforeDirectoryFlush)
+                        throw new IOException("Injected FULL_REPLACE Manifest rename/fsync uncertainty.");
+                }
+            }))
+            {
+                database.Put(originalRecordId, 5, "old-generation"u8);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+
+                ulong outboxHigh = database.GetOutboxHighWatermark();
+                if (outboxHigh != 0)
+                {
+                    var lease = database.AcquireOutboxLease(Id(0x7E));
+                    database.AcknowledgeOutbox(outboxHigh, lease);
+                }
+
+                database.BeginProviderReplacement(
+                    generation, sourceFeedWatermark: outboxHigh, expectedEntryCount: 1, digest);
+                database.StageProviderReplacementPage(
+                    generation, 0, new[] { Entry(0x10, "new-generation") });
+
+                injectFault = true;
+                Assert.Throws<IOException>(() => database.CommitProviderReplacement(generation, digest));
+                Assert.Throws<InvalidOperationException>(() =>
+                    database.Put(originalRecordId, 6, "must-not-continue"u8));
+            }
+
+            using var recovered = FldDatabase.Open(root, namespaceId, Id(0x61));
+            Assert.False(recovered.TryGetBytes(originalRecordId, 5, out _));
+            Assert.True(recovered.TryGetBytes(replacementRecordId, 1, out byte[]? replacement));
+            Assert.Equal("new-generation"u8.ToArray(), replacement);
+
+            // The Manifest rename was visible at the process-restart boundary. The
+            // staged marker is reconciled from the authoritative Manifest and cannot
+            // be mistaken for an uncommitted generation eligible for abort.
+            Assert.Throws<InvalidOperationException>(() =>
+                recovered.AbortProviderReplacement(generation, limit: 1));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     private static FldProviderSnapshotEntry Entry(byte recordId, string value)
         => new(
             Id(recordId),
