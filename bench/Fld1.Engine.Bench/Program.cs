@@ -13,6 +13,7 @@ if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
     var gcConfig = DefaultConfig.Instance.AddJob(
         Job.Default.WithWarmupCount(1).WithIterationCount(3));
     BenchmarkRunner.Run<TombstoneGcBench>(gcConfig);
+    BenchmarkRunner.Run<TombstoneGcSweepBench>(gcConfig);
 }
 else
 {
