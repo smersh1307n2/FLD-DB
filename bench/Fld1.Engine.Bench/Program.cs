@@ -6,6 +6,15 @@ using BenchmarkDotNet.Running;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Db;
 
+if (args.Length == 3 && args[0] == "--tombstone-gc-probe-child")
+{
+    if (!int.TryParse(args[2], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out int tombstoneCount) ||
+        tombstoneCount <= 0)
+        return 64;
+    return TombstoneGcSweepBench.RunPeakProbeChild(args[1], tombstoneCount);
+}
+
 if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
 {
     // Each invocation compacts one bounded page from a freshly seeded on-disk namespace.
