@@ -43,6 +43,10 @@ jobs:
         shell: bash
         run: dotnet build Fld.Db.slnx --configuration Release --no-restore 2>&1 | tee ci-logs/build.log
 
+      - name: Build FLD tombstone-GC performance benchmark
+        shell: bash
+        run: dotnet build bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release
+
       - name: Run tests
         shell: bash
         run: dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
