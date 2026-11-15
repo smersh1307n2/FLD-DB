@@ -2066,9 +2066,9 @@ public sealed partial class FldDatabase : IDisposable
         bool have = false;
         ulong bestWall = 0;
         uint bestLog = 0;
-        byte[]? bestAuthor = null;
-        byte[]? bestValue = null;
-        byte[]? bestChangeId = null;
+        ReadOnlyMemory<byte> bestAuthor = ReadOnlyMemory<byte>.Empty;
+        ReadOnlyMemory<byte> bestValue = ReadOnlyMemory<byte>.Empty;
+        ReadOnlyMemory<byte> bestChangeId = ReadOnlyMemory<byte>.Empty;
         uint bestOriginAuthorEpoch = 0;
         ulong bestOriginSequence = 0;
         bool bestTomb = false;
@@ -2080,11 +2080,11 @@ public sealed partial class FldDatabase : IDisposable
             have = true;
             bestWall = mem.Wall;
             bestLog = mem.Logical;
-            bestAuthor = mem.AuthorNodeId;
-            bestValue = mem.Value;
+            bestAuthor = mem.AuthorNodeId ?? Array.Empty<byte>();
+            bestValue = mem.Value ?? Array.Empty<byte>();
             bestTomb = mem.IsTombstone;
             bestEpoch = mem.KeyEpoch;
-            bestChangeId = mem.ChangeId;
+            bestChangeId = mem.ChangeId ?? Array.Empty<byte>();
             bestOriginAuthorEpoch = mem.OriginAuthorEpoch;
             bestOriginSequence = mem.OriginSequence;
         }
@@ -2095,19 +2095,19 @@ public sealed partial class FldDatabase : IDisposable
             if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var state) || !state.Found)
                 continue;
 
-            byte[] author = state.AuthorNodeId.ToArray();
+            ReadOnlyMemory<byte> author = state.AuthorNodeId;
             if (!have || FieldResolver.IsNewer(
-                    state.Wall, state.Logical, author,
-                    bestWall, bestLog, bestAuthor ?? ReadOnlySpan<byte>.Empty))
+                    state.Wall, state.Logical, author.Span,
+                    bestWall, bestLog, bestAuthor.Span))
             {
                 have = true;
                 bestWall = state.Wall;
                 bestLog = state.Logical;
                 bestAuthor = author;
-                bestValue = state.IsTombstone ? Array.Empty<byte>() : state.Value.ToArray();
+                bestValue = state.IsTombstone ? ReadOnlyMemory<byte>.Empty : state.Value;
                 bestTomb = state.IsTombstone;
                 bestEpoch = state.KeyEpoch;
-                bestChangeId = state.ChangeId.IsEmpty ? Array.Empty<byte>() : state.ChangeId.ToArray();
+                bestChangeId = state.ChangeId;
                 bestOriginAuthorEpoch = state.OriginAuthorEpoch;
                 bestOriginSequence = state.OriginSequence;
             }
@@ -2118,7 +2118,9 @@ public sealed partial class FldDatabase : IDisposable
 
         resolved = new FieldResolver.Resolved(
             true, bestTomb, bestEpoch, bestWall, bestLog,
-            bestAuthor, bestValue, bestChangeId,
+            bestAuthor.IsEmpty ? Array.Empty<byte>() : bestAuthor.ToArray(),
+            bestValue.IsEmpty ? Array.Empty<byte>() : bestValue.ToArray(),
+            bestChangeId.IsEmpty ? Array.Empty<byte>() : bestChangeId.ToArray(),
             bestOriginAuthorEpoch, bestOriginSequence);
         return true;
     }
