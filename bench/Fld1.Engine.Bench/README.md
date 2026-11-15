@@ -26,3 +26,20 @@ The invocation verifies that the number physically reclaimed equals `min(namespa
 The same command also runs `TombstoneGcSweepBench` at 1k / 10k / 50k / 100k / 250k tombstones using two strategies: (1) repeated 4,096-candidate calls, which expose the cost of repeated whole-namespace rewrites, and (2) one full-sweep call with a candidate budget equal to the namespace cardinality, which performs one namespace rewrite. Both methods verify the exact reclaimed count and report total sweep time and allocations (`TOMBSTONE_GC_SWEEP_ALLOCATED_BYTES`). The public API accepts a bounded candidate budget up to 1,000,000; callers should keep 4,096 for latency-bounded maintenance pages and use a larger budget only when a complete rewrite is operationally acceptable.
 
 This isolates FLD's physical compaction cost. It does not benchmark signature verification, namespace-roster exchange, Metadata reference scans, transport, or the end-to-end BIN-SYNC proof path. A passing benchmark is not authorization to enable GC. All production GC feature switches remain default-off.
+
+
+### Latest single-rewrite and candidate-identity allocation results (2026-11-15)
+
+The paired full-sweep run on FLD-DB commit `201710cfa461b3f94013cd0e273c4a6beda2cdcb` completed successfully (GitHub Actions run `43692777196`, artifact `14153956925`). It includes the internal owned-array candidate factory, which avoids cloning identity arrays a second time while preserving the public candidate constructor's defensive-copy contract.
+
+| Tombstones | Repeated 4,096-page sweep | Single rewrite | Repeated allocations | Single-rewrite allocations |
+|---:|---:|---:|---:|---:|
+| 1,000 | 5.748 ms | 6.062 ms | 477.57 KB | 477.57 KB |
+| 10,000 | 70.414 ms | 28.205 ms | 13,430.7 KB | 4,145.43 KB |
+| 50,000 | 940.132 ms | 33.279 ms | 366,656.58 KB | 18,925.49 KB |
+| 100,000 | 4,137.862 ms | 66.951 ms | 1,475,011.36 KB | 38,246.41 KB |
+| 250,000 | 28,253.695 ms | 248.692 ms | 9,203,877.92 KB | 87,937.09 KB |
+
+The 250k single rewrite is about 114x faster than repeating 4,096-entry pages and allocates about 105x less than that repeated-page strategy. Against the previous single-rewrite run before the owned-array factory (250k: 252.594 ms / 117,233.96 KB), the candidate identity change reduced cumulative allocation by about 25.0%, with no timing regression (248.692 ms; the small time difference is not treated as a speed claim). At 50k and 100k, cumulative allocation fell by about 23.6% and 23.5%, respectively.
+
+BenchmarkDotNet settings are 1 warmup and 5 measured iterations for this sweep. The small 1k case is noisy. All allocation values are cumulative managed bytes per measured operation, not peak live heap or process working set. This benchmark remains FLD-only and does not include BIN-SYNC signed proof, Metadata reference scan, transport, or Host orchestration. It is not GC enablement approval.
