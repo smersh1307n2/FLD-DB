@@ -14,6 +14,9 @@ namespace Fld1.Engine.Bench;
 public class TombstoneGcSweepBench
 {
     private const int PageLimit = 4_096;
+    // Keep each WAL GroupCommit payload below the 16 MiB wire/storage limit.
+    // The final checkpoint still consolidates each phase into one Run.
+    private const int SetupCommitBatchSize = 8_192;
     private string _directory = string.Empty;
     private FldDatabase _database = null!;
     private byte[][] _recordIds = Array.Empty<byte[]>();
@@ -31,20 +34,37 @@ public class TombstoneGcSweepBench
         _database = FldDatabase.Open(_directory, 0);
         _recordIds = new byte[TombstoneCount][];
 
-        for (int i = 0; i < TombstoneCount; i++)
+        for (int offset = 0; offset < TombstoneCount; offset += SetupCommitBatchSize)
         {
-            byte[] recordId = FldDatabase.NewRecordId();
-            _recordIds[i] = recordId;
-            _database.Put(recordId, 1, _value);
+            int end = Math.Min(offset + SetupCommitBatchSize, TombstoneCount);
+            for (int i = offset; i < end; i++)
+            {
+                byte[] recordId = FldDatabase.NewRecordId();
+                _recordIds[i] = recordId;
+                _database.Put(recordId, 1, _value);
+            }
+
+            if (_database.Commit() == 0)
+                throw new InvalidOperationException("Tombstone sweep benchmark failed to commit a live-value setup batch.");
         }
 
-        if (_database.Commit() == 0 || _database.Checkpoint() == 0)
+        // Consolidate all bounded WAL commits into one live-value Run before
+        // creating tombstones, so setup batching does not inflate Run cardinality.
+        if (_database.Checkpoint() == 0)
             throw new InvalidOperationException("Tombstone sweep benchmark failed to persist its live-value generation.");
 
-        foreach (byte[] recordId in _recordIds)
-            _database.Delete(recordId, 1);
+        for (int offset = 0; offset < TombstoneCount; offset += SetupCommitBatchSize)
+        {
+            int end = Math.Min(offset + SetupCommitBatchSize, TombstoneCount);
+            for (int i = offset; i < end; i++)
+                _database.Delete(_recordIds[i], 1);
 
-        if (_database.Commit() == 0 || _database.Checkpoint() == 0)
+            if (_database.Commit() == 0)
+                throw new InvalidOperationException("Tombstone sweep benchmark failed to commit a tombstone setup batch.");
+        }
+
+        // As above, leave one consolidated tombstone Run for the measured sweep.
+        if (_database.Checkpoint() == 0)
             throw new InvalidOperationException("Tombstone sweep benchmark failed to persist its tombstone generation.");
 
         ulong highWatermark = _database.GetOutboxHighWatermark();
