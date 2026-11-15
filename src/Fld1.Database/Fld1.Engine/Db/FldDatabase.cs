@@ -1865,7 +1865,7 @@ public sealed partial class FldDatabase : IDisposable
                     // tombstone too: a later undelete must not reveal an older value.
                     if (!reclaimRecordTombstone)
                     {
-                        AddResolvedField(builder, recordMemory, fieldId, resolved);
+                        AddResolvedField(builder, recordId, fieldId, resolved);
                         wroteRecord = true;
                         continue;
                     }
@@ -1887,7 +1887,7 @@ public sealed partial class FldDatabase : IDisposable
                         isRecordTombstone: false, isFieldTombstone: true)))
                     continue;
 
-                AddResolvedField(builder, recordMemory, fieldId, resolved);
+                AddResolvedField(builder, recordId, fieldId, resolved);
                 wroteRecord = true;
             }
 
@@ -1993,24 +1993,24 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     private void AddResolvedField(
-        RunBuilder builder, ReadOnlyMemory<byte> recordId, ushort fieldId,
+        RunBuilder builder, ReadOnlySpan<byte> recordId, ushort fieldId,
         FieldResolver.Resolved resolved)
     {
-        ReadOnlyMemory<byte> author = resolved.AuthorNodeId ?? _localAuthor;
-        ReadOnlyMemory<byte> changeId = resolved.ChangeId ?? Array.Empty<byte>();
         if (resolved.IsTombstone)
         {
-            builder.AddBorrowed(recordId, fieldId, ReadOnlyMemory<byte>.Empty,
-                resolved.Wall, resolved.Logical, author, resolved.KeyEpoch, isTombstone: true,
-                changeId: changeId,
+            builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
+                resolved.Wall, resolved.Logical,
+                resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true,
+                changeId: resolved.ChangeId ?? Array.Empty<byte>(),
                 originAuthorEpoch: resolved.OriginAuthorEpoch,
                 originSequence: resolved.OriginSequence);
         }
         else if (resolved.Value is not null)
         {
-            builder.AddBorrowed(recordId, fieldId, resolved.Value,
-                resolved.Wall, resolved.Logical, author, resolved.KeyEpoch, isTombstone: false,
-                changeId: changeId,
+            builder.Add(recordId, fieldId, resolved.Value,
+                resolved.Wall, resolved.Logical,
+                resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false,
+                changeId: resolved.ChangeId ?? Array.Empty<byte>(),
                 originAuthorEpoch: resolved.OriginAuthorEpoch,
                 originSequence: resolved.OriginSequence);
         }
