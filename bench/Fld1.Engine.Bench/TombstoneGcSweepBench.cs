@@ -125,6 +125,96 @@ public class TombstoneGcSweepBench
         return reclaimed;
     }
 
+    [Benchmark(Description = "Diagnostic: single-pass Tombstone-GC sampled peak memory")]
+    public int ReclaimAllTombstonesInSinglePassWithPeakSampling()
+    {
+        using var sampler = new PeakMemorySampler();
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        int reclaimed = _database.CompactTombstones(static _ => true, TombstoneCount);
+        _lastGcAllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        sampler.Stop();
+        Console.WriteLine(
+            $"TOMBSTONE_GC_PEAK_SAMPLE Count={TombstoneCount} IntervalMs=2 " +
+            $"BaselineWorkingSetBytes={sampler.BaselineWorkingSetBytes} " +
+            $"PeakWorkingSetBytes={sampler.PeakWorkingSetBytes} " +
+            $"WorkingSetDeltaBytes={sampler.PeakWorkingSetBytes - sampler.BaselineWorkingSetBytes} " +
+            $"BaselineManagedHeapBytes={sampler.BaselineManagedHeapBytes} " +
+            $"PeakManagedHeapBytes={sampler.PeakManagedHeapBytes} " +
+            $"ManagedHeapDeltaBytes={sampler.PeakManagedHeapBytes - sampler.BaselineManagedHeapBytes}");
+        if (reclaimed != TombstoneCount)
+            throw new InvalidOperationException(
+                $"Peak-memory probe reclaimed {reclaimed}/{TombstoneCount} entries.");
+        return reclaimed;
+    }
+
+    /// <summary>
+    /// Diagnostic-only sampler. Its background thread perturbs the measured operation;
+    /// use its memory high-water marks, not its BenchmarkDotNet timing, as the result.
+    /// The 2 ms sampling interval can miss shorter-lived peaks.
+    /// </summary>
+    private sealed class PeakMemorySampler : IDisposable
+    {
+        private readonly System.Diagnostics.Process _process;
+        private readonly System.Threading.ManualResetEventSlim _stop = new(false);
+        private readonly System.Threading.Thread _thread;
+        private bool _stopped;
+
+        public long BaselineWorkingSetBytes { get; }
+        public long PeakWorkingSetBytes { get; private set; }
+        public long BaselineManagedHeapBytes { get; }
+        public long PeakManagedHeapBytes { get; private set; }
+
+        public PeakMemorySampler()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            _process = System.Diagnostics.Process.GetCurrentProcess();
+            BaselineWorkingSetBytes = _process.WorkingSet64;
+            PeakWorkingSetBytes = BaselineWorkingSetBytes;
+            BaselineManagedHeapBytes = GC.GetTotalMemory(forceFullCollection: false);
+            PeakManagedHeapBytes = BaselineManagedHeapBytes;
+            _thread = new System.Threading.Thread(SampleLoop)
+            {
+                IsBackground = true,
+                Name = "FLD Tombstone-GC peak-memory sampler"
+            };
+            _thread.Start();
+        }
+
+        public void Stop()
+        {
+            if (_stopped)
+                return;
+            _stop.Set();
+            _thread.Join();
+            Sample();
+            _stopped = true;
+        }
+
+        private void SampleLoop()
+        {
+            while (!_stop.Wait(TimeSpan.FromMilliseconds(2)))
+                Sample();
+        }
+
+        private void Sample()
+        {
+            long workingSet = _process.WorkingSet64;
+            long managedHeap = GC.GetTotalMemory(forceFullCollection: false);
+            if (workingSet > PeakWorkingSetBytes)
+                PeakWorkingSetBytes = workingSet;
+            if (managedHeap > PeakManagedHeapBytes)
+                PeakManagedHeapBytes = managedHeap;
+        }
+
+        public void Dispose()
+        {
+            Stop();
+            _stop.Dispose();
+            _process.Dispose();
+        }
+    }
     private static byte[] Id(byte value)
     {
         byte[] id = new byte[16];
