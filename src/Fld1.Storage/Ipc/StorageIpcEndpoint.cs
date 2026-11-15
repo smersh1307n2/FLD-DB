@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Fld1.Storage.Engine;
 
 namespace Fld1.Storage.Ipc;
 
@@ -71,7 +72,7 @@ public static class StorageIpcEndpoint
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         Validate(rootDirectory, endpoint, endpoint.PartitionId);
-        Directory.CreateDirectory(Path.GetFullPath(rootDirectory));
+        StorageDirectorySync.CreateDirectoryDurable(Path.GetFullPath(rootDirectory));
 
         string path = GetEndpointFilePath(rootDirectory, endpoint.PartitionId);
         string temporary = path + ".tmp." + Guid.NewGuid().ToString("N");
@@ -97,7 +98,7 @@ public static class StorageIpcEndpoint
                 File.SetAttributes(path, FileAttributes.Normal);
                 DeleteStaleEndpointFile(path);
             }
-            File.Move(temporary, path);
+            StorageDirectorySync.AtomicCreateFile(temporary, path);
         }
         finally
         {
