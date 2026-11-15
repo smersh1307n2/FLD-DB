@@ -169,7 +169,7 @@ public class RunBuilderTests
                 byte[] value = { record, (byte)field, (byte)(record ^ field) };
                 writes.Add(new FieldWrite(
                     recordId, field, value,
-                    wall: (ulong)(100 + record), logical: field, author));
+                    wall: (ulong)(100 + record), logical: field, authorNodeId: author));
             }
         }
 
