@@ -6,7 +6,7 @@ namespace Fld1.Engine.Bench;
 
 [InvocationCount(1)]
 [MemoryDiagnoser]
-public sealed class TombstoneGcBench
+public class TombstoneGcBench
 {
     private string _directory = string.Empty;
     private FldDatabase _database = null!;
