@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Attributes;
+using Fld1.Engine.Bench;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
