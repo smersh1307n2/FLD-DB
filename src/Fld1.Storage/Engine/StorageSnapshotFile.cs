@@ -84,9 +84,10 @@ internal static class StorageSnapshotFile
         TryDelete(tempSnapshot);
         WriteDurable(tempSnapshot, snapshot);
         faultInjector?.Invoke(StorageFaultPoint.AfterSnapshotFileFlushBeforeRename);
-        File.Move(tempSnapshot, finalSnapshot);
-        faultInjector?.Invoke(StorageFaultPoint.AfterSnapshotRenameBeforeManifest);
-        TryFsyncDirectory(snapshots);
+        StorageDirectorySync.AtomicCreateFile(
+            tempSnapshot,
+            finalSnapshot,
+            afterMove: () => faultInjector?.Invoke(StorageFaultPoint.AfterSnapshotRenameBeforeManifest));
 
         byte[] manifest = EncodeManifest(partitionId, generation, commitSeq, (ulong)snapshot.Length, snapshotCrc);
         string finalManifest = ManifestPath(snapshots, partitionId);
@@ -94,9 +95,10 @@ internal static class StorageSnapshotFile
         TryDelete(tempManifest);
         WriteDurable(tempManifest, manifest);
         faultInjector?.Invoke(StorageFaultPoint.AfterManifestFileFlushBeforeRename);
-        File.Move(tempManifest, finalManifest, overwrite: true);
-        faultInjector?.Invoke(StorageFaultPoint.AfterManifestRenameBeforeWalTruncate);
-        TryFsyncDirectory(snapshots);
+        StorageDirectorySync.AtomicReplaceFile(
+            tempManifest,
+            finalManifest,
+            afterReplace: () => faultInjector?.Invoke(StorageFaultPoint.AfterManifestRenameBeforeWalTruncate));
 
         // The manifest is now the durable root for the new generation. StorageSnapshot
         // instances are in-memory copies, so no reader pins the previous disk generation.

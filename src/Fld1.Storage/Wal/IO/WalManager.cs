@@ -75,22 +75,22 @@ internal sealed class WalManager : IDisposable
             if (segs.Count == 0)
             {
                 string path = SegmentPath(walDir, partitionId, 0);
-                var w = faultInjector is null
-                    ? WalWriter.Create(path, partitionId, firstCommitSeq: 1)
-                    : WalWriter.CreateForTesting(path, partitionId, firstCommitSeq: 1, faultInjector);
-                try
+                string tempPath = path + ".tmp";
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+                using (faultInjector is null
+                    ? WalWriter.Create(tempPath, partitionId, firstCommitSeq: 1)
+                    : WalWriter.CreateForTesting(tempPath, partitionId, firstCommitSeq: 1, faultInjector))
                 {
-                    // The segment file is flushed by WalWriter.Create; persist its
-                    // directory entry before exposing the new WAL manager.
-                    StorageDirectorySync.Flush(walDir);
-                    return (new WalManager(walDir, partitionId, rotateAfterBytes, w, 0,
-                        writerFence, faultInjector), allRecords);
                 }
-                catch
-                {
-                    w.Dispose();
-                    throw;
-                }
+                StorageDirectorySync.AtomicCreateFile(
+                    tempPath, path,
+                    afterMove: () => faultInjector?.Invoke(StorageFaultPoint.BeforeWalDirectoryFsync));
+                var writer = faultInjector is null
+                    ? WalWriter.OpenForAppend(path, partitionId, WalHeader.Size, nextCommitSeq: 1)
+                    : WalWriter.OpenForAppendForTesting(path, partitionId, WalHeader.Size, nextCommitSeq: 1, faultInjector);
+                return (new WalManager(walDir, partitionId, rotateAfterBytes, writer, 0,
+                    writerFence, faultInjector), allRecords);
             }
 
         ulong? expectedNextSeq = null;
@@ -250,9 +250,10 @@ internal sealed class WalManager : IDisposable
             {
             }
 
-            File.Move(tempPath, finalPath);
+            StorageDirectorySync.AtomicCreateFile(
+                tempPath, finalPath,
+                afterMove: () => _faultInjector?.Invoke(StorageFaultPoint.BeforeWalDirectoryFsync));
             published = true;
-            TryFsyncDirectory(_walDir);
 
             var nextWriter = _faultInjector is null
                 ? WalWriter.OpenForAppend(finalPath, _partitionId, WalHeader.Size, nextSeq)
@@ -266,8 +267,8 @@ internal sealed class WalManager : IDisposable
         }
         catch
         {
-            if (published)
-                _faulted = true; // segment set changed; reopen performs authoritative recovery
+            if (published || File.Exists(finalPath))
+                _faulted = true; // segment set changed or publication completion is uncertain; reopen performs authoritative recovery
             else if (File.Exists(tempPath))
             {
                 try { File.Delete(tempPath); } catch { /* best effort */ }

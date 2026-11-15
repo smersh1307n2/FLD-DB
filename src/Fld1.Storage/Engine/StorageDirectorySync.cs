@@ -4,8 +4,8 @@ using System.Runtime.InteropServices;
 namespace Fld1.Storage.Engine;
 
 /// <summary>
-/// Flushes directory-entry updates on Unix. FileStream does not expose a portable
-/// directory handle, so use the native open/fsync/close sequence explicitly.
+/// Platform-specific durable publication primitives: directory fsync on Unix and
+/// write-through atomic moves on Windows.
 /// </summary>
 public static class StorageDirectorySync
 {
@@ -147,7 +147,8 @@ public static class StorageDirectorySync
     public static void AtomicCreateFile(
         string temporaryPath,
         string destinationPath,
-        bool flushParent = true)
+        bool flushParent = true,
+        Action? afterMove = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(temporaryPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -158,10 +159,12 @@ public static class StorageDirectorySync
                 throw new IOException(
                     $"Unable to durably create '{destinationPath}'.",
                     new Win32Exception(Marshal.GetLastPInvokeError()));
+            afterMove?.Invoke();
             return;
         }
 
         File.Move(temporaryPath, destinationPath, overwrite: false);
+        afterMove?.Invoke();
         if (flushParent)
             Flush(Path.GetDirectoryName(destinationPath)!);
     }
