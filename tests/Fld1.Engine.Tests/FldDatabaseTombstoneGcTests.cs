@@ -151,6 +151,82 @@ public sealed class FldDatabaseTombstoneGcTests
         }
     }
 
+    [Theory]
+    [InlineData(FldCompactionFaultPoint.AfterReplacementRunDurable, false)]
+    [InlineData(FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true)]
+    [InlineData(FldCompactionFaultPoint.AfterOldRunDeleted, true)]
+    public void Tombstone_gc_compaction_crash_cuts_recover_one_authoritative_generation(
+        FldCompactionFaultPoint faultPoint, bool tombstoneMustBeGone)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-crash-" + faultPoint + "-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x754;
+        byte[] recordId = FldDatabase.NewRecordId();
+        try
+        {
+            using (var database = FldDatabase.Open(new FldOpenOptions
+            {
+                Path = root,
+                NamespaceId = namespaceId,
+                LocalAuthor = Id(0x61),
+                CompactionFaultInjector = point =>
+                {
+                    if (point == faultPoint)
+                        throw new IOException("Injected provider tombstone-compaction crash cut.");
+                }
+            }))
+            {
+                database.Put(recordId, 7, "before-delete"u8);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+
+                database.Put(recordId, 9, "before-update"u8);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+
+                database.Delete(recordId, 7);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+
+                database.Put(recordId, 9, "newer-field"u8);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+                SealAndAcknowledgeOutbox(database);
+
+                Assert.Throws<IOException>(() => database.CompactTombstones(
+                    candidate => candidate.FieldId == 7 && candidate.IsFieldTombstone));
+            }
+
+            using (var recovered = FldDatabase.Open(root, namespaceId, Id(0x61)))
+            {
+                Assert.True(recovered.TryGetBytes(recordId, 9, out byte[]? preserved));
+                Assert.Equal("newer-field"u8.ToArray(), preserved);
+
+                if (tombstoneMustBeGone)
+                {
+                    Assert.False(recovered.TryGetBytes(recordId, 7, out _));
+                    Assert.False(recovered.TryResolve(recordId, 7, out _));
+                }
+                else
+                {
+                    Assert.True(recovered.TryResolve(recordId, 7, out var retained));
+                    Assert.True(retained.IsTombstone);
+                    Assert.Equal(1, recovered.CompactTombstones(
+                        candidate => candidate.FieldId == 7 && candidate.IsFieldTombstone));
+                    Assert.False(recovered.TryGetBytes(recordId, 7, out _));
+                }
+            }
+
+            using var reopened = FldDatabase.Open(root, namespaceId, Id(0x61));
+            Assert.False(reopened.TryGetBytes(recordId, 7, out _));
+            Assert.True(reopened.TryGetBytes(recordId, 9, out byte[]? finalValue));
+            Assert.Equal("newer-field"u8.ToArray(), finalValue);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     private static void SealAndAcknowledgeOutbox(FldDatabase database)
     {
         ulong highWatermark = database.GetOutboxHighWatermark();
