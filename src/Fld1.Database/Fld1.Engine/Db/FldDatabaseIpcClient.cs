@@ -382,6 +382,18 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcGcProtocol.DecodeBooleanResponse(response);
     }
 
+
+    public async Task<bool[]> HasGcChangeIdReferencesAsync(
+        Guid token, IReadOnlyList<byte[]> changeIds,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcGcProtocol.EncodeChangeIdBatchQuery(token, changeIds);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.QueryGcChangeIdBatch,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeChangeIdBatchResponse(response, changeIds.Count);
+    }
+
     public async Task<bool> HasGcRecordReferenceAsync(
         Guid token, ReadOnlyMemory<byte> recordId, ReadOnlyMemory<byte> tombstoneChangeId,
         CancellationToken cancellationToken = default)
