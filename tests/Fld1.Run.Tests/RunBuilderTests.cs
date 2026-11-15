@@ -160,10 +160,7 @@ public class RunBuilderTests
         var writes = new List<FieldWrite>();
         for (byte record = 1; record <= 48; record++)
         {
-            byte[] recordId = new byte[16];
-            recordId[0] = record;
-            recordId[6] = 0x70;
-            recordId[8] = 0x80;
+            byte[] recordId = Rec(record);
             for (ushort field = 1; field <= 4; field++)
             {
                 byte[] value = { record, (byte)field, (byte)(record ^ field) };
