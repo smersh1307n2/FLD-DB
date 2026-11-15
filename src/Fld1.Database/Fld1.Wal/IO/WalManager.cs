@@ -65,8 +65,8 @@ public sealed class WalManager : IDisposable
             {
             }
             StorageDirectorySync.AtomicCreateFile(tempPath, path);
-            var writer = WalWriter.OpenForAppend(path, namespaceId, WalHeader.Size, nextCommitSeq: 1);
-            return (new WalManager(walDir, namespaceId, rotateAfterBytes, writer, 0), allRecords);
+            var initialWriter = WalWriter.OpenForAppend(path, namespaceId, WalHeader.Size, nextCommitSeq: 1);
+            return (new WalManager(walDir, namespaceId, rotateAfterBytes, initialWriter, 0), allRecords);
         }
 
         ulong? expectedNextSeq = null;
