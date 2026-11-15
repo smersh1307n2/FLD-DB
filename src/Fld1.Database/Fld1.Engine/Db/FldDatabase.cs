@@ -146,10 +146,10 @@ public sealed partial class FldDatabase : IDisposable
         if (namespaceId > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(options.NamespaceId));
         if (options.AutoCheckpointOverlayFields < 0)
             throw new ArgumentOutOfRangeException(nameof(options.AutoCheckpointOverlayFields));
-        Directory.CreateDirectory(dbDir);
-        Directory.CreateDirectory(Path.Combine(dbDir, "wal"));
-        Directory.CreateDirectory(Path.Combine(dbDir, "runs"));
-        Directory.CreateDirectory(Path.Combine(dbDir, "tmp"));
+        StorageDirectorySync.CreateDirectoryDurable(dbDir);
+        StorageDirectorySync.CreateDirectoryDurable(Path.Combine(dbDir, "wal"));
+        StorageDirectorySync.CreateDirectoryDurable(Path.Combine(dbDir, "runs"));
+        StorageDirectorySync.CreateDirectoryDurable(Path.Combine(dbDir, "tmp"));
 
         Fld1.Storage.Engine.StoragePartitionLease? storageLease = null;
         Fld1.Storage.Engine.StorageDatabase? runStorage = null;
