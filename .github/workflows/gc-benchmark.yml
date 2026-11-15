@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fld-tombstone-gc-benchmark-${{ github.ref }}
+  group: fld-tombstone-gc-benchmark-v2-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
