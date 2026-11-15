@@ -233,6 +233,11 @@ public static class StorageDirectorySync
                     continue; // Another opener won the create race.
                 throw;
             }
+            catch
+            {
+                try { Directory.Delete(temporary); } catch { }
+                throw;
+            }
         }
     }
 
@@ -253,7 +258,7 @@ public static class StorageDirectorySync
             access |= WindowsGenericRead | WindowsGenericWrite;
 
         using SafeFileHandle handle = WindowsCreateFile(
-            source, access, shareMode: 0, IntPtr.Zero, WindowsOpenExisting, flags, IntPtr.Zero);
+            source, access, 0, IntPtr.Zero, WindowsOpenExisting, flags, IntPtr.Zero);
         if (handle.IsInvalid)
             throw new IOException(
                 $"Unable to open '{sourcePath}' for a write-through rename.",
@@ -294,16 +299,15 @@ public static class StorageDirectorySync
     private static void EnsureSupportedWindowsNtfsVolume(string path)
     {
         string fullPath = Path.GetFullPath(path);
-        string volumePath;
-        if (!SupportedWindowsVolumes.TryGetValue(fullPath, out bool supported))
-        {
-            var volumeBuffer = new StringBuilder(32768);
-            if (!WindowsGetVolumePathName(fullPath, volumeBuffer, (uint)volumeBuffer.Capacity))
-                throw new IOException(
-                    $"Unable to resolve the volume for '{path}'.",
-                    new Win32Exception(Marshal.GetLastPInvokeError()));
+        var volumeBuffer = new StringBuilder(32768);
+        if (!WindowsGetVolumePathName(fullPath, volumeBuffer, (uint)volumeBuffer.Capacity))
+            throw new IOException(
+                $"Unable to resolve the volume for '{path}'.",
+                new Win32Exception(Marshal.GetLastPInvokeError()));
 
-            volumePath = volumeBuffer.ToString();
+        string volumePath = volumeBuffer.ToString();
+        if (!SupportedWindowsVolumes.TryGetValue(volumePath, out bool supported))
+        {
             supported = WindowsGetDriveType(volumePath) == WindowsDriveFixed;
             if (supported)
             {
@@ -315,7 +319,7 @@ public static class StorageDirectorySync
                         new Win32Exception(Marshal.GetLastPInvokeError()));
                 supported = string.Equals(fileSystemName.ToString(), "NTFS", StringComparison.OrdinalIgnoreCase);
             }
-            SupportedWindowsVolumes.TryAdd(fullPath, supported);
+            SupportedWindowsVolumes.TryAdd(volumePath, supported);
         }
 
         if (!supported)
