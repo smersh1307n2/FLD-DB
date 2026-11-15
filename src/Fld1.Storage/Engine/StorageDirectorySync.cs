@@ -173,11 +173,11 @@ public static class StorageDirectorySync
     private static string ToWindowsExtendedPath(string path)
     {
         string fullPath = Path.GetFullPath(path);
-        if (fullPath.StartsWith(@"\\?\\", StringComparison.Ordinal))
+        if (fullPath.StartsWith("\\\\?\\", StringComparison.Ordinal))
             return fullPath;
-        if (fullPath.StartsWith(@"\\\\", StringComparison.Ordinal))
-            return @"\\?\\UNC\\" + fullPath[2..];
-        return @"\\?\\" + fullPath;
+        if (fullPath.StartsWith("\\\\", StringComparison.Ordinal))
+            return "\\\\?\\UNC\\" + fullPath[2..];
+        return "\\\\?\\" + fullPath;
     }
 
     private static IOException CreateIoException(string operation, string directory)
