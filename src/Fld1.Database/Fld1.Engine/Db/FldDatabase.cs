@@ -1724,53 +1724,68 @@ public sealed partial class FldDatabase : IDisposable
         if (_dirty.Count != 0)
             throw new InvalidOperationException("Compact requires all overlay writes to be committed first.");
 
-        // Index overlay keys once. ScanFieldIds includes tombstones; ScanRecord intentionally does not.
-        var fieldsByRecord = new Dictionary<(ulong Lo, ulong Hi), HashSet<ushort>>();
-        var recordIds = new List<byte[]>();
+        // Build one compact per-record field index in a single pass over each Run.
+        // ReadOnlyMemory slices keep Run-backed RecordIds alive without allocating
+        // one byte[] per record; the small field-set struct avoids one HashSet per row.
+        var fieldsByRecord = new Dictionary<(ulong Lo, ulong Hi), CompactFieldIdSet>();
+        var recordIds = new List<ReadOnlyMemory<byte>>();
 
-        void AddRecord(ReadOnlySpan<byte> recordId)
+        void AddRunField(ReadOnlyMemory<byte> recordMemory, ushort fieldId)
         {
+            ReadOnlySpan<byte> recordId = recordMemory.Span;
             var recordKey = (
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8)));
-            if (fieldsByRecord.ContainsKey(recordKey))
+            if (fieldsByRecord.TryGetValue(recordKey, out CompactFieldIdSet existing))
+            {
+                existing.Add(fieldId);
+                fieldsByRecord[recordKey] = existing;
                 return;
+            }
 
-            fieldsByRecord.Add(recordKey, new HashSet<ushort>());
-            recordIds.Add(recordId.ToArray());
+            CompactFieldIdSet created = default;
+            created.Add(fieldId);
+            fieldsByRecord.Add(recordKey, created);
+            recordIds.Add(recordMemory);
         }
 
         Span<byte> overlayRecordId = stackalloc byte[16];
         foreach (var item in _overlay.Snapshot())
         {
             item.Key.WriteRecordId(overlayRecordId);
-            AddRecord(overlayRecordId);
-            fieldsByRecord[(item.Key.RecLo, item.Key.RecHi)].Add(item.Key.FieldId);
+            var recordKey = (item.Key.RecLo, item.Key.RecHi);
+            if (fieldsByRecord.TryGetValue(recordKey, out CompactFieldIdSet existing))
+            {
+                existing.Add(item.Key.FieldId);
+                fieldsByRecord[recordKey] = existing;
+                continue;
+            }
+
+            byte[] recordCopy = overlayRecordId.ToArray();
+            CompactFieldIdSet created = default;
+            created.Add(item.Key.FieldId);
+            fieldsByRecord.Add(recordKey, created);
+            recordIds.Add(recordCopy);
         }
 
         for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
         {
             var bytes = EnsureRunCached(runIndex);
-            new RunReader(bytes).ScanRecordIds(AddRecord);
+            new RunReader(bytes).ScanAllFieldIds(AddRunField);
         }
 
         if (recordIds.Count == 0)
             return 0;
 
         var builder = new RunBuilder(_namespaceId);
-        var outputRecordIds = new List<byte[]>(recordIds.Count);
-        foreach (var recordId in recordIds)
+        var outputRecordIds = new List<ReadOnlyMemory<byte>>(recordIds.Count);
+        foreach (ReadOnlyMemory<byte> recordMemory in recordIds)
         {
+            ReadOnlySpan<byte> recordId = recordMemory.Span;
             var recordKey = (
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.AsSpan(8)));
-            HashSet<ushort> fieldIds = fieldsByRecord[recordKey];
-
-            for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
-            {
-                var bytes = EnsureRunCached(runIndex);
-                new RunReader(bytes).ScanFieldIds(recordId, fieldId => { fieldIds.Add(fieldId); });
-            }
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8)));
+            CompactFieldIdSet fieldIds = fieldsByRecord[recordKey];
 
             bool hasRecordTombstone = false;
             bool reclaimRecordTombstone = false;
@@ -1797,7 +1812,9 @@ public sealed partial class FldDatabase : IDisposable
             }
 
             bool wroteRecord = false;
-            foreach (ushort fieldId in fieldIds)
+            for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
+            {
+                ushort fieldId = fieldIds[fieldIndex];
             {
                 if (!TryResolveUnlocked(recordId, fieldId, out var resolved) || !resolved.Found)
                     continue;
@@ -1835,7 +1852,7 @@ public sealed partial class FldDatabase : IDisposable
             }
 
             if (wroteRecord)
-                outputRecordIds.Add(recordId);
+                outputRecordIds.Add(recordMemory);
         }
 
         if (tombstoneGc is not null && tombstoneGc.ReclaimedCount == 0)
@@ -1858,7 +1875,7 @@ public sealed partial class FldDatabase : IDisposable
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
             WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
             InjectCompactionFault(FldCompactionFaultPoint.AfterReplacementRunDurable);
-            outputRecordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+            outputRecordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x.Span, y.Span));
         }
 
         ulong seqHi = _pendingFlushedCommitSeq;
@@ -1880,8 +1897,8 @@ public sealed partial class FldDatabase : IDisposable
                         RunId = runId,
                         Level = 0,
                         Ns = _namespaceId,
-                        MinRec = outputRecordIds[0],
-                        MaxRec = outputRecordIds[^1],
+                        MinRec = outputRecordIds[0].ToArray(),
+                        MaxRec = outputRecordIds[^1].ToArray(),
                         SeqLo = 1,
                         SeqHi = seqHi
                     });
