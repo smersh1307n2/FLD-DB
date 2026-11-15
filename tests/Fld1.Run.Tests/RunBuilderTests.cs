@@ -154,6 +154,40 @@ public class RunBuilderTests
     }
 
     [Fact]
+    public void Many_records_and_fields_are_canonical_independent_of_insert_order()
+    {
+        var author = Author(0x35);
+        var writes = new List<FieldWrite>();
+        for (byte record = 1; record <= 48; record++)
+        {
+            byte[] recordId = new byte[16];
+            recordId[0] = record;
+            recordId[6] = 0x70;
+            recordId[8] = 0x80;
+            for (ushort field = 1; field <= 4; field++)
+            {
+                byte[] value = { record, (byte)field, (byte)(record ^ field) };
+                writes.Add(new FieldWrite(
+                    recordId, field, value,
+                    wall: (ulong)(100 + record), logical: field, author));
+            }
+        }
+
+        var forward = new RunBuilder(0);
+        foreach (FieldWrite write in writes)
+            forward.Add(write);
+
+        var reverse = new RunBuilder(0);
+        for (int i = writes.Count - 1; i >= 0; i--)
+            reverse.Add(writes[i]);
+
+        byte[] first = forward.Build();
+        byte[] second = reverse.Build();
+        Assert.True(first.AsSpan().SequenceEqual(second));
+        Assert.True(RunVerify.Verify(first).IsOk);
+    }
+
+    [Fact]
     public void Tombstone_hides_value()
     {
         var rec = new byte[16];
