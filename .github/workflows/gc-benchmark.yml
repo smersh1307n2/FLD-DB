@@ -1,0 +1,47 @@
+name: FLD Tombstone GC Benchmark
+
+on:
+  push:
+    branches: ["fix/**"]
+    paths:
+      - ".github/workflows/gc-benchmark.yml"
+      - "bench/Fld1.Engine.Bench/**"
+      - "src/Fld1.Database/Fld1.Engine/**"
+      - "src/Fld1.Database/Fld1.Manifest/**"
+      - "src/Fld1.Database/Fld1.Run/**"
+      - "src/Fld1.Database/Fld1.Wal/**"
+      - "src/Fld1.Storage/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fld-tombstone-gc-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: bounded tombstone GC (.NET 10, Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Run bounded Tombstone-GC benchmark matrix
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --tombstone-gc-only
+
+      - name: Upload BenchmarkDotNet results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fld-tombstone-gc-benchmark-${{ github.sha }}
+          path: BenchmarkDotNet.Artifacts/**
+          if-no-files-found: warn
+          retention-days: 30
