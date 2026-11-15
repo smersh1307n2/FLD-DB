@@ -153,9 +153,11 @@ public sealed class FldDatabaseTombstoneGcTests
 
     [Theory]
     [InlineData((int)FldCompactionFaultPoint.AfterReplacementRunDurable, false, false)]
+    [InlineData((int)FldCompactionFaultPoint.AfterManifestRenameBeforeDirectoryFlush, true, false)]
     [InlineData((int)FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true, false)]
     [InlineData((int)FldCompactionFaultPoint.AfterOldRunDeleted, true, false)]
     [InlineData((int)FldCompactionFaultPoint.AfterReplacementRunDurable, false, true)]
+    [InlineData((int)FldCompactionFaultPoint.AfterManifestRenameBeforeDirectoryFlush, true, true)]
     [InlineData((int)FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true, true)]
     [InlineData((int)FldCompactionFaultPoint.AfterOldRunDeleted, true, true)]
     public void Tombstone_gc_compaction_crash_cuts_recover_one_authoritative_generation(
@@ -165,6 +167,7 @@ public sealed class FldDatabaseTombstoneGcTests
         string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-crash-" + faultPoint + "-" + recordTombstone + "-" + Guid.NewGuid().ToString("N"));
         const uint namespaceId = 0x754;
         byte[] recordId = FldDatabase.NewRecordId();
+        bool injectFault = false;
         try
         {
             using (var database = FldDatabase.Open(new FldOpenOptions
@@ -174,7 +177,7 @@ public sealed class FldDatabaseTombstoneGcTests
                 LocalAuthor = Id(0x61),
                 CompactionFaultInjector = point =>
                 {
-                    if (point == faultPoint)
+                    if (injectFault && point == faultPoint)
                         throw new IOException("Injected provider tombstone-compaction crash cut.");
                 }
             }))
@@ -204,6 +207,7 @@ public sealed class FldDatabaseTombstoneGcTests
                 Assert.NotEqual(0UL, database.Commit());
                 Assert.NotEqual(0UL, database.Checkpoint());
                 SealAndAcknowledgeOutbox(database);
+                injectFault = true;
 
                 Assert.Throws<IOException>(() => database.CompactTombstones(candidate =>
                     recordTombstone

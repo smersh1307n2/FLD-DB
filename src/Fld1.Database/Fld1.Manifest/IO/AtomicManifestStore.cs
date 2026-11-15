@@ -1,4 +1,5 @@
 using Fld1.Manifest.Format;
+using Fld1.Storage.Engine;
 
 namespace Fld1.Manifest.IO;
 
@@ -13,14 +14,18 @@ public sealed class AtomicManifestStore
     private readonly string _path;
     private readonly string _tmpPath;
     private readonly object _lock = new();
+    private readonly Action? _afterManifestRenameBeforeDirectoryFlush;
 
     public string Path => _path;
 
-    public AtomicManifestStore(string dbDir)
+    public AtomicManifestStore(string dbDir) : this(dbDir, null) { }
+
+    internal AtomicManifestStore(string dbDir, Action? afterManifestRenameBeforeDirectoryFlush)
     {
         _dir = dbDir;
         _path = System.IO.Path.Combine(dbDir, "manifest.fldm");
         _tmpPath = System.IO.Path.Combine(dbDir, "tmp", "manifest.tmp");
+        _afterManifestRenameBeforeDirectoryFlush = afterManifestRenameBeforeDirectoryFlush;
     }
 
     /// <summary>Load manifest or Empty(generation:0) if missing; present corruption is fatal.</summary>
@@ -54,7 +59,7 @@ public sealed class AtomicManifestStore
     {
         lock (_lock)
         {
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_tmpPath)!);
+            StorageDirectorySync.CreateDirectoryDurable(System.IO.Path.GetDirectoryName(_tmpPath)!);
             var bytes = ManifestCodec.Encode(doc);
             // Write tmp
             using (var fs = new FileStream(_tmpPath, FileMode.Create, FileAccess.Write, FileShare.None,
@@ -63,10 +68,11 @@ public sealed class AtomicManifestStore
                 fs.Write(bytes);
                 fs.Flush(flushToDisk: true);
             }
-            // Atomic replace
+            // Atomic replace. A failure after rename is an uncertain completion:
+            // callers must fault their in-memory transaction owner and recover by reopening.
             File.Move(_tmpPath, _path, overwrite: true);
-            // Directory fsync best-effort (Linux)
-            TryFsyncDirectory(_dir);
+            _afterManifestRenameBeforeDirectoryFlush?.Invoke();
+            StorageDirectorySync.Flush(_dir);
             return doc.Generation;
         }
     }
@@ -104,20 +110,4 @@ public sealed class AtomicManifestStore
         CoordinatorSessionId = d.CoordinatorSessionId
     };
 
-    private static void TryFsyncDirectory(string dir)
-    {
-        try
-        {
-            // Portable best-effort: open directory and flush where supported
-            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            {
-                using var fs = new FileStream(dir, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                fs.Flush(flushToDisk: true);
-            }
-        }
-        catch
-        {
-            // Directory fsync not always permitted; rename is still atomic on same FS.
-        }
-    }
 }

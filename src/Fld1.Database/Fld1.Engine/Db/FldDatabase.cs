@@ -164,7 +164,8 @@ public sealed partial class FldDatabase : IDisposable
             var runBlobStore = new Fld1.Storage.Engine.StorageBlobStore(
                 runStorage, "FLDRUNB1"u8);
 
-            var manifestStore = new AtomicManifestStore(dbDir);
+            var manifestStore = new AtomicManifestStore(dbDir, () =>
+                options.CompactionFaultInjector?.Invoke(FldCompactionFaultPoint.AfterManifestRenameBeforeDirectoryFlush));
             var manifest = manifestStore.Load();
 
             if (!manifest.Namespaces.Contains(namespaceId))
@@ -1868,29 +1869,28 @@ public sealed partial class FldDatabase : IDisposable
             seqHi = _lastSealedCommitSeq;
 
         var oldRuns = _runs.Select(run => (runId: run.runId, path: run.path)).ToList();
-        _manifestStore.Update(manifest =>
-        {
-            var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
-            if (runId != 0)
-            {
-                runs.Add(new RunEntry
-                {
-                    RunId = runId,
-                    Level = 0,
-                    Ns = _namespaceId,
-                    MinRec = outputRecordIds[0],
-                    MaxRec = outputRecordIds[^1],
-                    SeqLo = 1,
-                    SeqHi = seqHi
-                });
-            }
-            return CloneManifest(manifest, runs: runs, lastFlushed: seqHi,
-                localOperationReceipts: BuildManifestLocalOperationReceipts(manifest.LocalOperationReceipts),
-                localOperationClients: BuildManifestLocalOperationClients(manifest.LocalOperationClients));
-        });
-
         try
         {
+            _manifestStore.Update(manifest =>
+            {
+                var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
+                if (runId != 0)
+                {
+                    runs.Add(new RunEntry
+                    {
+                        RunId = runId,
+                        Level = 0,
+                        Ns = _namespaceId,
+                        MinRec = outputRecordIds[0],
+                        MaxRec = outputRecordIds[^1],
+                        SeqLo = 1,
+                        SeqHi = seqHi
+                    });
+                }
+                return CloneManifest(manifest, runs: runs, lastFlushed: seqHi,
+                    localOperationReceipts: BuildManifestLocalOperationReceipts(manifest.LocalOperationReceipts),
+                    localOperationClients: BuildManifestLocalOperationClients(manifest.LocalOperationClients));
+            });
             _outbox.MarkMaterialized(seqHi);
         }
         catch

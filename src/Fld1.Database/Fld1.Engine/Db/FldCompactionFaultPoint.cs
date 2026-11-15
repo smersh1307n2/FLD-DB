@@ -4,6 +4,7 @@ namespace Fld1.Engine.Db;
 internal enum FldCompactionFaultPoint
 {
     AfterReplacementRunDurable,
+    AfterManifestRenameBeforeDirectoryFlush,
     AfterManifestAndOutboxPublished,
     AfterOldRunDeleted
 }
