@@ -255,6 +255,80 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
         try { Directory.Delete(root, recursive: true); } catch { }
     }
 
+    [Fact]
+    public async Task Host_gc_reference_snapshot_blocks_competing_provider_mutation_until_scan_release()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), "fld-ipc-gc-reference-mutation-" + Guid.NewGuid().ToString("N"));
+        Guid ownerId = Guid.NewGuid();
+        byte[] author = Id(0x43);
+        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] changeId = Id(0x73);
+        const ushort fieldId = 7;
+        using FldDatabase database = FldDatabase.Open(root, 0x766, author);
+        var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0),
+            dispatcher.HandleAsync,
+            clientDisconnected: dispatcher.OnClientDisconnected);
+        Task serverTask = server.RunAsync(shutdown.Token);
+        FldDatabaseIpcClient? scanner = null;
+        FldDatabaseIpcClient? writer = null;
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+            scanner = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+            writer = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, Guid.NewGuid(), TimeSpan.FromSeconds(10));
+
+            Guid lease = await scanner.AcquireGcLeaseAsync();
+            FldDatabaseIpcGcReferenceScan scan = await scanner.OpenGcReferenceScanAsync();
+            Assert.NotEqual(Guid.Empty, scan.Token);
+
+            var mutation = new FldLocalProviderMutation(
+                recordId, fieldId, "gc-race-provider-write"u8.ToArray(), changeId,
+                OriginAuthorEpoch: 12, Wall: 123456, Logical: 7, KeyEpoch: 0);
+            Task<FldDatabaseIpcWriteResult> competingMutation =
+                writer.AppendLocalProviderBatchAsync(Guid.NewGuid(), 1, [mutation]);
+
+            // The snapshot and exclusive Host lease are already established. A second
+            // authenticated session cannot cross the Host boundary and commit a provider
+            // write until the scan has been revalidated and released.
+            await Task.Delay(100);
+            Assert.False(competingMutation.IsCompleted);
+            Assert.False(database.TryGetBytes(recordId, fieldId, out _));
+            Assert.True(await scanner.HasGcChangeIdReferenceAsync(scan.Token, changeId) == false);
+
+            await scanner.ReleaseGcReferenceScanAsync(scan.Token);
+            await scanner.ReleaseGcLeaseAsync(lease);
+
+            FldDatabaseIpcWriteResult committed =
+                await competingMutation.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(committed.IsDuplicate);
+            Assert.Equal(1, committed.MutationCount);
+            Assert.True(database.TryGetBytes(recordId, fieldId, out byte[]? value));
+            Assert.Equal("gc-race-provider-write"u8.ToArray(), value);
+        }
+        finally
+        {
+            if (scanner is not null)
+                await scanner.DisposeAsync();
+            if (writer is not null)
+                await writer.DisposeAsync();
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+        }
+
+        try { Directory.Delete(root, recursive: true); } catch { }
+    }
+
     private static byte[] Id(byte value)
     {
         byte[] id = new byte[16];
