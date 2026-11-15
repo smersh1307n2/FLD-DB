@@ -152,12 +152,13 @@ public sealed class FldDatabaseTombstoneGcTests
     }
 
     [Theory]
-    [InlineData(FldCompactionFaultPoint.AfterReplacementRunDurable, false)]
-    [InlineData(FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true)]
-    [InlineData(FldCompactionFaultPoint.AfterOldRunDeleted, true)]
+    [InlineData((int)FldCompactionFaultPoint.AfterReplacementRunDurable, false)]
+    [InlineData((int)FldCompactionFaultPoint.AfterManifestAndOutboxPublished, true)]
+    [InlineData((int)FldCompactionFaultPoint.AfterOldRunDeleted, true)]
     public void Tombstone_gc_compaction_crash_cuts_recover_one_authoritative_generation(
-        FldCompactionFaultPoint faultPoint, bool tombstoneMustBeGone)
+        int faultPointValue, bool tombstoneMustBeGone)
     {
+        FldCompactionFaultPoint faultPoint = (FldCompactionFaultPoint)faultPointValue;
         string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-crash-" + faultPoint + "-" + Guid.NewGuid().ToString("N"));
         const uint namespaceId = 0x754;
         byte[] recordId = FldDatabase.NewRecordId();
