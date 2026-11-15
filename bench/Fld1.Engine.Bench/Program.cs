@@ -1,10 +1,23 @@
 using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
 using Fld1.Core.Uuid;
 using Fld1.Engine.Db;
 
-BenchmarkRunner.Run<EngineBench>();
-BenchmarkRunner.Run<OutboxBench>();
+if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
+{
+    // Each invocation compacts one bounded page from a freshly seeded on-disk namespace.
+    // Keep the iteration count modest because setup intentionally writes 50k records.
+    var gcConfig = DefaultConfig.Instance.AddJob(
+        Job.Default.WithWarmupCount(1).WithIterationCount(3));
+    BenchmarkRunner.Run<TombstoneGcBench>(gcConfig);
+}
+else
+{
+    BenchmarkRunner.Run<EngineBench>();
+    BenchmarkRunner.Run<OutboxBench>();
+}
 
 [MemoryDiagnoser]
 public class EngineBench
@@ -124,3 +137,4 @@ public class OutboxBench
         return true;
     }
 }
+
