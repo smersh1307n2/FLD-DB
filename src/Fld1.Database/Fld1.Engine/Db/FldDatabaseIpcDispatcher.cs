@@ -557,41 +557,41 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
     {
         Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(payload);
-        GcApprovalSpoolHandle handle;
         lock (_gcLeaseGate)
         {
             EnsureGcLeaseOwner(context);
-            handle = GetApprovalSpool(context, token);
+            GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
             if (!handle.Spool.IsSealed)
                 throw new InvalidOperationException("Tombstone-GC approval spool must be sealed before commit.");
-        }
 
-        try
-        {
-            if (!_enableTombstoneGc)
-                throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
+            try
+            {
+                if (!_enableTombstoneGc)
+                    throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
 
-            using IDisposable commitLease = _database.AcquireCommitGuard();
-            if (!_database.TrySealCommittedWalForTombstoneGc())
-                return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
+                // Keep the Host lease fenced against disconnect/expiry while the
+                // final reference snapshot and one Manifest publication are active.
+                // This also prevents the client session cleanup path from deleting
+                // the spool before the ordered reader has finished consuming it.
+                using IDisposable commitLease = _database.AcquireCommitGuard();
+                if (!_database.TrySealCommittedWalForTombstoneGc())
+                    return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
 
-            using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
-            FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
-            if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
-                draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
-                return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
+                using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
+                FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
+                if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
+                    draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
+                    return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
 
-            using FldTombstoneGcApprovalSpool.Reader approved = handle.Spool.OpenReader();
-            int reclaimed = _database.CompactTombstones(candidate =>
-                approved.IsApproved(candidate) &&
-                !references.HasChangeIdReference(candidate.ChangeId.Span) &&
-                !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
-                int.MaxValue);
-            return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(reclaimed);
-        }
-        finally
-        {
-            lock (_gcLeaseGate)
+                using FldTombstoneGcApprovalSpool.Reader approved = handle.Spool.OpenReader();
+                int reclaimed = _database.CompactTombstones(candidate =>
+                    approved.IsApproved(candidate) &&
+                    !references.HasChangeIdReference(candidate.ChangeId.Span) &&
+                    !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
+                    int.MaxValue);
+                return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(reclaimed);
+            }
+            finally
             {
                 if (_gcApprovalSpools.Remove(token, out GcApprovalSpoolHandle? current))
                     current.Spool.Dispose();
