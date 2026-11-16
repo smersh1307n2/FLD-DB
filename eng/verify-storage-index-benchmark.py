@@ -17,10 +17,13 @@ expected_methods = {
     "FreshOpenAndSnapshotReadOneEntry",
     "CachedSnapshotAndReadOneEntry",
     "WarmPointLookup",
+    "BTreeWarmPointLookup",
+    "BTreePrefixScan",
+    "BTreeBulkBuild",
 }
 expected_counts = {"1000", "10000", "100000"}
-if len(rows) != 12:
-    raise SystemExit(f"expected 12 benchmark rows, found {len(rows)}")
+if len(rows) != 21:
+    raise SystemExit(f"expected 21 benchmark rows, found {len(rows)}")
 
 seen = set()
 for row in rows:
@@ -40,4 +43,4 @@ if seen != expected:
     extra = sorted(seen - expected)
     raise SystemExit(f"benchmark matrix mismatch; missing={missing}, extra={extra}")
 
-print(f"Validated {len(rows)} measured Storage index benchmark cases in {reports[0]}")
+print(f"Validated {len(rows)} measured Storage index and B+ tree benchmark cases in {reports[0]}")
