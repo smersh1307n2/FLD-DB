@@ -5,9 +5,8 @@ using Fld1.Engine.Outbox;
 namespace Fld1.Engine.Bench;
 
 /// <summary>
-/// Measures the complete physical Tombstone-GC sweep when each maintenance call
-/// is capped at the production page limit. This reveals repeated whole-namespace
-/// rewrite cost that a single-page benchmark cannot show.
+/// Measures one complete physical Tombstone-GC namespace sweep across increasing
+/// cardinalities, including an isolated process peak-memory probe.
 /// </summary>
 [InvocationCount(1)]
 [MemoryDiagnoser]
