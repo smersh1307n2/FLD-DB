@@ -81,9 +81,30 @@ public sealed class FldDatabaseIpcTombstoneGcTests
             Assert.Equal(0, await client.CompactTombstonesAsync(approved, limit: 8));
             Assert.True(await client.ReleaseSnapshotAsync(pinned));
 
-            // The ApplyJournal still carries the first tombstone as a relay reference.
-            // Only the second exact identity is eligible for physical removal.
-            Assert.Equal(1, await client.CompactTombstonesAsync(approved, limit: 8));
+            // Stream the proof-approved identities to a Host-owned scratch spool.
+            // The provider snapshot is already released before the Host GC lease is taken.
+            Guid spoolToken = await client.BeginTombstoneGcApprovalSpoolAsync();
+            await client.AppendTombstoneGcApprovalSpoolAsync(spoolToken, approved);
+            (int approvedCount, byte[] approvalDigest) =
+                await client.SealTombstoneGcApprovalSpoolAsync(spoolToken);
+            Assert.Equal(2, approvedCount);
+            Assert.Equal(32, approvalDigest.Length);
+
+            Guid gcLease = await client.AcquireGcLeaseAsync();
+            FldDatabaseIpcGcReferenceScan referenceScan = await client.OpenGcReferenceScanAsync();
+            try
+            {
+                Assert.False(referenceScan.HasSnapshotPin);
+                // The ApplyJournal still carries the first tombstone as a relay reference.
+                // Only the second exact identity is eligible for physical removal.
+                Assert.Equal(1, await client.CommitTombstoneGcApprovalSpoolAsync(spoolToken));
+            }
+            finally
+            {
+                await client.ReleaseGcReferenceScanAsync(referenceScan.Token);
+                await client.ReleaseGcLeaseAsync(gcLease);
+            }
+
             Assert.True(database.TryResolve(retainedRecord, 5, out var retainedAfterGc));
             Assert.True(retainedAfterGc.IsTombstone);
             Assert.False(database.TryResolve(reclaimableRecord, 5, out _));
