@@ -310,6 +310,7 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
     private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
     private StorageTreeLeafPage? _currentLeaf;
+    private StorageTreeLeafPage? _currentLeaf;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix){_reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;}
     public bool TryReadNext(out StorageTreeEntry entry)
     {
