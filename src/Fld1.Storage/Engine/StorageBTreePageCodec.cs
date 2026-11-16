@@ -103,8 +103,10 @@ internal static class StorageBTreePageCodec
     }
 
     public static StorageBTreeLeafPageView DecodeLeafView(ReadOnlyMemory<byte> bytes,ulong generation,ulong id)
+        => DecodeLeafView(StoragePageCodec.Decode(bytes,generation,id));
+
+    public static StorageBTreeLeafPageView DecodeLeafView(StoragePageView page)
     {
-        var page=StoragePageCodec.Decode(bytes,generation,id);
         if(page.Kind!=StoragePageKind.Leaf)throw new InvalidDataException("Expected B+ tree leaf.");
         var payload=page.Payload.Span;int count=ReadHeader(payload,LeafEntry,false);
         ulong next=BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(4,8));
@@ -293,8 +295,12 @@ internal sealed class StorageBTreeReader
             ReadOnlyMemory<byte> bytes=lease is not null
                 ? lease.Page
                 : _readPage!(id)??throw new InvalidDataException("Page reader returned null.");
-            var leaf=StorageBTreePageCodec.DecodeLeafView(bytes,_generation,id);
-            if(!IsValidated(id))
+            bool validated = IsValidated(id);
+            StoragePageView page = validated
+                ? StoragePageCodec.DecodePreviouslyValidated(bytes, _generation, id)
+                : StoragePageCodec.Decode(bytes, _generation, id);
+            var leaf=StorageBTreePageCodec.DecodeLeafView(page);
+            if(!validated)
             {
                 ReadOnlyMemory<byte>? previous=null;
                 for(int i=0;i<leaf.Count;i++)
@@ -326,9 +332,12 @@ internal sealed class StorageBTreeReader
                 ReadOnlyMemory<byte> bytes=lease is not null
                     ? lease.Page
                     : _readPage!(id)??throw new InvalidDataException("Page reader returned null.");
-                var view=StoragePageCodec.Decode(bytes,_generation,id);
+                bool validated = IsValidated(id);
+                var view = validated
+                    ? StoragePageCodec.DecodePreviouslyValidated(bytes, _generation, id)
+                    : StoragePageCodec.Decode(bytes, _generation, id);
                 if(view.Kind==StoragePageKind.Leaf)return id;
-                if(!IsValidated(id))
+                if(!validated)
                 {
                     var node=StorageBTreePageCodec.DecodeInternal(view);
                     var children=new HashSet<ulong>{node.FirstChild};
