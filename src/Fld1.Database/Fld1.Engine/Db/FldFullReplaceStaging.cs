@@ -344,7 +344,7 @@ public sealed partial class FldDatabase
             HashSet<ulong>? pinned = GetPinnedProviderSnapshotRunIds();
             foreach (var oldRun in oldRuns)
             {
-                if (pinned is null || pinned.Contains(oldRun.runId) || oldRun.mapped is not null) continue;
+                if (pinned is null || pinned.Contains(oldRun.runId)) continue;
                 try
                 {
                     _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
