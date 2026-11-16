@@ -199,7 +199,6 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 FldDatabaseIpcOperationCodes.CommitPublishedOrigins => HandleCommitPublishedOrigins(operation.Payload),
                 FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover => HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
                 FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication => HandleEnableMetadataStoreOwnedPublication(operation.Payload),
-                FldDatabaseIpcOperationCodes.CompactTombstones => HandleCompactTombstones(operation.Payload),
                 FldDatabaseIpcOperationCodes.BeginTombstoneGcApprovalSpool => HandleBeginTombstoneGcApprovalSpool(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.AppendTombstoneGcApprovalSpool => HandleAppendTombstoneGcApprovalSpool(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.SealTombstoneGcApprovalSpool => HandleSealTombstoneGcApprovalSpool(context, operation.Payload),
@@ -464,45 +463,6 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             FldDatabaseIpcPublishedOriginProtocol.DecodeRequest(payload);
         int committed = _database.CommitPublishedOrigins(origins);
         return FldDatabaseIpcPublishedOriginProtocol.EncodeResult(committed);
-    }
-
-    private byte[] HandleCompactTombstones(ReadOnlyMemory<byte> payload)
-    {
-        (int limit, FldTombstoneGcCandidate[] candidates) =
-            FldDatabaseIpcProtocol.DecodeTombstoneGcRequest(payload);
-        if (!_enableTombstoneGc)
-            throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
-        if (candidates.Length == 0)
-            return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
-
-        // This is one synchronous IPC operation: the database commit monitor stays on
-        // this thread while the FLD reference snapshot is checked and the replacement
-        // Run/manifest generation is committed. A client-side snapshot is never trusted
-        // as a substitute for this final host-side revalidation.
-        using IDisposable commitLease = _database.AcquireCommitGuard();
-
-        // A committed local/remote operation can still be present in the WAL after
-        // its provider Outbox and peer delivery references are fully acknowledged.
-        // The reference snapshot deliberately treats an unsealed WAL as a live
-        // ChangeId/RecordId reference, so seal that already-committed prefix before
-        // building the GC reference index. Never checkpoint an uncommitted overlay;
-        // and keep the subsequent Outbox/draft/reference checks as independent gates.
-        if (!_database.TrySealCommittedWalForTombstoneGc())
-            return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
-
-        using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
-        FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
-        if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
-            draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
-            return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(0, limit);
-
-        var approved = new HashSet<FldTombstoneGcCandidate>(candidates);
-        int reclaimed = _database.CompactTombstones(candidate =>
-            approved.Contains(candidate) &&
-            !references.HasChangeIdReference(candidate.ChangeId.Span) &&
-            !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
-            limit);
-        return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(reclaimed, limit);
     }
 
     private byte[] HandleBeginTombstoneGcApprovalSpool(
