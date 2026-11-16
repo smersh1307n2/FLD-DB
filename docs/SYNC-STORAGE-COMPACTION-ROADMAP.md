@@ -2468,31 +2468,25 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 
 The database now opens immutable legacy `.fld1` Run mirrors through read-only memory-mapped views. This avoids materializing every opened Run as a managed `byte[]`; the OS faults pages in on access. RunReader remains zero-copy over `ReadOnlyMemory<byte>`.
 
-Lifetime safety is deliberately conservative:
+Integrity and lifetime safety are deliberately conservative:
 - Active mappings are retained for the lifetime of the database instance.
+- Before a mirror is mapped, its Run format and namespace are validated and its SHA-256 is compared with the authoritative Storage blob catalog digest.
+- A missing, corrupt, or stale-but-valid mirror falls back to the authoritative Storage blob, verifies the blob digest while materializing it, repairs the mirror atomically, and maps the repaired file.
 - Mappings replaced by Compaction or FULL_REPLACE are retired, not unmapped while returned RunReader slices may still be referenced.
-- Retired mappings are released on database Dispose. Their obsolete mirror files are left for the existing next-open orphan cleanup, avoiding Windows delete-while-mapped failures.
-- A missing or invalid mirror falls back to the authoritative Storage blob, validates the recovered Run, and uses the existing 64 MiB LRU only for that fallback managed buffer.
-- Checkpoint-created and FULL_REPLACE-installed mirrors are validated after durable publication before becoming mapped readers.
+- Compaction attempts to unlink retired mirror files while their mappings remain alive. If the OS refuses deletion, the existing next-open orphan cleanup retries it. Retired mappings are released on database Dispose.
+- Checkpoint-created and FULL_REPLACE-installed mirrors are validated against their Storage blob digest before becoming mapped readers.
 
-This removes the full managed-array allocation on the normal legacy-mirror read path, but it does **not** impose a strict process RSS cap: memory-mapped pages are demand-paged and the OS controls residency. It also deliberately trades mapping/file-handle lifetime for safe zero-copy slice semantics. A future lease-based reader API could permit earlier unmapping, but must first remove or constrain public slices that can outlive a database operation.
+This removes the full managed-array allocation on the normal Run read path, but it does **not** impose a strict process RSS cap: memory-mapped pages are demand-paged and the OS controls residency. It also deliberately trades mapping/file-handle lifetime for safe zero-copy slice semantics. A future lease-based reader API could permit earlier unmapping, but must first remove or constrain public slices that can outlive a database operation.
 
 Validation added in this block:
 - Cross-platform Engine tests for mapped Run validation/readback, disposal, and file-handle release.
-- Full .NET CI on Windows, Ubuntu and macOS.
+- Regression test proving a previously returned Run slice survives Compaction and replacement of its source Run.
+- Regression test proving a stale-but-valid compatibility mirror is rejected and repaired from the authoritative Storage blob.
+- Full .NET CI on Windows, Ubuntu and macOS (final result recorded below after the cache-removal cleanup).
 - Existing Run format, recovery, compaction, FULL_REPLACE and benchmark suites remain release gates.
 
-## 2026-11-16 — bounded Run cache implementation
+## 2026-11-16 — bounded Run cache experiment (superseded)
 
-The first bounded-cache step is implemented on `fix/crash-consistency-outbox`:
+An earlier intermediate commit introduced a 64 MiB LRU for retained immutable Run byte arrays. That reduced retained cache residency but did not bound peak memory because RunReader still required a contiguous buffer. The subsequent demand-paged mapping implementation above replaced this cache path; the byte-array LRU and its accounting were removed. The historical cache-only limitation is retained here for traceability, not as the current implementation.
 
-- `FldDatabase` retains at most 64 MiB of immutable Run byte arrays in its in-memory cache.
-- Cache admission uses LRU eviction; a Run larger than the cache budget remains readable but is not retained.
-- Cache accounting is reset when compaction replaces the active Run set and when FULL_REPLACE installs a replacement generation.
-- Run v1/v2 bytes, WAL, Manifest publication, and legacy `.fld1` compatibility mirrors are unchanged.
-
-Validation at commit `dceec6640ef6c4b26111871ee15ddd60291ea213`:
-- .NET CI passed on Ubuntu, macOS, and Windows (run `43801939580`, 3/3 jobs).
-- The bounded Tombstone-GC benchmark workflow was still running when this note was written (run `43801939584`).
-
-Scope limitation: this bounds **retained cache residency**, not peak process memory. A cache miss still materializes the complete Run into a byte array because the current `RunReader` API requires contiguous `ReadOnlyMemory<byte>`; an active read can temporarily exceed the cache budget. The next phase must introduce a page/window-backed Run reader and measure peak RSS before claiming out-of-core bounded memory. Do not remove legacy Run mirrors or change the physical format as part of that reader work.
+The next storage milestone is no longer another cache policy: it is measuring real process RSS and mapped-page behavior at representative Run counts and sizes, including file-handle pressure, cold/warm reads, and compaction while zero-copy slices remain live. A future lease-based/windowed reader may reduce mapping lifetime, but must preserve the existing slice lifetime contract or change it explicitly.
