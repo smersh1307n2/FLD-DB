@@ -80,14 +80,14 @@ public class StorageIndexBench
         _treeRoot = StorageBTreeBuilder.Build(1, _treeEntries, () => nextPageId++,
             (pageId, page) => _treePages.Add(pageId, page));
         _treeReader = new StorageBTreeReader(1, _treeRoot, pageId => _treePages[pageId],
-            key => _treeKeys[key.Offset]);
+            key => new ReadOnlyMemory<byte>(_treeKeys[key.Offset]));
         if (!_treeReader.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("B+ tree benchmark fixture failed validation.");
 
         _treePageCache = new StoragePageCache(StoragePageCodec.PageSize * 4L);
         _pressureReader = new StorageBTreeReader(1, _treeRoot,
             pageId => _treePageCache.Acquire(new StoragePageKey(1, pageId), () => _treePages[pageId]),
-            key => _treeKeys[key.Offset]);
+            key => new ReadOnlyMemory<byte>(_treeKeys[key.Offset]));
 
         var largeValuePages = new Dictionary<ulong, byte[]>();
         ulong largePageId = 1;
@@ -97,7 +97,7 @@ public class StorageIndexBench
         ulong largeRoot = StorageBTreeBuilder.Build(3, largeValueEntries, () => largePageId++,
             (pageId, page) => largeValuePages.Add(pageId, page));
         _largeValueReader = new StorageBTreeReader(3, largeRoot, pageId => largeValuePages[pageId],
-            key => _treeKeys[key.Offset]);
+            key => new ReadOnlyMemory<byte>(_treeKeys[key.Offset]));
     }
 
     private static void CopyDirectory(string source, string destination)

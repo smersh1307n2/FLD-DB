@@ -126,6 +126,31 @@ public sealed class StorageBTreeTests
         Assert.Throws<InvalidDataException>(()=>reader.TryGet(one,out _));
     }
 
+
+    [Fact]
+    public void Reader_accepts_borrowed_key_memory_without_materializing_key_arrays()
+    {
+        byte[] keyBytes = { 0x00, 0x01, 0x00, 0x02 };
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong next = 1;
+        var entries = new[]
+        {
+            new StorageTreeBuildEntry(new byte[] { 0x00, 0x01 }, 0, 1, 4, false),
+            new StorageTreeBuildEntry(new byte[] { 0x00, 0x02 }, 2, 2, 4, false)
+        };
+        ulong root = StorageBTreeBuilder.Build(12, entries, () => next++,
+            (id, page) => pages.Add(id, page));
+        var reader = new StorageBTreeReader(12, root, id => pages[id],
+            reference => new ReadOnlyMemory<byte>(keyBytes, checked((int)reference.Offset), reference.Length));
+
+        Assert.True(reader.TryGet(new byte[] { 0x00, 0x02 }, out var value));
+        Assert.Equal(4, value.Length);
+        using var cursor = reader.OpenPrefixCursor(new byte[] { 0x00 });
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.False(cursor.TryReadNext(out _));
+    }
+
     [Fact] public void Builder_rejects_duplicate_and_unsorted_keys()
     {
         var duplicate=new[]{new StorageTreeBuildEntry(new byte[]{1},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};

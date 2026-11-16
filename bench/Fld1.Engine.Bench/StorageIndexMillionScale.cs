@@ -50,14 +50,8 @@ internal static class StorageIndexMillionScale
         long allocatedAfterBuild = GC.GetTotalAllocatedBytes(true);
         long workingSetAfterBuild = process.WorkingSet64;
 
-        byte[] ReadKey(StorageTreeKeyReference reference)
-        {
-            if (reference.Length != KeyLength || reference.Offset > (ulong)(keyBytes.Length - KeyLength))
-                throw new InvalidDataException("B+ tree key reference is outside the scale fixture.");
-            return keyBytes.AsSpan(checked((int)reference.Offset), reference.Length).ToArray();
-        }
-
-        var reader = new StorageBTreeReader(1, root, pageId => pages[pageId], ReadKey);
+        var reader = new StorageBTreeReader(1, root, pageId => pages[pageId],
+            reference => new ReadOnlyMemory<byte>(keyBytes, checked((int)reference.Offset), reference.Length));
         byte[] lookupKey = new byte[KeyLength];
         var lookupWatch = Stopwatch.StartNew();
         for (int i = 0; i < LookupCount; i++)

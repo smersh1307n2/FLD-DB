@@ -71,7 +71,7 @@ internal static class StorageBTreePageCodec
     }
     public static ulong SelectInternalChild(
         ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
-        Func<StorageTreeKeyReference, byte[]> readKey)
+        Func<StorageTreeKeyReference, ReadOnlyMemory<byte>> readKey)
         => SelectInternalChild(StoragePageCodec.Decode(bytes, generation, pageId), searchKey, readKey);
 
     public static ulong SelectInternalChild(
@@ -90,9 +90,9 @@ internal static class StorageBTreePageCodec
             int mid = lo + ((hi - lo) >> 1);
             int offset = Header + mid * InternalEntry;
             StorageTreeKeyReference reference = ReadKey(payload.Slice(offset, 12));
-            byte[] separator = readKey(reference) ?? throw new InvalidDataException("Key reader returned null.");
+            ReadOnlyMemory<byte> separator = readKey(reference);
             if (separator.Length != reference.Length) throw new InvalidDataException("Key length mismatch.");
-            if (searchKey.SequenceCompareTo(separator) >= 0) lo = mid + 1;
+            if (searchKey.SequenceCompareTo(separator.Span) >= 0) lo = mid + 1;
             else hi = mid;
         }
         ulong child = lo == 0
@@ -144,7 +144,7 @@ internal static class StorageBTreePageCodec
     }
 
     public static bool TryFindLeafEntry(ReadOnlyMemory<byte> bytes,ulong generation,ulong id,
-        ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,byte[]> readKey,out StorageTreeLeafEntry entry)
+        ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey,out StorageTreeLeafEntry entry)
         => TryFindLeafEntry(DecodeLeafView(bytes,generation,id),target,readKey,out entry);
 
     public static bool TryFindLeafEntry(StorageBTreeLeafPageView leaf,
@@ -155,15 +155,15 @@ internal static class StorageBTreePageCodec
         while(lo<hi)
         {
             int mid=lo+(hi-lo)/2;var candidate=leaf.GetEntry(mid);
-            byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
+            ReadOnlyMemory<byte> key=readKey(candidate.Key);
             if(key.Length!=candidate.Key.Length)throw new InvalidDataException("Key length mismatch.");
-            if(key.AsSpan().SequenceCompareTo(target)<0)lo=mid+1;else hi=mid;
+            if(key.Span.SequenceCompareTo(target)<0)lo=mid+1;else hi=mid;
         }
         if(lo<leaf.Count)
         {
-            var candidate=leaf.GetEntry(lo);byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
+            var candidate=leaf.GetEntry(lo);ReadOnlyMemory<byte> key=readKey(candidate.Key);
             if(key.Length!=candidate.Key.Length)throw new InvalidDataException("Key length mismatch.");
-            if(key.AsSpan().SequenceEqual(target)){entry=candidate;return true;}
+            if(key.Span.SequenceEqual(target)){entry=candidate;return true;}
         }
         entry=default;return false;
     }
@@ -246,11 +246,11 @@ internal sealed class StorageBTreeReader
     private const int ValidationCacheCapacity = 4096;
     private readonly ulong _generation,_root;private readonly Func<ulong,byte[]>? _readPage;
     private readonly Func<ulong,StoragePageCacheLease>? _readPageLease;
-    private readonly Func<StorageTreeKeyReference,byte[]> _readKey;
+    private readonly Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> _readKey;
     private readonly object _validationGate = new();
     private readonly HashSet<ulong> _validatedPages = new();
     private readonly Queue<ulong> _validationOrder = new();
-    public StorageBTreeReader(ulong generation,ulong root,Func<ulong,byte[]> readPage,Func<StorageTreeKeyReference,byte[]> readKey)
+    public StorageBTreeReader(ulong generation,ulong root,Func<ulong,byte[]> readPage,Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey)
     {
         if(generation==0)throw new ArgumentOutOfRangeException(nameof(generation));
         _generation=generation;_root=root;_readPage=readPage??throw new ArgumentNullException(nameof(readPage));
@@ -296,12 +296,12 @@ internal sealed class StorageBTreeReader
             var leaf=StorageBTreePageCodec.DecodeLeafView(bytes,_generation,id);
             if(!IsValidated(id))
             {
-                byte[]? previous=null;
+                ReadOnlyMemory<byte>? previous=null;
                 for(int i=0;i<leaf.Count;i++)
                 {
                     var entry=leaf.GetEntry(i);
-                    byte[] current=ReadKey(entry.Key);
-                    if(previous is not null && previous.AsSpan().SequenceCompareTo(current)>=0)
+                    ReadOnlyMemory<byte> current=ReadKey(entry.Key);
+                    if(previous.HasValue && previous.Value.Span.SequenceCompareTo(current.Span)>=0)
                         throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
                     previous=current;
                 }
@@ -311,8 +311,10 @@ internal sealed class StorageBTreeReader
         }
         catch { lease?.Dispose();lease=null;throw; }
     }
-    internal byte[] ReadKey(StorageTreeKeyReference r){byte[] key=_readKey(r)??throw new InvalidDataException("Key reader returned null.");if(key.Length!=r.Length)throw new InvalidDataException("Key length mismatch.");return key;}
-    internal bool HasPrefix(ReadOnlySpan<byte> key,ReadOnlySpan<byte> prefix)=>key.StartsWith(prefix);
+    internal ReadOnlyMemory<byte> ReadKey(StorageTreeKeyReference r){ReadOnlyMemory<byte> key=_readKey(r);if(key.Length!=r.Length)throw new InvalidDataException("Key length mismatch.");return key;}
+    internal bool HasPrefix(StorageTreeKeyReference key,ReadOnlySpan<byte> prefix)=>ReadKey(key).Span.StartsWith(prefix);
+    internal int CompareKeys(StorageTreeKeyReference left,StorageTreeKeyReference right)
+        => ReadKey(left).Span.SequenceCompareTo(ReadKey(right).Span);
     private ulong FindLeaf(ReadOnlySpan<byte> key)
     {
         ulong id=_root;
@@ -330,15 +332,14 @@ internal sealed class StorageBTreeReader
                 {
                     var node=StorageBTreePageCodec.DecodeInternal(view);
                     var children=new HashSet<ulong>{node.FirstChild};
-                    byte[]? previous=null;
+                    StorageTreeKeyReference? previous=null;
                     foreach(var separator in node.Separators)
                     {
-                        byte[] current=ReadKey(separator.FirstKey);
-                        if(previous is not null && previous.AsSpan().SequenceCompareTo(current)>=0)
+                        if(previous.HasValue && CompareKeys(previous.Value,separator.FirstKey)>=0)
                             throw new InvalidDataException("B+ tree internal separators are not strictly ordered.");
                         if(!children.Add(separator.PageId))
                             throw new InvalidDataException("B+ tree internal page contains a duplicate child reference.");
-                        previous=current;
+                        previous=separator.FirstKey;
                     }
                     MarkValidated(id);
                 }
@@ -365,7 +366,7 @@ internal sealed class StorageBTreeReader
         while(lo<hi)
         {
             int mid=lo+(hi-lo)/2;
-            if(ReadKey(leaf.GetEntry(mid).Key).AsSpan().SequenceCompareTo(key)<0)lo=mid+1;
+            if(ReadKey(leaf.GetEntry(mid).Key).Span.SequenceCompareTo(key)<0)lo=mid+1;
             else hi=mid;
         }
         return lo;
@@ -375,7 +376,7 @@ internal sealed class StorageBTreeReader
 internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
-    private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
+    private ulong _page;private int _index;private bool _entered,_finished,_disposed;private StorageTreeKeyReference? _lastKey;
     private StorageBTreeLeafPageView? _leafPage;
     private StoragePageCacheLease? _leafLease;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix,
@@ -396,9 +397,9 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
             var leaf=_leafPage!.Value;
             while(_index<leaf.Count)
             {
-                var e=leaf.GetEntry(_index++);byte[] key=_reader.ReadKey(e.Key);
-                if(_lastKey is not null&&_lastKey.AsSpan().SequenceCompareTo(key)>=0)throw new InvalidDataException("Leaf chain ordering error.");
-                _lastKey=key;if(!_reader.HasPrefix(key,_prefix)){_finished=true;break;}
+                var e=leaf.GetEntry(_index++);
+                if(_lastKey.HasValue&&_reader.CompareKeys(_lastKey.Value,e.Key)>=0)throw new InvalidDataException("Leaf chain ordering error.");
+                _lastKey=e.Key;if(!_reader.HasPrefix(e.Key,_prefix)){_finished=true;break;}
                 if(!e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
             }
             if(_finished||leaf.NextPageId==0){_finished=true;break;}
