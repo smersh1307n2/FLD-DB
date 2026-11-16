@@ -438,7 +438,7 @@ internal sealed class StorageBTreeReader
 internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
-    private ulong _page;private int _index;private bool _entered,_finished,_disposed;private StorageTreeKeyReference? _previousLeafLastKey;
+    private ulong _page;private int _index;private bool _entered,_finished,_disposed,_leafFullyMatches;private StorageTreeKeyReference? _previousLeafLastKey;
     private StorageBTreeLeafPageView? _leafPage;
     private StoragePageCacheLease? _leafLease;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix,
@@ -459,13 +459,16 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
                 if(_previousLeafLastKey.HasValue && loadedLeaf.Count>0
                     && _reader.CompareKeys(_previousLeafLastKey.Value,loadedLeaf.GetEntry(0).Key)>=0)
                     throw new InvalidDataException("Leaf chain ordering error.");
+                _leafFullyMatches = _index < loadedLeaf.Count
+                    && _reader.HasPrefix(loadedLeaf.GetEntry(_index).Key,_prefix)
+                    && _reader.HasPrefix(loadedLeaf.GetEntry(loadedLeaf.Count-1).Key,_prefix);
                 _entered=true;
             }
             var leaf=_leafPage!.Value;
             while(_index<leaf.Count)
             {
                 var e=leaf.GetEntry(_index++);
-                if(!_reader.HasPrefix(e.Key,_prefix)){_finished=true;break;}
+                if(!_leafFullyMatches&&!_reader.HasPrefix(e.Key,_prefix)){_finished=true;break;}
                 if(!e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
             }
             if(_finished||leaf.NextPageId==0){_finished=true;break;}
