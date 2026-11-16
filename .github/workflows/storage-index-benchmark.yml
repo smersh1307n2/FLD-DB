@@ -26,6 +26,8 @@ jobs:
         run: dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
       - name: Run Storage index scaling matrix
         run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-index-only
+      - name: Verify all benchmark cases produced measurements
+        run: python3 eng/verify-storage-index-benchmark.py
       - name: Upload BenchmarkDotNet reports
         if: always()
         uses: actions/upload-artifact@v4
