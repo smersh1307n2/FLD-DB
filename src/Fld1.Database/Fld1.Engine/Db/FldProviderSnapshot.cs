@@ -108,7 +108,6 @@ public sealed class FldProviderSnapshot : IDisposable
             pair.Value.Sort();
             _overlayFieldsByRecord.Add(pair.Key, pair.Value.ToArray());
         }
-        _recordIdQueue = CreateRecordIdQueue(runs);
         _recordCount = CountDistinctRecordIds(runs);
         _recordIdQueue = CreateRecordIdQueue(runs);
         _onDispose = onDispose;
