@@ -307,7 +307,7 @@ internal sealed class StorageBTreeReader
 
 internal sealed class StorageBTreePrefixCursor:IDisposable
 {
-    private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;private readonly HashSet<ulong> _visited=new();
+    private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
     private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
     private StorageTreeLeafPage? _currentLeaf;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix){_reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;}
@@ -318,7 +318,6 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
         {
             if(!_entered)
             {
-                if(!_visited.Add(_page))throw new InvalidDataException("Leaf chain cycle.");
                 _currentLeaf=_reader.ReadLeaf(_page);_entered=true;
             }
             var leaf=_currentLeaf!;
@@ -334,5 +333,5 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
         }
         entry=default;return false;
     }
-    public void Dispose(){_disposed=true;_finished=true;_currentLeaf=null;_visited.Clear();}
+    public void Dispose(){_disposed=true;_finished=true;_currentLeaf=null;}
 }
