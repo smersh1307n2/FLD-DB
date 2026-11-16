@@ -91,11 +91,11 @@ If future measurements show that holding the composed lease for one full sweep i
 
 ## 5. API and Host semantics
 
-- Replace `ReadTombstoneGcCandidatesAsync(limit)` with one snapshot-scoped paged candidate scan. The snapshot token is opened once, pages advance one monotonic cursor, and the snapshot is released before final compaction.
+- Replace `ReadTombstoneGcCandidatesAsync(limit)` with one snapshot-scoped paged candidate scan. The snapshot token is opened once, pages advance one monotonic cursor, and the snapshot is released before final compaction. The final FLD compaction API itself has no candidate limit and executes one whole sweep.
 - Replace the all-at-once approved-candidate array with a Host-owned approval-spool session: begin, append bounded sorted batches, seal (count + digest), commit sweep, and abort/release. The IPC protocol must authenticate every operation to the owning client/session and reject replay, duplicate, out-of-order or cross-session tokens.
 - The spool is temporary scratch, not a durable journal: it is never used to resume after process restart and must be deleted on every terminal path and at Host startup. A crash before Manifest publication leaves the old generation authoritative; a crash after publication leaves the new generation authoritative.
 - The FLD compactor consumes the sealed approval stream in RecordId/FieldId order while scanning source Runs once. It must compare full candidate identity (RecordId, FieldId, ChangeId, author, HLC and Origin), not only RecordId/FieldId.
-- Replace the tombstone maintenance contract with an explicit whole-sweep operation/result. The result should distinguish completed, blocked, cancelled and failed outcomes and include reclaimed candidate count plus internal work counters.
+- The public FLD `CompactTombstones` API is a whole-sweep operation with no candidate-count limit. The Host approval-spool commit calls it once; no caller can request a bounded deletion quota that encourages repeated namespace rewrites. A future structured result should distinguish completed, blocked, cancelled and failed outcomes and include reclaimed candidate count plus internal work counters.
 - Remove or migrate every caller that loops `CompactTombstones(limit)` until no more candidates. There must be no compatibility shim that silently repeats full sweeps.
 - Receipt and ChangeId Metadata compactors retain their own independent bounded-page/cursor semantics. Do not change their limits or combine their retention domains with FLD tombstone compaction.
 - BIN-SYNC holds its Tombstone domain durable maintenance lease and Metadata writer admission through candidate scan, proof evaluation, approval transfer and final sweep. The provider acquires the Host-wide GC lease only for the final commit/compaction phase, after releasing the provider candidate snapshot; the dispatcher allows that lease owner to submit the sealed-spool commit operation while excluding other IPC sessions. Emergency Stop/cancellation before publication aborts the spool and prevents Manifest publication.
@@ -204,3 +204,13 @@ The provider snapshot previously defeated page-bounded candidate enumeration by 
 Exact FLD HEAD `99e8175368dc3b9641c2e3133ac6d04b02ac2a18` passed .NET CI on Ubuntu, Windows and macOS 15 (run [43835665775](https://github.com/smersh1307n2/FLD-DB/actions/runs/43835665775), 3/3; Engine 124/124 on Ubuntu). The duplicate CI invocation for the same head also passed Ubuntu and macOS; its Windows job was still finalizing when this note was written.
 
 **Still open:** the count pass adds snapshot-open CPU; per-record field resolution still performs existing per-Run lookups; Metadata retained payloads are scanned once per candidate page; provider overlay snapshot construction remains to be measured; no 1M composed peak-heap/RSS proof or high-Run-count benchmark is claimed. All physical-GC switches remain default-off.
+
+
+## 2026-11-16 follow-up — remove the local bounded-delete API
+
+The public FLD `CompactTombstones(predicate, limit)` overload has been replaced with `CompactTombstones(predicate)`. The compactor no longer contains a candidate-count quota; one invocation evaluates the predicate over the full ordered source merge and publishes one replacement generation. The Host approval-spool commit now calls this whole-sweep API directly, without passing `int.MaxValue` as a sentinel.
+
+- Replaced the old test that reclaimed one candidate per repeated call with a regression asserting all three approved tombstones are reclaimed in one call and the predicate is evaluated once per candidate.
+- Removed the obsolete bounded-page Tombstone benchmark and removed the page-loop benchmark case. The remaining Tombstone sweep matrix measures one complete sweep and an isolated peak-memory probe at 1k–250k cardinalities. Historical repeated-page measurements remain recorded as baseline evidence.
+- Exact-head CI and the updated Tombstone sweep benchmark are running; do not treat this code block as green until those results complete.
+
