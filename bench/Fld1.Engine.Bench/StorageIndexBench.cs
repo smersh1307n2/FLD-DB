@@ -85,7 +85,8 @@ public class StorageIndexBench
             throw new InvalidDataException("B+ tree benchmark fixture failed validation.");
 
         _treePageCache = new StoragePageCache(StoragePageCodec.PageSize * 4L);
-        _pressureReader = new StorageBTreeReader(1, _treeRoot, ReadCachedTreePage,
+        _pressureReader = new StorageBTreeReader(1, _treeRoot,
+            pageId => _treePageCache.Acquire(new StoragePageKey(1, pageId), () => _treePages[pageId]),
             key => _treeKeys[key.Offset]);
 
         var largeValuePages = new Dictionary<ulong, byte[]>();
@@ -108,11 +109,6 @@ public class StorageIndexBench
             File.Copy(file, Path.Combine(destination, Path.GetRelativePath(source, file)));
     }
 
-    private byte[] ReadCachedTreePage(ulong pageId)
-    {
-        using var lease = _treePageCache.Acquire(new StoragePageKey(1, pageId), () => _treePages[pageId]);
-        return lease.Page.ToArray();
-    }
 
     [GlobalCleanup]
     public void Cleanup()
