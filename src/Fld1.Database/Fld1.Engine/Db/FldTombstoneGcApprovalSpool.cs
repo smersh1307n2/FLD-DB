@@ -205,20 +205,25 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         public bool IsApproved(FldTombstoneGcCandidate current)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            while (_hasNext &&
-                   CompareKey(_next!.RecordId.Span, _next.FieldId,
-                       current.RecordId.Span, current.FieldId) < 0)
+            while (_hasNext)
+            {
+                FldTombstoneGcCandidate next = _next!.Value;
+                if (CompareKey(next.RecordId.Span, next.FieldId,
+                    current.RecordId.Span, current.FieldId) >= 0)
+                    break;
                 ReadNext();
+            }
 
             if (!_hasNext)
                 return false;
 
-            int compare = CompareKey(_next!.RecordId.Span, _next.FieldId,
+            FldTombstoneGcCandidate approved = _next!.Value;
+            int compare = CompareKey(approved.RecordId.Span, approved.FieldId,
                 current.RecordId.Span, current.FieldId);
             if (compare > 0)
                 return false;
 
-            bool exact = _next.Equals(current);
+            bool exact = approved.Equals(current);
             ReadNext();
             return exact;
         }
