@@ -97,3 +97,18 @@ The fixture contains 1 / 16 / 64 immutable Runs, each with 128 records and 64-by
 - `WarmMappedLookups`: measures one lookup in every Run after all process mappings have already been established.
 
 BenchmarkDotNet reports elapsed time and managed allocations. "Fresh" means a new process-local mapping/database instance, **not a cold operating-system page cache**; the OS may retain file pages between invocations. This matrix does not claim peak RSS or cold-storage latency. A separate isolated-process OS-level peak-working-set measurement is still required before making capacity claims. The workflow is `.github/workflows/run-mapping-benchmark.yml` and uploads its BenchmarkDotNet artifact.
+
+
+### Demand-paged Run mapping results (2026-11-16)
+
+The first real six-case BenchmarkDotNet matrix completed on Ubuntu (.NET 10.0.15, AMD EPYC 9V74 runner; run [43807855571](https://github.com/smersh1307n2/FLD-DB/actions/runs/43807855571), artifact [14199595580](https://github.com/smersh1307n2/FLD-DB/actions/runs/43807855571)). The benchmark process executed all six cases and emitted one consolidated CSV/Markdown/HTML report. The workflow was marked failed only because its initial post-run guard incorrectly expected six separate Markdown files instead of six rows in one consolidated report. The guard has been corrected to validate the CSV row count, methods and RunCount matrix; a rerun is required for a green workflow.
+
+| Runs | Fresh open + first lookup | Managed allocation | Warm lookup across all Runs | Managed allocation |
+|---:|---:|---:|---:|---:|
+| 1 | 922.1 us | 202.1 KiB | 154.9 ns | 168 B |
+| 16 | 2.476 ms | 1.10 MiB | 48.35 us | 2.63 KiB |
+| 64 | 7.333 ms | 4.00 MiB | 783.8 us | 10.50 KiB |
+
+The fresh-open operation includes database open and digest/structural validation on first mapped lookup; it is not a pure mapping syscall measurement. The warm operation loops over all Runs, so its time/allocation naturally scales with RunCount. At 64 Runs, the measured warm loop averaged about 12.25 us and 168 B per Run. This is a small synthetic fixture (128 records × 64-byte values per Run) and must not be extrapolated to large production Runs.
+
+The results confirm that the benchmark is executing and provide an initial latency/allocation baseline. They do **not** measure RSS, page faults, storage-device cold latency, or large-file behavior. The OS page cache was not flushed. Do not interpret the successful benchmark process as a process-memory capacity proof.
