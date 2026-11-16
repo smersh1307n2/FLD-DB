@@ -73,6 +73,31 @@ public class DatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Run_span_remains_valid_after_compaction_retires_its_mapping()
+    {
+        var rec = Rec(0x31);
+        using var db = FldDatabase.Open(_dir, 0);
+
+        db.Put(rec, 7, "first-generation"u8);
+        db.Commit();
+        ulong firstRun = db.Checkpoint();
+        Assert.True(firstRun > 0);
+        Assert.True(db.TryGet(rec, 7, out ReadOnlySpan<byte> retainedValue));
+
+        db.Put(rec, 7, "second-generation"u8);
+        db.Commit();
+        db.Checkpoint();
+        db.Compact();
+
+        // A RunReader slice can escape TryGet. Compaction must retire the old
+        // mapping instead of unmapping memory that a caller may still reference.
+        Assert.Equal("first-generation"u8.ToArray(), retainedValue.ToArray());
+        Assert.True(File.Exists(Path.Combine(_dir, "runs", $"{firstRun}.fld1")));
+        Assert.True(db.TryGetBytes(rec, 7, out byte[]? current));
+        Assert.Equal("second-generation"u8.ToArray(), current);
+    }
+
+    [Fact]
     public void Overlay_wins_over_run()
     {
         var rec = Rec(5);
