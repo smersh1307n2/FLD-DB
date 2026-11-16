@@ -132,3 +132,10 @@ For each boundary, run a child process that exits/crashes, reopen the database, 
 ## Explicit non-authorization
 
 This ADR does not authorize production B+ tree routing, v1 mirror deletion, WAL format changes, physical generation deletion, or BIN-SYNC GC activation. Those require the gates above and a separate reviewed implementation result.
+
+
+## Stage C.1 implementation status — 2026-11-16
+
+The borrowed-memory key reader, bounded per-reader hot reference cache, per-resident-page decoded view cache, bulk-builder no-copy path and leaf-boundary cursor validation are now implemented in the standalone prototype. The exact 1M-entry result is recorded in `FLD-STORAGE-PAGED-INDEX-DESIGN.md`; warm repeated 10k random lookups measured about 94 ns each, with a 45.9 ms warm scan over one million entries. This is promising but not a production acceptance result: the comparative 1k/10k/100k BenchmarkDotNet matrix at HEAD 8a78251 is pending, and a per-reader hot cache must become an aggregate database-level budget when snapshots are integrated.
+
+Stage D remains blocked until the comparative matrix shows acceptable hot/random lookup and prefix-scan behavior. The durable manifest/WAL/crash protocol below remains design-only; no production Storage routing is authorized.

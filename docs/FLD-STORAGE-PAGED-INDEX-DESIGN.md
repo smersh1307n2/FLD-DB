@@ -228,3 +228,32 @@ The dedicated scale gate passed on Ubuntu/.NET 10 at code HEAD `56aa1b85e4518774
 | Process maximum RSS | 176.9 MiB |
 
 The harness's key callback currently copies each referenced key into a new byte array for comparisons. The point-lookup figure therefore includes a known allocation-heavy reader adapter and is a diagnostic result, not a production estimate. The next reader optimization must add allocation-free key comparison over borrowed memory (with a clearly bounded lifetime) and rerun the same 1M gate plus the comparative 1k/10k/100k matrix. The bulk builder and scan passed the cardinality/correctness gate; this does not prove out-of-core storage or durable integration.
+
+
+## 2026-11-16 — Stage C.1 reader and scan hardening
+
+The standalone reader now uses borrowed `ReadOnlyMemory<byte>` for key comparisons rather than allocating a byte array for every separator/key read. The caller must keep the backing key memory immutable and valid for the full reader/cursor lifetime. The bulk builder also borrows sorted input key memory until `Build` returns, eliminating a per-entry key copy.
+
+The page cache stores the CRC-validated `StoragePageView` on each resident cache entry. A page is fully checked on first decode; eviction discards that decoded view, so a subsequent cache miss reloads and validates the page again. A view remains borrowed from the cache lease and must not outlive it. Prefix cursors validate ordering within each leaf once, then validate the boundary only when moving to the next leaf instead of repeating a key comparison for every entry. The page-loader overload avoids allocating a new closure on each page acquisition.
+
+A per-reader hot reference cache is bounded to 16,384 entries and excludes keys longer than 256 bytes. It caches only key bytes plus value references/negative results; it does not duplicate value payloads, WAL records, outbox state, or durable metadata. This cache is volatile and is discarded with its immutable reader/root. A future multi-snapshot production integration must enforce a shared database-level aggregate budget rather than multiplying the per-reader limit without bound.
+
+### 1M-entry result at FLD HEAD `8a78251c4b22d5274728a00fa199a3f8ec1173bd`
+
+Workflow [43910951962](https://github.com/smersh1307n2/FLD-DB/actions/runs/43910951962) passed the dedicated one-million-entry gate:
+
+| Measurement | Result |
+|---|---:|
+| Entries / page size | 1,000,000 / 16 KiB |
+| Pages | 1,535 |
+| Bulk build | 172.5 ms |
+| First 10,000 random lookups | 192.1 ms |
+| Repeated 10,000-key hot-cache pass | 0.943 ms (about 94 ns/lookup) |
+| First full prefix scan | 55.0 ms |
+| Warm full prefix scan | 45.9 ms |
+| Fixture allocations | 45.8 MiB |
+| Builder allocations | 48.3 MiB |
+| Total allocations through the measured passes | 99.4 MiB |
+| Process maximum RSS (`/usr/bin/time -v`) | 164.4 MiB |
+
+The first random pass includes first-touch page/leaf validation. The repeated pass measures the bounded hot-reference path. This is an in-memory scale fixture, not an on-disk durability test or a comparison against the current `StorageDatabase`. The comparative 1k/10k/100k BenchmarkDotNet matrix at this exact HEAD is still running; production routing remains blocked until its results are reviewed.

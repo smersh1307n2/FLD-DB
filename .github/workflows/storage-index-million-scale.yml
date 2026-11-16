@@ -7,9 +7,9 @@ on:
       - fix/crash-consistency-outbox
     paths:
       - "src/Fld1.Storage/**"
-      - "bench/Fld1.Engine.Bench/**"
+      - "bench/Fld1.Engine.Bench/StorageIndexMillionScale.cs"
+      - "bench/Fld1.Engine.Bench/Program.cs"
       - "eng/verify-storage-index-million-scale.py"
-      - ".github/workflows/storage-index-million-scale.yml"
 
 permissions:
   contents: read

@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - "fix/**"
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fld-db-ci-${{ github.ref }}
+  group: fld-db-ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

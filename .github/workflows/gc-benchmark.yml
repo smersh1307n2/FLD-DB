@@ -4,13 +4,11 @@ on:
   push:
     branches: ["fix/**"]
     paths:
-      - ".github/workflows/gc-benchmark.yml"
-      - "bench/Fld1.Engine.Bench/**"
+      - "bench/Fld1.Engine.Bench/TombstoneGcSweepBench.cs"
       - "src/Fld1.Database/Fld1.Engine/**"
       - "src/Fld1.Database/Fld1.Manifest/**"
       - "src/Fld1.Database/Fld1.Run/**"
       - "src/Fld1.Database/Fld1.Wal/**"
-      - "src/Fld1.Storage/**"
   workflow_dispatch:
 
 permissions:

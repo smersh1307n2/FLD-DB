@@ -5,17 +5,9 @@ on:
   pull_request:
     paths:
       - "src/Fld1.Storage/**"
-      - "bench/Fld1.Engine.Bench/**"
+      - "bench/Fld1.Engine.Bench/StorageIndexBench.cs"
+      - "bench/Fld1.Engine.Bench/Program.cs"
       - "eng/verify-storage-index-benchmark.py"
-      - ".github/workflows/storage-index-benchmark.yml"
-  push:
-    branches:
-      - fix/crash-consistency-outbox
-    paths:
-      - "src/Fld1.Storage/**"
-      - "bench/Fld1.Engine.Bench/**"
-      - "eng/verify-storage-index-benchmark.py"
-      - ".github/workflows/storage-index-benchmark.yml"
 
 permissions:
   contents: read

@@ -2663,3 +2663,13 @@ A separate, manually dispatchable/push-triggered Ubuntu workflow exercises a one
 - This is a standalone builder/reader scale gate, not an on-disk Storage comparison. The key-reference callback currently allocates on every comparison; allocation-free key access is now a prerequisite before Stage D.
 - Durable publication design is recorded in `FLD-STORAGE-DURABLE-ROOT-PUBLICATION-ADR.md`: v2 manifest as sole root authority; WAL flush before COW page/data writes; durable manifest replace before in-memory root publication and WAL reclamation; streaming WAL recovery; snapshot/cursor generation pins; deferred old-generation deletion.
 - Stage D remains blocked on reader hot-path performance and the full 1k/10k/100k comparative benchmark. No production routing, v1 mirror deletion or physical GC is authorized.
+
+
+## 2026-11-16 — Stage C.1 reader performance and workflow hygiene
+
+- Borrowed-memory key comparisons and builder input; no per-comparison/per-entry key-array materialization.
+- Decoded page views are cached per resident page-cache entry; a cache eviction forces CRC validation again on reload.
+- Per-reader hot key-reference cache: 16,384 entries, keys up to 256 bytes, value references only, no value payload or durable metadata duplication. Production must enforce a shared aggregate budget across snapshots.
+- Prefix cursor validates per-leaf ordering and leaf-chain boundaries, not every item.
+- 1M gate at HEAD 8a78251 passed: 1,535 pages, 172.5 ms build, 0.943 ms for repeated 10k hot lookups, 45.9 ms warm 1M prefix scan, 48.3 MiB builder allocations, 164.4 MiB process max RSS. The first 10k lookups include first-touch validation (192.1 ms).
+- Comparative 1k/10k/100k BenchmarkDotNet matrix at HEAD 8a78251 remains pending. No production routing until that matrix and durable crash/reopen gates pass.
