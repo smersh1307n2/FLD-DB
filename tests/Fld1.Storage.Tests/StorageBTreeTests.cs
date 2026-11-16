@@ -55,7 +55,14 @@ public sealed class StorageBTreeTests
         Assert.Throws<InvalidDataException>(()=>cursor.TryReadNext(out _));
     }
 
-    [Fact] public void Builder_rejects_duplicate_keys(){var a=new[]{new StorageTreeBuildEntry(new byte[]{1},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};ulong id=1;Assert.Throws<InvalidDataException>(()=>StorageBTreeBuilder.Build(1,a,()=>id++,(_,_)=>{}));}
+    [Fact] public void Builder_rejects_duplicate_and_unsorted_keys()
+    {
+        var duplicate=new[]{new StorageTreeBuildEntry(new byte[]{1},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};
+        var unsorted=new[]{new StorageTreeBuildEntry(new byte[]{2},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};
+        ulong id=1;
+        Assert.Throws<InvalidDataException>(()=>StorageBTreeBuilder.Build(1,duplicate,()=>id++,(_,_)=>{}));
+        Assert.Throws<InvalidDataException>(()=>StorageBTreeBuilder.Build(1,unsorted,()=>id++,(_,_)=>{}));
+    }
     [Fact] public void Empty_tree_and_one_megabyte_external_key_work(){ulong id=1;Assert.Equal(0UL,StorageBTreeBuilder.Build(1,Array.Empty<StorageTreeBuildEntry>(),()=>id++,(_,_)=>{}));byte[] k=new byte[1024*1024];k[^1]=1;var pages=new Dictionary<ulong,byte[]>();ulong p=1;ulong root=StorageBTreeBuilder.Build(2,new[]{new StorageTreeBuildEntry(k,99,100,3,false)},()=>p++,(n,b)=>pages.Add(n,b));var reader=new StorageBTreeReader(2,root,n=>pages[n],_=>k);Assert.True(reader.TryGet(k,out var v));Assert.Equal(3,v.Length);}
     [Fact] public void Page_codec_rejects_identity_and_crc_corruption(){byte[] p=StorageBTreePageCodec.EncodeLeaf(3,4,0,new[]{new StorageTreeLeafEntry(new(1,2),new(10,5,false))});Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,5));p[^1]=0x7f;Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,4));}
 }
