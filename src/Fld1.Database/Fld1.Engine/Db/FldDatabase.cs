@@ -96,6 +96,13 @@ public sealed partial class FldDatabase : IDisposable
 
     public string DbDir => _dbDir;
     public uint NamespaceId => _namespaceId;
+    internal string GetTombstoneGcScratchDirectory()
+    {
+        string directory = Path.Combine(_dbDir, "gc-scratch");
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
     public int OverlayCount => _overlay.Count;
     public ulong LastSealedCommitSeq => _lastSealedCommitSeq;
     public ulong PendingFlushedCommitSeq => _pendingFlushedCommitSeq;
@@ -1664,7 +1671,7 @@ public sealed partial class FldDatabase : IDisposable
         int limit = 4096)
     {
         ArgumentNullException.ThrowIfNull(canReclaim);
-        if (limit <= 0 || limit > 1_000_000)
+        if (limit <= 0)
             throw new ArgumentOutOfRangeException(nameof(limit));
         ObjectDisposedException.ThrowIf(_disposed, this);
 
