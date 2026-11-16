@@ -17,6 +17,7 @@ public sealed class RunMappingBench
     private const int ValueLength = 64;
 
     private string _directory = null!;
+    private string _freshDirectory = null!;
     private FldDatabase _warmDatabase = null!;
     private (byte[] RecordId, byte[] Value)[] _probes = null!;
 
@@ -26,29 +27,18 @@ public sealed class RunMappingBench
     [GlobalSetup]
     public void Setup()
     {
-        _directory = Path.Combine(Path.GetTempPath(), "fld-run-map-bench-" + Guid.NewGuid().ToString("N"));
+        string fixtureId = Guid.NewGuid().ToString("N");
+        _directory = Path.Combine(Path.GetTempPath(), "fld-run-map-warm-" + fixtureId);
+        _freshDirectory = Path.Combine(Path.GetTempPath(), "fld-run-map-fresh-" + fixtureId);
         Directory.CreateDirectory(_directory);
+        Directory.CreateDirectory(_freshDirectory);
         _probes = new (byte[] RecordId, byte[] Value)[RunCount];
 
-        using (var seed = FldDatabase.Open(_directory, namespaceId: 0))
-        {
-            for (int run = 0; run < RunCount; run++)
-            {
-                byte[] firstRecord = NewRecordId();
-                byte[] firstValue = CreateValue(run, 0);
-                _probes[run] = (firstRecord, firstValue);
+        for (int run = 0; run < RunCount; run++)
+            _probes[run] = (NewRecordId(), CreateValue(run, 0));
 
-                for (int record = 0; record < RecordsPerRun; record++)
-                {
-                    byte[] recordId = record == 0 ? firstRecord : NewRecordId();
-                    byte[] value = record == 0 ? firstValue : CreateValue(run, record);
-                    seed.Put(recordId, 1, value);
-                }
-
-                seed.Commit();
-                seed.Checkpoint();
-            }
-        }
+        SeedDatabase(_directory);
+        SeedDatabase(_freshDirectory);
 
         _warmDatabase = FldDatabase.Open(_directory, namespaceId: 0);
         // Establish all process mappings before warm-path measurements.
@@ -60,17 +50,34 @@ public sealed class RunMappingBench
         }
     }
 
+    private void SeedDatabase(string directory)
+    {
+        using var seed = FldDatabase.Open(directory, namespaceId: 0);
+        for (int run = 0; run < RunCount; run++)
+        {
+            for (int record = 0; record < RecordsPerRun; record++)
+            {
+                byte[] recordId = record == 0 ? _probes[run].RecordId : NewRecordId();
+                byte[] value = record == 0 ? _probes[run].Value : CreateValue(run, record);
+                seed.Put(recordId, 1, value);
+            }
+            seed.Commit();
+            seed.Checkpoint();
+        }
+    }
+
     [GlobalCleanup]
     public void Cleanup()
     {
         _warmDatabase?.Dispose();
         try { Directory.Delete(_directory, recursive: true); } catch { }
+        try { Directory.Delete(_freshDirectory, recursive: true); } catch { }
     }
 
     [Benchmark]
     public int FreshDatabaseOpenAndFirstMappedLookup()
     {
-        using var database = FldDatabase.Open(_directory, namespaceId: 0);
+        using var database = FldDatabase.Open(_freshDirectory, namespaceId: 0);
         if (!database.TryGet(_probes[0].RecordId, 1, out ReadOnlySpan<byte> value))
             throw new InvalidDataException("Fresh mapped lookup did not find the fixture record.");
         return value.Length;
