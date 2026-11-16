@@ -22,7 +22,8 @@ for key, expected in required.items():
 
 for key in ("PageCount", "RootPageId", "BuildAllocatedBytes", "TotalAllocatedBytes",
             "BuildMilliseconds", "PointLookupMilliseconds", "PrefixScanMilliseconds",
-            "ProcessPeakWorkingSetBytes"):
+            "WarmRandomPointLookupMilliseconds", "WarmPrefixScanMilliseconds",
+            "FixtureAllocatedBytes", "ProcessPeakWorkingSetBytes"):
     value = report.get(key)
     if not isinstance(value, (int, float)) or value <= 0:
         raise SystemExit(f"invalid or missing positive metric {key}: {value!r}")
