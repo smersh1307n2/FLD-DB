@@ -2264,7 +2264,7 @@ public sealed partial class FldDatabase : IDisposable
 
     private byte[] EnsureRunCached(int index)
     {
-        var (runId, path, cached, lastAccess) = _runs[index];
+        var (runId, path, cached, _) = _runs[index];
         if (cached is not null)
         {
             _runs[index] = (runId, path, cached, ++_runCacheClock);
