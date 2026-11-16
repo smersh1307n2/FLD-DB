@@ -12,6 +12,24 @@ Run the bounded physical Tombstone-GC benchmark only:
 dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj -c Release -- --tombstone-gc-only
 ```
 
+Run the Storage key/value index scaling baseline:
+
+```sh
+dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj -c Release -- --storage-index-only
+```
+
+## Storage index scaling baseline
+
+`StorageIndexBench` measures the current `Fld1.Storage.Engine.StorageDatabase` implementation at 1,000 / 10,000 / 100,000 entries:
+
+- `FreshOpenAndPointLookup`: opens a new database instance from a checkpoint and performs one point lookup. This includes loading the complete snapshot into the current in-memory dictionary.
+- `CreateSnapshotAndReadOneEntry`: measures creation of the cached sorted snapshot index plus one lookup. The first invocation for a commit epoch includes construction of the full `SortedList`; later invocations reuse it.
+- `WarmPointLookup`: measures a point lookup against the already-open in-memory dictionary.
+
+Each entry uses an 8-byte ordered key and a 128-byte value. Fixture creation/checkpointing is outside measured operations. BenchmarkDotNet's `MemoryDiagnoser` reports cumulative managed allocations per operation.
+
+**Interpretation:** this is an explicit baseline of the current dictionary + full sorted-index architecture. It is not a bounded-memory benchmark and it does not demonstrate an out-of-core implementation. The measured allocations are not peak live heap or process RSS. The purpose is to quantify cardinality scaling before replacing the monolithic index, and to prevent claiming a memory improvement without comparing the same workload on the replacement engine.
+
 ## Tombstone-GC benchmark
 
 The benchmark seeds a real on-disk FLD namespace with one field per record, checkpoints the live generation, writes and checkpoints a field tombstone for every record, and acknowledges the complete Outbox prefix. Setup is outside the measured invocation.
@@ -93,7 +111,7 @@ dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configur
 
 The fixture contains 1 / 16 / 64 immutable Runs, each with 128 records and 64-byte values. It reports two distinct paths:
 
-- `FreshDatabaseOpenAndFirstMappedLookup`: opens a new database instance and performs the first lookup, including lazy Run mapping, structural validation and comparison with the authoritative Storage blob digest.
+- `FreshDatabaseOpenAndFirstMappedLookup`: opens a new database and performs the first lookup, including lazy Run mapping, structural validation and comparison with the authoritative Storage blob digest.
 - `WarmMappedLookups`: measures one lookup in every Run after all process mappings have already been established.
 
 BenchmarkDotNet reports elapsed time and managed allocations. "Fresh" means a new process-local mapping/database instance, **not a cold operating-system page cache**; the OS may retain file pages between invocations. This matrix does not claim peak RSS or cold-storage latency. A separate isolated-process OS-level peak-working-set measurement is still required before making capacity claims. The workflow is `.github/workflows/run-mapping-benchmark.yml` and uploads its BenchmarkDotNet artifact.
