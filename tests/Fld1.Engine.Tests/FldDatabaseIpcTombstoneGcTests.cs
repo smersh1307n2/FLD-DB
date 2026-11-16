@@ -84,7 +84,21 @@ public sealed class FldDatabaseIpcTombstoneGcTests
             // A separate live provider snapshot pins the old generation. The final
             // Host RPC must refuse the whole pass even though the client approved both.
             FldDatabaseIpcSnapshotHandle pinned = await client.OpenSnapshotAsync(Guid.NewGuid());
-            Assert.Equal(0, await client.CompactTombstonesAsync(approved, limit: 8));
+            Guid pinnedSpool = await client.BeginTombstoneGcApprovalSpoolAsync();
+            await client.AppendTombstoneGcApprovalSpoolAsync(pinnedSpool, approved);
+            await client.SealTombstoneGcApprovalSpoolAsync(pinnedSpool);
+            Guid pinnedLease = await client.AcquireGcLeaseAsync();
+            FldDatabaseIpcGcReferenceScan pinnedScan = await client.OpenGcReferenceScanAsync();
+            try
+            {
+                Assert.True(pinnedScan.HasSnapshotPin);
+                Assert.Equal(0, await client.CommitTombstoneGcApprovalSpoolAsync(pinnedSpool));
+            }
+            finally
+            {
+                await client.ReleaseGcReferenceScanAsync(pinnedScan.Token);
+                await client.ReleaseGcLeaseAsync(pinnedLease);
+            }
             Assert.True(await client.ReleaseSnapshotAsync(pinned));
 
             // Stream the proof-approved identities to a Host-owned scratch spool.
