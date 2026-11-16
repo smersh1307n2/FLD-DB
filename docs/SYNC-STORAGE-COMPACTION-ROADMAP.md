@@ -2639,3 +2639,12 @@ The first full 30-case B+ tree matrix completed successfully, but results were u
 - Synced `StorageBTreePageCodec.cs` byte-for-byte into BIN-SYNC's vendored Storage tree and updated `UPSTREAM-MANIFEST.json`; source blob SHA is `e7f26fe049fc1f4ca48eeb491ec8d150c5f5bcae`, source commit `d3ebfe2716d788320b8124993bc911bab73a5c23`.
 - This is a correctness hardening pass, not a performance claim. Fresh exact-head FLD-DB CI, BIN-SYNC Storage Integration, and the complete benchmark matrix must pass before the next stage. Production routing remains disabled.
 - Remaining benchmark gaps: add a dedicated 1M-entry scale run without making every normal PR run execute all expensive fresh-open benchmarks at 1M; replace the cache-pressure benchmark's `ToArray()` adapter with a lease-aware reader path before interpreting it as a cache-performance result.
+
+
+## 2026-11-16 — lease-aware B+ tree page reader
+
+- Added a `StoragePageCacheLease` reader overload. Internal pages are pinned during descent; point lookups pin the leaf for the operation; prefix cursors retain the leaf pin until advancing or disposal. Failure during cursor initialization releases the acquired lease.
+- Added a bounded-cache lifetime test: a live prefix cursor prevents eviction when the cache is full; disposing it allows the next page to be loaded.
+- Replaced the benchmark's cache-pressure `ToArray()` adapter with the lease-aware reader, so it now measures actual cache pin/eviction behavior without a per-page copy.
+- Vendored source and `UPSTREAM-MANIFEST.json` are synchronized in BIN-SYNC; source and vendor blob SHA: `0c4276867489a1d273ee8deb181b3985dfa2ac81`.
+- Exact-head CI and the benchmark must complete before acceptance. This still does not implement durable generation pinning, root publication, WAL integration or production routing.
