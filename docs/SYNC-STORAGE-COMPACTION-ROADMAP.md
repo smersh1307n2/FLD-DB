@@ -2629,3 +2629,13 @@ The B+ tree benchmark matrix now covers bulk build, warm and randomized point lo
 ### Stage C benchmark review and corrective hot-path pass — 2026-11-16
 
 The first full 30-case B+ tree matrix completed successfully, but results were unacceptable: at 100k entries prefix scan took 51.22 s / 2.097 GB allocations and point lookup took 1.135 ms / 24.9 KB allocations. Root cause: cursor decoded/allocated the same leaf once per returned entry; point lookup allocated the entire leaf entry array for a single key. Both are corrected in FLD-DB and vendored to BIN-SYNC. The cursor now retains one decoded leaf per page, point lookup binary-searches the validated leaf payload directly, and internal traversal validates/decode pages once with a bounded depth guard. Fresh exact-head CI and all 30 benchmark measurements are pending; this is not yet a performance win and does not authorize production integration.
+
+
+## 2026-11-16 — B+ tree reader validation hardening
+
+- Created safety refs before continuing: FLD-DB `backup/btree-stage-c-abd6bdc` and BIN-SYNC `backup/btree-stage-c-0cc01af`.
+- FLD-DB reader now validates strict leaf-key ordering before point lookup/prefix traversal and strict internal separator ordering plus unique child page references before descent. A bounded 4,096-page validation FIFO avoids unbounded per-reader metadata; eviction only triggers revalidation.
+- Added tests for CRC-valid but unsorted leaf pages and internal separator pages. These cases previously could make binary search route incorrectly even though page envelope CRC/identity were valid.
+- Synced `StorageBTreePageCodec.cs` byte-for-byte into BIN-SYNC's vendored Storage tree and updated `UPSTREAM-MANIFEST.json`; source blob SHA is `e7f26fe049fc1f4ca48eeb491ec8d150c5f5bcae`, source commit `d3ebfe2716d788320b8124993bc911bab73a5c23`.
+- This is a correctness hardening pass, not a performance claim. Fresh exact-head FLD-DB CI, BIN-SYNC Storage Integration, and the complete benchmark matrix must pass before the next stage. Production routing remains disabled.
+- Remaining benchmark gaps: add a dedicated 1M-entry scale run without making every normal PR run execute all expensive fresh-open benchmarks at 1M; replace the cache-pressure benchmark's `ToArray()` adapter with a lease-aware reader path before interpreting it as a cache-performance result.
