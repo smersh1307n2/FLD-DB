@@ -50,6 +50,79 @@ internal static class StorageBTreePageCodec
         }
         return StoragePageCodec.Encode(generation,pageId,StoragePageKind.Internal,p);
     }
+    public static bool TryGetLeafValue(
+        ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
+        Func<StorageTreeKeyReference, byte[]> readKey, out StorageTreeValueReference value)
+    {
+        ArgumentNullException.ThrowIfNull(readKey);
+        var page = StoragePageCodec.Decode(bytes, generation, pageId);
+        if (page.Kind != StoragePageKind.Leaf) throw new InvalidDataException("Expected B+ tree leaf.");
+        ReadOnlySpan<byte> payload = page.Payload.Span;
+        int count = ReadHeader(payload, LeafEntry, false);
+        int lo = 0, hi = count;
+        while (lo < hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            StorageTreeKeyReference reference = ReadKey(payload.Slice(Header + mid * LeafEntry, 12));
+            byte[] candidate = readKey(reference) ?? throw new InvalidDataException("Key reader returned null.");
+            if (candidate.Length != reference.Length) throw new InvalidDataException("Key length mismatch.");
+            if (candidate.AsSpan().SequenceCompareTo(searchKey) < 0) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo == count)
+        {
+            value = default;
+            return false;
+        }
+        int offset = Header + lo * LeafEntry;
+        StorageTreeKeyReference found = ReadKey(payload.Slice(offset, 12));
+        byte[] foundKey = readKey(found) ?? throw new InvalidDataException("Key reader returned null.");
+        if (foundKey.Length != found.Length) throw new InvalidDataException("Key length mismatch.");
+        if (!foundKey.AsSpan().SequenceEqual(searchKey))
+        {
+            value = default;
+            return false;
+        }
+        offset += 12;
+        ulong valueOffset = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(offset, 8));
+        int valueLength = BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(offset + 8, 4));
+        byte flags = payload[offset + 12];
+        if (valueLength < 0 || flags > 1 || (flags == 1 && valueLength != 0))
+            throw new InvalidDataException("Invalid B+ tree value reference.");
+        _ = checked(valueOffset + (ulong)valueLength);
+        value = new StorageTreeValueReference(valueOffset, valueLength, flags == 1);
+        return !value.IsTombstone;
+    }
+
+    public static ulong SelectInternalChild(
+        ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
+        Func<StorageTreeKeyReference, byte[]> readKey)
+    {
+        ArgumentNullException.ThrowIfNull(readKey);
+        var page = StoragePageCodec.Decode(bytes, generation, pageId);
+        if (page.Kind != StoragePageKind.Internal) throw new InvalidDataException("Expected B+ tree internal page.");
+        ReadOnlySpan<byte> payload = page.Payload.Span;
+        int count = ReadHeader(payload, InternalEntry, true);
+        ulong firstChild = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(4, 8));
+        if (firstChild == 0) throw new InvalidDataException("Null first child.");
+        int lo = 0, hi = count;
+        while (lo < hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            int offset = Header + mid * InternalEntry;
+            StorageTreeKeyReference reference = ReadKey(payload.Slice(offset, 12));
+            byte[] separator = readKey(reference) ?? throw new InvalidDataException("Key reader returned null.");
+            if (separator.Length != reference.Length) throw new InvalidDataException("Key length mismatch.");
+            if (searchKey.SequenceCompareTo(separator) >= 0) lo = mid + 1;
+            else hi = mid;
+        }
+        ulong child = lo == 0
+            ? firstChild
+            : BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(Header + (lo - 1) * InternalEntry + 12, 8));
+        if (child == 0) throw new InvalidDataException("Null B+ tree child.");
+        return child;
+    }
+
     public static StorageTreeLeafPage DecodeLeaf(ReadOnlyMemory<byte> bytes,ulong generation,ulong id)
     {
         var page=StoragePageCodec.Decode(bytes,generation,id);
