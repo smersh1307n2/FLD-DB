@@ -2621,3 +2621,6 @@ Exact source branch `fix/crash-consistency-outbox`, based on `3d670b3170a96f1fe8
 ### Stage C benchmark matrix added
 
 The existing Storage index benchmark now includes B+ tree bulk-build, warm point-lookup and prefix-scan cases at 1k / 10k / 100k entries. The benchmark verifier requires all 21 method/cardinality rows to have real Mean and Allocated measurements. Exact-head workflow results and before/after interpretation are still pending; no performance improvement is claimed.
+
+
+The B+ tree benchmark matrix now covers bulk build, warm and randomized point lookup, forward prefix scan, 1 MiB value references, and point lookup under a four-page LRU cache budget at 1k / 10k / 100k entries. The verifier expects 30 measured rows (10 methods × 3 cardinalities), rejects missing/NA results and is part of the dedicated workflow. Measurements remain pending; no improvement is assumed.
