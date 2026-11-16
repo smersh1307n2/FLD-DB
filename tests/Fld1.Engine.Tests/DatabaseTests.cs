@@ -98,6 +98,38 @@ public class DatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Reopen_rejects_valid_but_stale_mirror_and_recovers_authoritative_blob()
+    {
+        var rec = Rec(0x32);
+        ulong runId;
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(rec, 8, "authoritative"u8);
+            db.Commit();
+            runId = db.Checkpoint();
+        }
+
+        byte[] author = new byte[16];
+        author[15] = 0x22;
+        byte[] staleMirror = new Fld1.Run.Builder.RunBuilder(0)
+            .Add(rec, 8, "stale-but-valid"u8, wall: 9999, logical: 0, author)
+            .Build();
+        string mirrorPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
+        File.WriteAllBytes(mirrorPath, staleMirror);
+
+        using (var reopened = FldDatabase.Open(_dir, 0))
+        {
+            Assert.True(reopened.TryGetBytes(rec, 8, out byte[]? value));
+            Assert.Equal("authoritative"u8.ToArray(), value);
+        }
+
+        Assert.False(File.ReadAllBytes(mirrorPath).AsSpan().SequenceEqual(staleMirror));
+        var repairedReader = new Fld1.Run.Reader.RunReader(File.ReadAllBytes(mirrorPath));
+        Assert.True(repairedReader.TryGet(rec, 8, out ReadOnlySpan<byte> repairedValue));
+        Assert.Equal("authoritative"u8.ToArray(), repairedValue.ToArray());
+    }
+
+    [Fact]
     public void Overlay_wins_over_run()
     {
         var rec = Rec(5);
