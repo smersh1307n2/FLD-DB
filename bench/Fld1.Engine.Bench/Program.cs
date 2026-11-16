@@ -17,6 +17,12 @@ if (args.Length == 3 && args[0] == "--tombstone-gc-probe-child")
     return;
 }
 
+if (args.Contains("--run-mapping-only", StringComparer.Ordinal))
+{
+    BenchmarkRunner.Run<RunMappingBench>();
+    return;
+}
+
 if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
 {
     // Each invocation compacts one bounded page from a freshly seeded on-disk namespace.
