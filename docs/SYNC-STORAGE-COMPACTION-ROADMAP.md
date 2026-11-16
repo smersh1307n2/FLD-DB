@@ -2509,7 +2509,7 @@ The accepted implementation direction is documented in [FLD Tombstone GC Single-
 - One logical namespace sweep, one ordered scan of each source Run, per-record bounded merge/resolve state, and no namespace-wide RecordId/FieldId dictionary or output list.
 - Chunked immutable FLD1 Run output, bounded to one output builder plus the current record's state.
 - One Manifest publication for the complete replacement generation; old Runs are retired only after publication and existing snapshot-pin rules allow it.
-- The composed Host application guard, Metadata admission/maintenance lease and FLD IPC commit lease remain held for the entire sweep. The first implementation is deliberately a single operation, not a multi-invocation resumable cursor. Releasing these fences between pages would require a separate proof/reference snapshot and source-generation protocol and is not authorized by this ADR.
+- BIN-SYNC holds its Tombstone policy lease and Metadata writer-admission lease through candidate enumeration, proof evaluation, approval transfer and final sweep. The FLD Host-wide GC lease is acquired after candidate-snapshot release and held through the final Host reference scan and Manifest publication. The first implementation is deliberately one logical operation, not a multi-invocation resumable compaction cursor.
 - Crash/cancellation before Manifest publication leaves the old generation authoritative; unreferenced output is recovered through the existing orphan Run/blob cleanup. No duplicate GC journal is introduced.
 - Receipt and ChangeId Metadata compaction retain their independent bounded-page/cursor behavior. BIN-SYNC retention proofs and wire semantics do not change.
 
