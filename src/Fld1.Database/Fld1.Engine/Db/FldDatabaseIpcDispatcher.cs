@@ -528,22 +528,22 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             {
                 if (!handle.Spool.IsSealed)
                     throw new InvalidOperationException("Tombstone-GC approval spool must be sealed before commit.");
-                if (!_gcReferenceScans.Values.Any(scan =>
+                GcReferenceScanHandle? referenceScan = _gcReferenceScans.Values.FirstOrDefault(scan =>
                     scan.ClientId == context.ClientId &&
-                    scan.SessionGeneration == context.SessionGeneration))
+                    scan.SessionGeneration == context.SessionGeneration);
+                if (referenceScan is null)
                     throw new InvalidOperationException("Tombstone-GC spool commit requires an active Host reference scan.");
                 if (!_enableTombstoneGc)
                     throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
 
-                // Keep the Host lease fenced against disconnect/expiry while the
-                // final reference snapshot and one Manifest publication are active.
-                // This also prevents the client session cleanup path from deleting
-                // the spool before the ordered reader has finished consuming it.
+                // Reuse the fresh reference snapshot opened after the Host-wide lease
+                // was acquired. Opening a second reference snapshot here would make
+                // the first scan look like an external pin and veto every commit.
+                FldReferenceSnapshot references = referenceScan.Snapshot;
                 using IDisposable commitLease = _database.AcquireCommitGuard();
                 if (!_database.TrySealCommittedWalForTombstoneGc())
                     return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
 
-                using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
                 FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
                 if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
                     draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
