@@ -2,6 +2,40 @@
 
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
+## 2026-11-16 — consolidation-first decision (active priority)
+
+Freeze new protocol features and prioritize the physical storage foundation. The protocol ownership model and two-DLL decision remain unchanged. This is a cross-repository work order; BIN-SYNC v3 Roadmap and Production Status contain the shared checkpoint and CI evidence.
+
+### Confirmed implementation gaps
+
+- Fld1.Storage.Engine.StorageDatabase currently retains the complete key/value set in _values: Dictionary<StorageKey, byte[]> and uses a monolithic snapshot/index path. It is not yet a disk-paged/out-of-core engine with a bounded block cache.
+- FldDatabase.EnsureRunCached currently materializes a complete Run file into a byte[] and caches it in _runs; large Run access is not bounded or streaming.
+- FLD Database currently uses StorageBlobStore while retaining legacy .fld1 Run mirrors for compatibility. Option B is therefore an incomplete migration, not yet a single physical write/read/recovery path.
+- BIN-SYNC's external/Fld1.Storage is a divergent vendored copy: the FLD-DB authoritative tree contains StorageBlobStore and Ipc sources absent from the vendored tree, and StorageDatabase source hashes differ. BIN-SYNC's storage-integration.yml currently builds/tests the vendored copy. A green result there cannot be treated as validation of the current FLD-DB Storage source.
+- Provider-authoritative mode still needs a measured authority/residency audit of Node._storage and NodePersistence against IMetadataStore/IDataProvider; do not remove Node persistence for standalone modes without a replacement recovery contract.
+- The durable GC operator policy is still a contract/test-double boundary, not a concrete production durable policy/audit/lease store.
+
+### Required order
+
+1. Restore deterministic exact-head CI.
+2. Establish one reproducible Storage source revision for both repositories (prefer a pinned package/source revision; if vendoring is retained temporarily, add a CI provenance and byte-for-byte drift gate).
+3. Complete Option B: eliminate legacy Run mirrors only with migration/recovery/rollback and old-format compatibility tests.
+4. Implement disk-backed ordered pages/indexes and a bounded block cache in Storage; implement streaming/range Run readers and explicit cache budgets.
+5. Audit Node/Metadata/Provider authority and remove only proven duplicate live-data residency.
+6. Implement the concrete durable GC policy store over the existing durable authority, without a second GC journal; maintain physical GC default-off until every safety gate passes.
+7. Move the production Host adapter out of samples/ and decompose large classes in small independently tested steps.
+
+### Acceptance evidence
+
+- Exact-head BIN-SYNC and FLD-DB CI on all supported OSes.
+- Cross-repository tests compile against the exact pinned authoritative Storage source, not an unverified stale vendor copy.
+- Restart, partial-write, manifest-switch, compaction, snapshot-pin and rollback tests around the Option B cutover.
+- Bounded-memory tests and peak RSS/working-set measurements at 100k, 250k and 1M+ records with documented p50/p95/p99 latency and allocation data.
+- Windows NTFS power-loss testing is a separate release blocker; process restart does not satisfy it.
+- All Receipt/ChangeId/Tombstone physical-GC flags remain false by default until signed-proof, reference-scan, durable policy/audit, crash recovery and staged-canary gates are independently accepted. Ghost GC remains excluded.
+
+
+
 **Date:** 2026-11-08  
 **Current C-pass continuation (2026-11-09):** FLD source head `dcae6dd95d779d7bc2b1df0be0a6fbc68a64eb0b`; BIN-SYNC source head `b2d11e3a4fbcc72b3a5dc60f09eb4ec512ecc87d`. FLD now has protocol-neutral durable FULL_REPLACE staging as immutable Run pages, checksummed progress state, resumable bounded abort, pre-switch Run validation, atomic namespace manifest switch and restart recovery of the switch marker. The BIN-SYNC host provider now implements `IProviderFullReplace`, reconstructs the staged canonical mutation stream, verifies the signed manifest digest with the shared streaming digest builder, then invokes the FLD atomic switch. This is C-pass only; no build or test has been run for these commits. The previous green checkpoints below are historical and do not validate this continuation.
 **Status (2026-11-08):** BIN-SYNC v3.0.0 implementation branch `feature/fld-external-storage` is at exact green code/test head `7cfddd45dec342f916a08f77a9521c831f6f8af7`: Core 665/665, Fuzz/Lab 31/31, Storage Integration 168/168 independently on Ubuntu, Windows and macOS; in-process/TCP/ScenarioHarness samples and the coverage threshold pass. The Durable Metadata Bench workflow completed successfully, including the one-million-row freeze benchmark: 1,024 local operations over 1,000,000 existing ChangeId rows measured 218.1 µs / 7.77 KB. The earlier 196.9 µs / 7.77 KB measurement is faster; no optimization claim is made from the latest run. BIN-SYNC now includes the shared Core ProviderMutation codec/streaming FULL_REPLACE digest builder, generation-scoped provider staging/switch and conservative receipt-reservation retirement proof. Proposed signed namespace roster/frontier/checkpoint and all-member FULL_REPLACE ACK design is documented in `docs/BIN-SYNC-v3.1-ROSTER-GC-ADDENDUM.md`; it is not implemented, so ChangeId and tombstone/Ghost GC remain disabled. Latest FLD-DB code/test head `fd9f48f5ef7ec181bcacf2891bc45d8c1c11b28c` passes 169 tests independently on Ubuntu, Windows and macOS, including 37/37 `Fld1.Storage.Tests` on each OS. Storage source was ported into the authoritative FLD project, then vendored byte-for-byte into BIN-SYNC from source commit `a3abab3e0197f98aac12e9fdafcbfa204d9fbd77`; the BIN-SYNC integration workflow passed again at `7cfddd45dec342f916a08f77a9521c831f6f8af7`. The Storage Core has cross-process single-owner fencing, path-alias handling, deterministic WAL/snapshot publication fault points, injected partial-write/fsync/directory-sync failures, explicit Unix directory-entry fsync and crash/reopen coverage; Windows directory-entry durability is not claimed. This is not yet multi-application shared-file access. Remaining cross-repository work: complete FLD Database persistence migration onto the two-DLL Storage Core; implement the FLD Shared Engine/IPC path required for multiple applications to use one physical database file; implement the FLD JournalSeq provenance adapter and atomic publication gate; implement FLD-specific durable PendingLocal/freeze recovery; extend injected crash states to partial OS writes, device/fsync failures and power-loss; add controlled million-row/deployment-hardware benchmarks; implement the negotiated v3.1 roster/frontier/retention protocol and prove receipt/ChangeId/tombstone reclamation. The BIN-SYNC outbound cutover is a provider-feed/Metadata Store milestone; it does not by itself complete FLD Database integration or FLD's durable PendingLocal transaction protocol.  
