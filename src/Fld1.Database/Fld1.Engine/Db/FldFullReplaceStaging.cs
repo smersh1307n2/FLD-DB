@@ -300,7 +300,7 @@ public sealed partial class FldDatabase
                 SeqLo = 0,
                 SeqHi = state.BaseLastSealedCommitSeq
             }).ToList();
-            var oldRuns = _runs.Select(run => (run.runId, run.path)).ToArray();
+            var oldRuns = _runs.Select(run => (run.runId, run.path, run.mapped)).ToArray();
             var replacementRuns = new List<(ulong runId, string path, byte[]? cached, long lastAccess, MappedRunFile? mapped)>(state.Runs.Length);
             foreach (FullReplaceStageRun run in state.Runs)
             {
@@ -344,7 +344,7 @@ public sealed partial class FldDatabase
             HashSet<ulong>? pinned = GetPinnedProviderSnapshotRunIds();
             foreach (var oldRun in oldRuns)
             {
-                if (pinned is null || pinned.Contains(oldRun.runId) || oldRuns.Any(old => old.runId == oldRun.runId && old.path == oldRun.path && old.mapped is not null)) continue;
+                if (pinned is null || pinned.Contains(oldRun.runId) || oldRun.mapped is not null) continue;
                 try
                 {
                     _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
