@@ -224,6 +224,7 @@ The single-process embedded Storage path must remain usable without starting the
 - Prefer `ReadOnlySpan<byte>`, `ReadOnlyMemory<byte>`, bounded batch APIs and visitor-based scans on hot paths.
 - Avoid mandatory object materialization for each key/value during scans.
 - Avoid copying large values when an immutable page/blob reference can safely pin its generation.
+- For immutable blob export/copy, use `StorageBlobReader.CopyTo`: it streams through a fixed 64 KiB pooled buffer, validates exact per-page lengths and the whole-blob digest, and avoids a managed allocation per page. `ReadPage`/`ReadAllBytes` are intentionally materializing convenience APIs and must not be used for unbounded blobs.
 - Do not hold writer locks while callers perform network I/O or long-running processing over a snapshot.
 - Keep indexes bounded or rebuildable; never retain one in-memory object per historical journal entry without a retention bound.
 - Separate WAL recovery lifetime from receipt, relay and application metadata lifetimes.
