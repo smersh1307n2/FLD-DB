@@ -12,6 +12,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Fld1.Storage.Tests" />
+    <InternalsVisibleTo Include="Fld1.Engine.Bench" />
     <InternalsVisibleTo Include="BinSync.Storage.Integration" />
   </ItemGroup>
 </Project>
