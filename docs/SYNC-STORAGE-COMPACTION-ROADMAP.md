@@ -2498,3 +2498,21 @@ Validation added in this block:
 An earlier intermediate commit introduced a 64 MiB LRU for retained immutable Run byte arrays. That reduced retained cache residency but did not bound peak memory because RunReader still required a contiguous buffer. The subsequent demand-paged mapping implementation above replaced this cache path; the byte-array LRU and its accounting were removed. The historical cache-only limitation is retained here for traceability, not as the current implementation.
 
 The next storage milestone is no longer another cache policy: it is measuring real process RSS and mapped-page behavior at representative Run counts and sizes, including file-handle pressure, cold/warm reads, and compaction while zero-copy slices remain live. A future lease-based/windowed reader may reduce mapping lifetime, but must preserve the existing slice lifetime contract or change it explicitly.
+
+
+## 2026-11-16 — Tombstone GC algorithm correction (implementation not yet started)
+
+The FLD-only 250k benchmark exposed an algorithmic defect, not a tuning issue. The current `CompactTombstones(limit)` applies `limit` only to the number of candidates reclaimed, while every invocation still builds a namespace-wide RecordId/FieldId index, resolves the namespace, builds a complete replacement Run and publishes a Manifest. Repeating bounded candidate pages therefore repeats the full namespace rewrite. BIN-SYNC Roadmap §§1.164–1.169 records the measured contrast: roughly 28–34 seconds and 9.2 GB cumulative managed allocations for repeated 4,096-candidate pages versus roughly 249–267 ms and 88 MB for one full rewrite at 250k. These allocation figures are cumulative, not peak RAM.
+
+The accepted implementation direction is documented in [FLD Tombstone GC Single-Sweep ADR](FLD-TOMBSTONE-GC-SINGLE-SWEEP-ADR.md):
+
+- One logical namespace sweep, one ordered scan of each source Run, per-record bounded merge/resolve state, and no namespace-wide RecordId/FieldId dictionary or output list.
+- Chunked immutable FLD1 Run output, bounded to one output builder plus the current record's state.
+- One Manifest publication for the complete replacement generation; old Runs are retired only after publication and existing snapshot-pin rules allow it.
+- The composed Host application guard, Metadata admission/maintenance lease and FLD IPC commit lease remain held for the entire sweep. The first implementation is deliberately a single operation, not a multi-invocation resumable cursor. Releasing these fences between pages would require a separate proof/reference snapshot and source-generation protocol and is not authorized by this ADR.
+- Crash/cancellation before Manifest publication leaves the old generation authoritative; unreferenced output is recovered through the existing orphan Run/blob cleanup. No duplicate GC journal is introduced.
+- Receipt and ChangeId Metadata compaction retain their independent bounded-page/cursor behavior. BIN-SYNC retention proofs and wire semantics do not change.
+
+The current candidate-count API and every caller that loops it must be replaced/migrated; it must not be retained as a compatibility shim that silently repeats full compaction. The output chunk size is a memory/write-amplification parameter, not a candidate deletion limit.
+
+**Status:** design decision recorded; implementation, fault tests, complexity counters, composed benchmark and exact-head CI are pending. Do not enable Receipt, ChangeId or Tombstone physical GC. Ghost GC remains excluded. The previous one-rewrite benchmark is a baseline only, not release authorization.
