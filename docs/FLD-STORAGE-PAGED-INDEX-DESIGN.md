@@ -211,3 +211,20 @@ The B+ tree reader now accepts a page source that returns `StoragePageCacheLease
 A separate, manually dispatchable/push-triggered Ubuntu workflow exercises a one-million-entry immutable B+ tree without adding this expensive case to the normal 1k/10k/100k PR matrix. The harness builds sorted 8-byte keys into the current standalone B+ tree builder, validates 10,000 deterministic point lookups, and completes a full one-million-entry prefix scan. It records build/lookup/scan elapsed time, managed allocation deltas, page count, managed heap, and process working-set observations; `/usr/bin/time -v` records process maximum RSS independently. The verifier rejects missing measurements, an incomplete scan, wrong cardinality, or absent RSS data.
 
 **Interpretation boundary:** this is an isolated B+ tree scale/stress gate, not a comparison against the current `StorageDatabase`, not an on-disk durability test, and not evidence of production readiness. It intentionally does not claim WAL replay, durable root publication, snapshot pinning, crash consistency, or bounded RSS. Results must be reviewed before selecting page size or proceeding to production routing. The 1k/10k/100k comparative matrix remains the performance-regression gate.
+
+
+### 1M-entry scale result — 2026-11-16
+
+The dedicated scale gate passed on Ubuntu/.NET 10 at code HEAD `56aa1b85e45187745a7ebb9f1cba726c460c216e` (workflow [43906081415](https://github.com/smersh1307n2/FLD-DB/actions/runs/43906081415), artifact [14245292121](https://github.com/smersh1307n2/FLD-DB/actions/runs/43906081415/artifacts/14245292121)).
+
+| Measurement | Result |
+|---|---:|
+| Entries | 1,000,000 |
+| 16 KiB pages | 1,535 |
+| Bulk build | 259.4 ms |
+| 10,000 deterministic point lookups | 326.5 ms |
+| Full prefix scan | 126.1 ms |
+| Cumulative allocations during build | 124.6 MiB |
+| Process maximum RSS | 176.9 MiB |
+
+The harness's key callback currently copies each referenced key into a new byte array for comparisons. The point-lookup figure therefore includes a known allocation-heavy reader adapter and is a diagnostic result, not a production estimate. The next reader optimization must add allocation-free key comparison over borrowed memory (with a clearly bounded lifetime) and rerun the same 1M gate plus the comparative 1k/10k/100k matrix. The bulk builder and scan passed the cardinality/correctness gate; this does not prove out-of-core storage or durable integration.

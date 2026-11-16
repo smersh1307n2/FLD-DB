@@ -2655,3 +2655,11 @@ The first full 30-case B+ tree matrix completed successfully, but results were u
 A separate, manually dispatchable/push-triggered Ubuntu workflow exercises a one-million-entry immutable B+ tree without adding this expensive case to the normal 1k/10k/100k PR matrix. The harness builds sorted 8-byte keys into the current standalone B+ tree builder, validates 10,000 deterministic point lookups, and completes a full one-million-entry prefix scan. It records build/lookup/scan elapsed time, managed allocation deltas, page count, managed heap, and process working-set observations; `/usr/bin/time -v` records process maximum RSS independently. The verifier rejects missing measurements, an incomplete scan, wrong cardinality, or absent RSS data.
 
 **Interpretation boundary:** this is an isolated B+ tree scale/stress gate, not a comparison against the current `StorageDatabase`, not an on-disk durability test, and not evidence of production readiness. It intentionally does not claim WAL replay, durable root publication, snapshot pinning, crash consistency, or bounded RSS. Results must be reviewed before selecting page size or proceeding to production routing. The 1k/10k/100k comparative matrix remains the performance-regression gate.
+
+
+## 2026-11-16 — B+ tree 1M scale and durable-root gates
+
+- Dedicated 1M scale workflow passed at FLD HEAD `56aa1b85e45187745a7ebb9f1cba726c460c216e`: build 259.4 ms, 10k point lookups 326.5 ms, 1M prefix scan 126.1 ms, 124.6 MiB build allocations, 176.9 MiB process max RSS. Artifact 14245292121.
+- This is a standalone builder/reader scale gate, not an on-disk Storage comparison. The key-reference callback currently allocates on every comparison; allocation-free key access is now a prerequisite before Stage D.
+- Durable publication design is recorded in `FLD-STORAGE-DURABLE-ROOT-PUBLICATION-ADR.md`: v2 manifest as sole root authority; WAL flush before COW page/data writes; durable manifest replace before in-memory root publication and WAL reclamation; streaming WAL recovery; snapshot/cursor generation pins; deferred old-generation deletion.
+- Stage D remains blocked on reader hot-path performance and the full 1k/10k/100k comparative benchmark. No production routing, v1 mirror deletion or physical GC is authorized.
