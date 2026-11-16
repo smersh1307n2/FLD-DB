@@ -80,7 +80,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         if (info.Length != checked((long)Count * CandidateBytes))
             throw new InvalidDataException("Tombstone-GC approval spool length does not match its entry count.");
 
-        using FileStream stream = new(_path, FileMode.Open, FileAccess.Read, FileShare.Read,
+        using FileStream stream = new(_path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
             64 * 1024, FileOptions.SequentialScan);
         byte[] digest = SHA256.HashData(stream);
         if (digest.Length != 32)
@@ -174,7 +174,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         {
             if (expectedDigest.Length != 32)
                 throw new ArgumentException("Approval-spool digest must be SHA-256.", nameof(expectedDigest));
-            _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
                 64 * 1024, FileOptions.SequentialScan);
             if (_stream.Length != checked((long)count * CandidateBytes))
             {
@@ -182,7 +182,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
                 throw new InvalidDataException("Tombstone-GC approval spool changed after sealing.");
             }
 
-            using (var verify = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            using (var verify = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
                        64 * 1024, FileOptions.SequentialScan))
             {
                 byte[] actualDigest = SHA256.HashData(verify);
