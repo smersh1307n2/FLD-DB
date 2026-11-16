@@ -5,6 +5,24 @@ namespace Fld1.Storage.Tests;
 
 public sealed class StoragePageCacheTests
 {
+
+    [Fact]
+    public void Cache_lease_decodes_and_retains_validated_page_view_for_resident_entry()
+    {
+        byte[] encoded = StoragePageCodec.Encode(7, 3, StoragePageKind.Leaf, new byte[] { 1, 2, 3 });
+        var cache = new StoragePageCache(StoragePageCodec.PageSize);
+        using var lease = cache.Acquire(new StoragePageKey(7, 3), () => encoded);
+
+        StoragePageView first = lease.Decode(7, 3);
+        StoragePageView second = lease.Decode(7, 3);
+
+        Assert.Equal(StoragePageKind.Leaf, first.Kind);
+        Assert.Equal(first.Generation, second.Generation);
+        Assert.Equal(first.PageId, second.PageId);
+        Assert.Equal(new byte[] { 1, 2, 3 }, second.Payload.ToArray());
+        Assert.Throws<InvalidDataException>(() => lease.Decode(7, 4));
+    }
+
     [Fact]
     public void Cache_evicts_least_recently_used_unpinned_page_within_budget()
     {

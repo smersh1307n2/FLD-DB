@@ -26,6 +26,7 @@ public class StorageIndexBench
     private ulong _treeRoot;
     private StorageBTreeReader _pressureReader = null!;
     private StoragePageCache _treePageCache = null!;
+    private StoragePageCache _treeWarmPageCache = null!;
     private StorageBTreeReader _largeValueReader = null!;
     private int _randomProbe;
 
@@ -79,7 +80,9 @@ public class StorageIndexBench
         ulong nextPageId = 1;
         _treeRoot = StorageBTreeBuilder.Build(1, _treeEntries, () => nextPageId++,
             (pageId, page) => _treePages.Add(pageId, page));
-        _treeReader = new StorageBTreeReader(1, _treeRoot, pageId => _treePages[pageId],
+        _treeWarmPageCache = new StoragePageCache(StoragePageCodec.PageSize * 2048L);
+        _treeReader = new StorageBTreeReader(1, _treeRoot,
+            pageId => _treeWarmPageCache.Acquire(new StoragePageKey(1, pageId), () => _treePages[pageId]),
             key => new ReadOnlyMemory<byte>(_treeKeys[key.Offset]));
         if (!_treeReader.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("B+ tree benchmark fixture failed validation.");

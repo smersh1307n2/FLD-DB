@@ -69,22 +69,6 @@ internal static class StoragePageCodec
     }
 
     public static StoragePageView Decode(ReadOnlyMemory<byte> page)
-        => DecodeCore(page, verifyIntegrity: true);
-
-    /// <summary>
-    /// Re-decodes an immutable page whose CRC and padding were already validated by
-    /// this reader. Identity and all structural bounds are still checked on every read.
-    /// </summary>
-    internal static StoragePageView DecodePreviouslyValidated(
-        ReadOnlyMemory<byte> page, ulong expectedGeneration, ulong expectedPageId)
-    {
-        StoragePageView view = DecodeCore(page, verifyIntegrity: false);
-        if (view.Generation != expectedGeneration || view.PageId != expectedPageId)
-            throw new InvalidDataException("Storage page identity does not match its manifest reference.");
-        return view;
-    }
-
-    private static StoragePageView DecodeCore(ReadOnlyMemory<byte> page, bool verifyIntegrity)
     {
         ReadOnlySpan<byte> bytes = page.Span;
         if (bytes.Length != PageSize)
@@ -108,16 +92,13 @@ internal static class StoragePageCodec
             throw new InvalidDataException("Storage page payload length exceeds page capacity.");
         int payloadLength = checked((int)rawLength);
         ReadOnlySpan<byte> payload = bytes.Slice(HeaderSize, payloadLength);
-        if (verifyIntegrity)
-        {
-            if (bytes.Slice(HeaderSize + payloadLength).IndexOfAnyExcept((byte)0) >= 0)
-                throw new InvalidDataException("Storage page padding is non-zero.");
+        if (bytes.Slice(HeaderSize + payloadLength).IndexOfAnyExcept((byte)0) >= 0)
+            throw new InvalidDataException("Storage page padding is non-zero.");
 
-            uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(CrcOffset));
-            uint actualCrc = StorageChecksums.Crc32C(bytes.Slice(0, CrcOffset), payload);
-            if (actualCrc != expectedCrc)
-                throw new InvalidDataException("Storage page CRC32C mismatch.");
-        }
+        uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(CrcOffset));
+        uint actualCrc = StorageChecksums.Crc32C(bytes.Slice(0, CrcOffset), payload);
+        if (actualCrc != expectedCrc)
+            throw new InvalidDataException("Storage page CRC32C mismatch.");
 
         return new StoragePageView(generation, pageId, kind, page.Slice(HeaderSize, payloadLength));
     }

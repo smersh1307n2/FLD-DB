@@ -74,6 +74,23 @@ internal sealed class StoragePageCache
         }
     }
 
+    internal StoragePageView Decode(Entry entry, ulong generation, ulong pageId)
+    {
+        lock (_gate)
+        {
+            if (entry.PinCount <= 0)
+                throw new ObjectDisposedException(nameof(StoragePageCacheLease));
+            if (entry.Key.Generation != generation || entry.Key.PageId != pageId)
+                throw new InvalidDataException("Storage page cache lease identity mismatch.");
+            if (entry.DecodedPage.HasValue)
+                return entry.DecodedPage.Value;
+
+            StoragePageView decoded = StoragePageCodec.Decode(entry.Bytes, generation, pageId);
+            entry.DecodedPage = decoded;
+            return decoded;
+        }
+    }
+
     internal void Release(Entry entry)
     {
         lock (_gate)
@@ -120,6 +137,7 @@ internal sealed class StoragePageCache
         public StoragePageKey Key { get; } = key;
         public byte[] Bytes { get; } = bytes;
         public int PinCount { get; set; }
+        public StoragePageView? DecodedPage { get; set; }
         public LinkedListNode<Entry>? Node { get; set; }
     }
 }
@@ -143,6 +161,13 @@ internal sealed class StoragePageCacheLease : IDisposable
             ObjectDisposedException.ThrowIf(_owner is null, this);
             return _entry.Bytes;
         }
+    }
+
+    /// <summary>Returns a CRC-validated page view cached for this immutable cache entry.</summary>
+    public StoragePageView Decode(ulong generation, ulong pageId)
+    {
+        StoragePageCache owner = _owner ?? throw new ObjectDisposedException(nameof(StoragePageCacheLease));
+        return owner.Decode(_entry, generation, pageId);
     }
 
     public void Dispose()

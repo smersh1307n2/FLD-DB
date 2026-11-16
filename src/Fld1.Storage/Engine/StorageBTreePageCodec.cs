@@ -295,11 +295,11 @@ internal sealed class StorageBTreeReader
             ReadOnlyMemory<byte> bytes=lease is not null
                 ? lease.Page
                 : _readPage!(id)??throw new InvalidDataException("Page reader returned null.");
-            bool validated = IsValidated(id);
-            StoragePageView page = validated
-                ? StoragePageCodec.DecodePreviouslyValidated(bytes, _generation, id)
+            StoragePageView page = lease is not null
+                ? lease.Decode(_generation, id)
                 : StoragePageCodec.Decode(bytes, _generation, id);
             var leaf=StorageBTreePageCodec.DecodeLeafView(page);
+            bool validated = IsValidated(id);
             if(!validated)
             {
                 ReadOnlyMemory<byte>? previous=null;
@@ -332,10 +332,10 @@ internal sealed class StorageBTreeReader
                 ReadOnlyMemory<byte> bytes=lease is not null
                     ? lease.Page
                     : _readPage!(id)??throw new InvalidDataException("Page reader returned null.");
-                bool validated = IsValidated(id);
-                var view = validated
-                    ? StoragePageCodec.DecodePreviouslyValidated(bytes, _generation, id)
+                var view = lease is not null
+                    ? lease.Decode(_generation, id)
                     : StoragePageCodec.Decode(bytes, _generation, id);
+                bool validated = IsValidated(id);
                 if(view.Kind==StoragePageKind.Leaf)return id;
                 if(!validated)
                 {
