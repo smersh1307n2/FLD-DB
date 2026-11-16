@@ -569,17 +569,6 @@ public sealed partial class FldDatabase
         return OpenProviderSnapshotPersisted(clientId, hostGeneration);
     }
 
-    private static void AddRecordId(
-        ReadOnlySpan<byte> recordId,
-        HashSet<(ulong Low, ulong High)> seen,
-        List<byte[]> recordIds)
-    {
-        ulong low = BinaryPrimitives.ReadUInt64LittleEndian(recordId);
-        ulong high = BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8));
-        if (seen.Add((low, high)))
-            recordIds.Add(recordId.ToArray());
-    }
-
     private void OnProviderSnapshotDisposed(FldProviderSnapshot snapshot)
     {
         lock (_commitLock)
