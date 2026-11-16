@@ -23,7 +23,8 @@ dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj -c Release
 `StorageIndexBench` measures the current `Fld1.Storage.Engine.StorageDatabase` implementation at 1,000 / 10,000 / 100,000 entries:
 
 - `FreshOpenAndPointLookup`: opens a new database instance from a checkpoint and performs one point lookup. This includes loading the complete snapshot into the current in-memory dictionary.
-- `CreateSnapshotAndReadOneEntry`: measures creation of the cached sorted snapshot index plus one lookup. The first invocation for a commit epoch includes construction of the full `SortedList`; later invocations reuse it.
+- `FreshOpenAndSnapshotReadOneEntry`: opens a new database instance, constructs the complete sorted snapshot index, and performs one lookup on every measured invocation. This prevents BenchmarkDotNet warmup from hiding the index-construction cost.
+- `CachedSnapshotAndReadOneEntry`: measures the cached snapshot path after the sorted index has already been constructed.
 - `WarmPointLookup`: measures a point lookup against the already-open in-memory dictionary.
 
 Each entry uses an 8-byte ordered key and a 128-byte value. Fixture creation/checkpointing is outside measured operations. BenchmarkDotNet's `MemoryDiagnoser` reports cumulative managed allocations per operation.
