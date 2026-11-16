@@ -2482,7 +2482,7 @@ Validation added in this block:
 - Cross-platform Engine tests for mapped Run validation/readback, disposal, and file-handle release.
 - Regression test proving a previously returned Run slice survives Compaction and replacement of its source Run.
 - Regression test proving a stale-but-valid compatibility mirror is rejected and repaired from the authoritative Storage blob.
-- Full .NET CI passed on Windows, Ubuntu and macOS at final documentation HEAD `68cf32c656ccf3d8361314b82e86d712c97b496d` (run `43804483902`, 3/3 jobs).
+- Full .NET CI passed on Windows, Ubuntu and macOS at implementation/documentation HEAD `e232adace5510cc765a10f2cad296aba1b4e466e` (run `43804759932`, 3/3 jobs).
 - Existing Run format, recovery, compaction, FULL_REPLACE and benchmark suites remain release gates.
 - The mapped-reader path has not yet received a dedicated cold/warm latency and peak-RSS benchmark; add that measurement before making quantitative performance claims.
 
