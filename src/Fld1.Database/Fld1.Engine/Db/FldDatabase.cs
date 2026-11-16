@@ -2292,7 +2292,7 @@ public sealed partial class FldDatabase : IDisposable
                 _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
                 return mappedFile.ReadOnlyMemory;
             }
-            mappedFile.Dispose();
+            mappedFile.Close();
         }
 
         // Missing/corrupt legacy mirror: recover from the authoritative Storage blob.
@@ -2331,7 +2331,7 @@ public sealed partial class FldDatabase : IDisposable
             var reader = new RunReader(mappedFile.ReadOnlyMemory);
             if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
             {
-                mappedFile.Dispose();
+                mappedFile.Close();
                 throw new InvalidDataException(
                     $"Run {runId} mirror is invalid after publication: {verify.Status} {verify.Detail}");
             }
@@ -3378,9 +3378,9 @@ public sealed partial class FldDatabase : IDisposable
             }
             DisposeProviderSnapshotsUnderLock();
             foreach (var run in _runs)
-                run.mapped?.Dispose();
+                run.mapped?.Close();
             foreach (MappedRunFile mapped in _retiredRunMappings)
-                mapped.Dispose();
+                mapped.Close();
             _retiredRunMappings.Clear();
             _disposed = true;
             try
