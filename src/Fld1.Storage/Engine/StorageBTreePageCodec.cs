@@ -50,56 +50,16 @@ internal static class StorageBTreePageCodec
         }
         return StoragePageCodec.Encode(generation,pageId,StoragePageKind.Internal,p);
     }
-    public static bool TryGetLeafValue(
-        ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
-        Func<StorageTreeKeyReference, byte[]> readKey, out StorageTreeValueReference value)
-    {
-        ArgumentNullException.ThrowIfNull(readKey);
-        var page = StoragePageCodec.Decode(bytes, generation, pageId);
-        if (page.Kind != StoragePageKind.Leaf) throw new InvalidDataException("Expected B+ tree leaf.");
-        ReadOnlySpan<byte> payload = page.Payload.Span;
-        int count = ReadHeader(payload, LeafEntry, false);
-        int lo = 0, hi = count;
-        while (lo < hi)
-        {
-            int mid = lo + ((hi - lo) >> 1);
-            StorageTreeKeyReference reference = ReadKey(payload.Slice(Header + mid * LeafEntry, 12));
-            byte[] candidate = readKey(reference) ?? throw new InvalidDataException("Key reader returned null.");
-            if (candidate.Length != reference.Length) throw new InvalidDataException("Key length mismatch.");
-            if (candidate.AsSpan().SequenceCompareTo(searchKey) < 0) lo = mid + 1;
-            else hi = mid;
-        }
-        if (lo == count)
-        {
-            value = default;
-            return false;
-        }
-        int offset = Header + lo * LeafEntry;
-        StorageTreeKeyReference found = ReadKey(payload.Slice(offset, 12));
-        byte[] foundKey = readKey(found) ?? throw new InvalidDataException("Key reader returned null.");
-        if (foundKey.Length != found.Length) throw new InvalidDataException("Key length mismatch.");
-        if (!foundKey.AsSpan().SequenceEqual(searchKey))
-        {
-            value = default;
-            return false;
-        }
-        offset += 12;
-        ulong valueOffset = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(offset, 8));
-        int valueLength = BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(offset + 8, 4));
-        byte flags = payload[offset + 12];
-        if (valueLength < 0 || flags > 1 || (flags == 1 && valueLength != 0))
-            throw new InvalidDataException("Invalid B+ tree value reference.");
-        _ = checked(valueOffset + (ulong)valueLength);
-        value = new StorageTreeValueReference(valueOffset, valueLength, flags == 1);
-        return !value.IsTombstone;
-    }
-
     public static ulong SelectInternalChild(
         ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
         Func<StorageTreeKeyReference, byte[]> readKey)
+        => SelectInternalChild(StoragePageCodec.Decode(bytes, generation, pageId), searchKey, readKey);
+
+    public static ulong SelectInternalChild(
+        StoragePageView page, ReadOnlySpan<byte> searchKey,
+        Func<StorageTreeKeyReference, byte[]> readKey)
     {
         ArgumentNullException.ThrowIfNull(readKey);
-        var page = StoragePageCodec.Decode(bytes, generation, pageId);
         if (page.Kind != StoragePageKind.Internal) throw new InvalidDataException("Expected B+ tree internal page.");
         ReadOnlySpan<byte> payload = page.Payload.Span;
         int count = ReadHeader(payload, InternalEntry, true);
@@ -287,15 +247,7 @@ internal sealed class StorageBTreeReader
             byte[] bytes=_readPage(id)??throw new InvalidDataException("Page reader returned null.");
             var view=StoragePageCodec.Decode(bytes,_generation,id);
             if(view.Kind==StoragePageKind.Leaf)return id;
-            var node=StorageBTreePageCodec.DecodeInternal(view);
-            int lo=0,hi=node.Separators.Length;
-            while(lo<hi)
-            {
-                int mid=lo+(hi-lo)/2;
-                if(key.SequenceCompareTo(ReadKey(node.Separators[mid].FirstKey))>=0)lo=mid+1;
-                else hi=mid;
-            }
-            id=lo==0?node.FirstChild:node.Separators[lo-1].PageId;
+            id=StorageBTreePageCodec.SelectInternalChild(view,key,ReadKey);
         }
         throw new InvalidDataException("B+ tree depth exceeds the supported maximum or contains a cycle.");
     }
@@ -309,7 +261,6 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
     private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
-    private StorageTreeLeafPage? _currentLeaf;
     private StorageTreeLeafPage? _currentLeaf;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix){_reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;}
     public bool TryReadNext(out StorageTreeEntry entry)
