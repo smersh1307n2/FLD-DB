@@ -21,6 +21,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
 
     public Guid Token { get; }
     public int Count { get; private set; }
+    public bool IsSealed => _sealed;
     public string PathName => _path;
 
     public FldTombstoneGcApprovalSpool(string directory, Guid token)
