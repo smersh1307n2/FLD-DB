@@ -48,15 +48,21 @@ public class StorageIndexBench
         // Keep fresh-open measurements on a separate physical directory so the
         // warm fixture can retain its own process-local WAL writer fence.
         _freshDirectory = Path.Combine(Path.GetTempPath(), "fld-storage-index-fresh-" + Guid.NewGuid().ToString("N"));
-        string freshSnapshots = Path.Combine(_freshDirectory, "snapshots");
-        Directory.CreateDirectory(freshSnapshots);
-        foreach (string snapshotFile in Directory.EnumerateFiles(Path.Combine(_directory, "snapshots")))
-            File.Copy(snapshotFile, Path.Combine(freshSnapshots, Path.GetFileName(snapshotFile)));
+        CopyDirectory(_directory, _freshDirectory);
 
         _database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
         _probeIndex = EntryCount / 2;
         if (!_database.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("Storage index benchmark fixture failed validation.");
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            File.Copy(file, Path.Combine(destination, Path.GetRelativePath(source, file)));
     }
 
     [GlobalCleanup]
