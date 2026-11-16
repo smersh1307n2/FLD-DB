@@ -1763,81 +1763,149 @@ public sealed partial class FldDatabase : IDisposable
             isRecordTombstone,
             isFieldTombstone);
 
+    private sealed class CompactRunCursor
+    {
+        public required RunReader Reader { get; init; }
+        public uint Index { get; set; }
+        public byte[] RecordId { get; } = new byte[16];
+    }
+
+    private static int CompareMemFieldKeysForCompaction(MemFieldKey left, MemFieldKey right)
+    {
+        Span<byte> leftId = stackalloc byte[16];
+        Span<byte> rightId = stackalloc byte[16];
+        left.WriteRecordId(leftId);
+        right.WriteRecordId(rightId);
+        int compare = Fld1.Core.Util.ByteUtil.CompareUnsigned16(leftId, rightId);
+        return compare != 0 ? compare : left.FieldId.CompareTo(right.FieldId);
+    }
+
+    private static (ulong High, ulong Low) GetCompactionRecordPriority(ReadOnlySpan<byte> recordId)
+        => (System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(recordId),
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(recordId[8..]));
+
     private ulong CompactUnderLock(TombstoneGcFilter? tombstoneGc = null)
     {
         EnsureHealthy();
         if (_dirty.Count != 0)
             throw new InvalidOperationException("Compact requires all overlay writes to be committed first.");
 
-        // Build one compact per-record field index in a single pass over each Run.
-        // ReadOnlyMemory slices keep Run-backed RecordIds alive without allocating
-        // one byte[] per record; the small field-set struct avoids one HashSet per row.
-        var fieldsByRecord = new Dictionary<(ulong Lo, ulong Hi), CompactFieldIdSet>();
-        var recordIds = new List<ReadOnlyMemory<byte>>();
-
-        void AddRunField(ReadOnlyMemory<byte> recordMemory, ushort fieldId)
-        {
-            ReadOnlySpan<byte> recordId = recordMemory.Span;
-            var recordKey = (
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8)));
-            if (fieldsByRecord.TryGetValue(recordKey, out CompactFieldIdSet existing))
-            {
-                existing.Add(fieldId);
-                fieldsByRecord[recordKey] = existing;
-                return;
-            }
-
-            CompactFieldIdSet created = default;
-            created.Add(fieldId);
-            fieldsByRecord.Add(recordKey, created);
-            recordIds.Add(recordMemory);
-        }
-
-        Span<byte> overlayRecordId = stackalloc byte[16];
-        foreach (var item in _overlay.Snapshot())
-        {
-            item.Key.WriteRecordId(overlayRecordId);
-            var recordKey = (item.Key.RecLo, item.Key.RecHi);
-            if (fieldsByRecord.TryGetValue(recordKey, out CompactFieldIdSet existing))
-            {
-                existing.Add(item.Key.FieldId);
-                fieldsByRecord[recordKey] = existing;
-                continue;
-            }
-
-            byte[] recordCopy = overlayRecordId.ToArray();
-            CompactFieldIdSet created = default;
-            created.Add(item.Key.FieldId);
-            fieldsByRecord.Add(recordKey, created);
-            recordIds.Add(recordCopy);
-        }
-
+        // Merge the sorted RecordId streams from immutable Runs. Memory is proportional
+        // to the number of Runs plus one record's field IDs, not the namespace cardinality.
+        // The overlay is already resident in memory; its snapshot is the only source-sized
+        // temporary retained by this pass.
+        var runQueue = new PriorityQueue<CompactRunCursor, (ulong High, ulong Low)>();
         for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
         {
-            var bytes = EnsureRunCached(runIndex);
-            new RunReader(bytes).ScanAllFieldIds(AddRunField);
+            var reader = new RunReader(EnsureRunCached(runIndex));
+            var cursor = new CompactRunCursor { Reader = reader };
+            if (reader.TryReadRecordIdAt(0, cursor.RecordId))
+                runQueue.Enqueue(cursor, GetCompactionRecordPriority(cursor.RecordId));
         }
 
-        if (recordIds.Count == 0)
-            return 0;
+        List<KeyValuePair<MemFieldKey, MemFieldValue>> overlay = _overlay.Snapshot();
+        overlay.Sort(static (left, right) =>
+            CompareMemFieldKeysForCompaction(left.Key, right.Key));
+        int overlayIndex = 0;
 
-        var builder = new RunBuilder(_namespaceId);
-        var outputRecordIds = new List<ReadOnlyMemory<byte>>(recordIds.Count);
-        foreach (ReadOnlyMemory<byte> recordMemory in recordIds)
+        const int MaxOutputFields = 4096;
+        const int MaxOutputBytes = 8 * 1024 * 1024;
+        var outputRuns = new List<(ulong RunId, string Path, byte[] MinRecord, byte[] MaxRecord)>();
+        RunBuilder builder = new(_namespaceId);
+        int outputFieldCount = 0;
+        long outputEstimatedBytes = 0;
+        byte[]? outputMinRecord = null;
+        byte[]? outputMaxRecord = null;
+
+        void FlushOutputRun()
         {
-            ReadOnlySpan<byte> recordId = recordMemory.Span;
-            var recordKey = (
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId),
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(recordId.Slice(8)));
-            CompactFieldIdSet fieldIds = fieldsByRecord[recordKey];
+            if (outputFieldCount == 0)
+                return;
+            byte[] bytes = builder.Build();
+            var reader = new RunReader(bytes);
+            if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+                throw new InvalidDataException(
+                    $"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
+
+            ulong runId = AllocateRunId();
+            string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), bytes);
+            WriteRunAtomically(runPath, bytes);
+            InjectCompactionFault(FldCompactionFaultPoint.AfterReplacementRunDurable);
+            outputRuns.Add((runId, runPath, outputMinRecord!, outputMaxRecord!));
+
+            builder = new RunBuilder(_namespaceId);
+            outputFieldCount = 0;
+            outputEstimatedBytes = 0;
+            outputMinRecord = null;
+            outputMaxRecord = null;
+        }
+
+        void AddOutputField(ReadOnlySpan<byte> recordId, ushort fieldId, FieldResolver.Resolved resolved)
+        {
+            long estimatedBytes = 128L + (resolved.IsTombstone ? 0 : resolved.Value?.Length ?? 0);
+            if (outputFieldCount != 0 &&
+                (outputFieldCount >= MaxOutputFields ||
+                 outputEstimatedBytes + estimatedBytes > MaxOutputBytes))
+                FlushOutputRun();
+
+            AddResolvedField(builder, recordId, fieldId, resolved);
+            outputFieldCount++;
+            outputEstimatedBytes += estimatedBytes;
+            if (outputMinRecord is null)
+                outputMinRecord = recordId.ToArray();
+            outputMaxRecord = recordId.ToArray();
+        }
+
+        Span<byte> recordIdBuffer = stackalloc byte[16];
+        while (runQueue.Count != 0 || overlayIndex < overlay.Count)
+        {
+            bool hasRun = runQueue.TryPeek(out _, out (ulong High, ulong Low) runPriority);
+            bool hasOverlay = overlayIndex < overlay.Count;
+            (ulong High, ulong Low) overlayPriority = default;
+            if (hasOverlay)
+            {
+                Span<byte> overlayId = stackalloc byte[16];
+                overlay[overlayIndex].Key.WriteRecordId(overlayId);
+                overlayPriority = GetCompactionRecordPriority(overlayId);
+            }
+
+            (ulong High, ulong Low) target = !hasRun ? overlayPriority :
+                !hasOverlay ? runPriority :
+                runPriority.CompareTo(overlayPriority) <= 0 ? runPriority : overlayPriority;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(recordIdBuffer, target.High);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(recordIdBuffer[8..], target.Low);
+
+            var fieldIds = new SortedSet<ushort>();
+            while (overlayIndex < overlay.Count)
+            {
+                Span<byte> currentOverlayId = stackalloc byte[16];
+                overlay[overlayIndex].Key.WriteRecordId(currentOverlayId);
+                if (GetCompactionRecordPriority(currentOverlayId) != target)
+                    break;
+                fieldIds.Add(overlay[overlayIndex].Key.FieldId);
+                overlayIndex++;
+            }
+
+            while (runQueue.TryPeek(out _, out (ulong High, ulong Low) priority) &&
+                   priority == target)
+            {
+                CompactRunCursor cursor = runQueue.Dequeue();
+                cursor.Reader.ScanFieldIds(recordIdBuffer, fieldId => fieldIds.Add(fieldId));
+                cursor.Index++;
+                if (cursor.Reader.TryReadRecordIdAt(cursor.Index, cursor.RecordId))
+                    runQueue.Enqueue(cursor, GetCompactionRecordPriority(cursor.RecordId));
+            }
+
+            if (fieldIds.Count == 0)
+                continue;
 
             bool hasRecordTombstone = false;
             bool reclaimRecordTombstone = false;
             FieldResolver.Resolved recordTombstone = FieldResolver.Resolved.Miss;
             if (tombstoneGc is not null &&
                 fieldIds.Contains(FldLifecycle.FieldId) &&
-                TryResolveUnlocked(recordId, FldLifecycle.FieldId, out recordTombstone) &&
+                TryResolveUnlocked(recordIdBuffer, FldLifecycle.FieldId, out recordTombstone) &&
                 recordTombstone.Found)
             {
                 if (recordTombstone.IsTombstone || recordTombstone.Value is null)
@@ -1847,7 +1915,7 @@ public sealed partial class FldDatabase : IDisposable
                     hasRecordTombstone = true;
                     reclaimRecordTombstone = tombstoneGc.TryReclaim(
                         CreateTombstoneGcCandidate(
-                            recordId, FldLifecycle.FieldId, recordTombstone,
+                            recordIdBuffer, FldLifecycle.FieldId, recordTombstone,
                             isRecordTombstone: true, isFieldTombstone: false));
                 }
                 else if (!recordTombstone.Value.AsSpan().SequenceEqual(FldLifecycle.AliveValue))
@@ -1856,11 +1924,10 @@ public sealed partial class FldDatabase : IDisposable
                 }
             }
 
-            bool wroteRecord = false;
-            for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
+            foreach (ushort fieldId in fieldIds)
             {
-                ushort fieldId = fieldIds[fieldIndex];
-                if (!TryResolveUnlocked(recordId, fieldId, out var resolved) || !resolved.Found)
+                if (!TryResolveUnlocked(recordIdBuffer, fieldId, out FieldResolver.Resolved resolved) ||
+                    !resolved.Found)
                     continue;
 
                 if (tombstoneGc is not null && hasRecordTombstone)
@@ -1869,8 +1936,7 @@ public sealed partial class FldDatabase : IDisposable
                     // tombstone too: a later undelete must not reveal an older value.
                     if (!reclaimRecordTombstone)
                     {
-                        AddResolvedField(builder, recordId, fieldId, resolved);
-                        wroteRecord = true;
+                        AddOutputField(recordIdBuffer, fieldId, resolved);
                         continue;
                     }
 
@@ -1887,40 +1953,19 @@ public sealed partial class FldDatabase : IDisposable
 
                 if (tombstoneGc is not null && resolved.IsTombstone &&
                     tombstoneGc.TryReclaim(CreateTombstoneGcCandidate(
-                        recordId, fieldId, resolved,
+                        recordIdBuffer, fieldId, resolved,
                         isRecordTombstone: false, isFieldTombstone: true)))
                     continue;
 
-                AddResolvedField(builder, recordId, fieldId, resolved);
-                wroteRecord = true;
+                AddOutputField(recordIdBuffer, fieldId, resolved);
             }
-
-            if (wroteRecord)
-                outputRecordIds.Add(recordMemory);
         }
 
+        FlushOutputRun();
         if (tombstoneGc is not null && tombstoneGc.ReclaimedCount == 0)
             return 0;
-        if (outputRecordIds.Count == 0 && tombstoneGc is null)
+        if (outputRuns.Count == 0 && tombstoneGc is null)
             return 0;
-
-        ulong runId = 0;
-        string? path = null;
-        byte[]? runBytes = null;
-        if (outputRecordIds.Count != 0)
-        {
-            runBytes = builder.Build();
-            var newReader = new RunReader(runBytes);
-            if (!newReader.TryValidate(out var verify) || newReader.NamespaceId != _namespaceId)
-                throw new InvalidDataException($"Compaction produced invalid Run: {verify.Status} {verify.Detail}");
-
-            runId = AllocateRunId();
-            path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
-            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
-            WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
-            InjectCompactionFault(FldCompactionFaultPoint.AfterReplacementRunDurable);
-            outputRecordIds.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x.Span, y.Span));
-        }
 
         ulong seqHi = _pendingFlushedCommitSeq;
         if (seqHi == 0)
@@ -1934,15 +1979,15 @@ public sealed partial class FldDatabase : IDisposable
             _manifestStore.Update(manifest =>
             {
                 var runs = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
-                if (runId != 0)
+                foreach (var output in outputRuns)
                 {
                     runs.Add(new RunEntry
                     {
-                        RunId = runId,
+                        RunId = output.RunId,
                         Level = 0,
                         Ns = _namespaceId,
-                        MinRec = outputRecordIds[0].ToArray(),
-                        MaxRec = outputRecordIds[^1].ToArray(),
+                        MinRec = output.MinRecord,
+                        MaxRec = output.MaxRecord,
                         SeqLo = 1,
                         SeqHi = seqHi
                     });
@@ -1964,9 +2009,9 @@ public sealed partial class FldDatabase : IDisposable
         _pendingFlushedCommitSeq = seqHi;
         RetireActiveRunMappingsUnderLock();
         _runs.Clear();
-        if (runId != 0)
+        foreach (var output in outputRuns)
         {
-            _runs.Add((runId, path!, null));
+            _runs.Add((output.RunId, output.Path, null));
             MapRun(_runs.Count - 1);
         }
         _overlay.Clear();
@@ -1979,7 +2024,7 @@ public sealed partial class FldDatabase : IDisposable
             bool deleted = false;
             try
             {
-                if (oldRun.runId == runId || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
+                if (pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
                     continue;
                 _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
                 if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
@@ -1987,7 +2032,7 @@ public sealed partial class FldDatabase : IDisposable
             }
             catch
             {
-                // Manifest already points at the replacement Run; stale files are collected on next open.
+                // Manifest already points at the replacement Runs; stale files are collected on next open.
             }
 
             if (deleted)
@@ -1997,7 +2042,7 @@ public sealed partial class FldDatabase : IDisposable
         if (_truncateSealedWal)
             _wal.TruncateSealedSegments(seqHi);
 
-        return runId;
+        return outputRuns.Count == 0 ? 0 : outputRuns[^1].RunId;
     }
 
     private void AddResolvedField(
