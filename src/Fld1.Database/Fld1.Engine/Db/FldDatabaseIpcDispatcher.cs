@@ -524,15 +524,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             EnsureGcLeaseOwner(context);
             GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
-            if (!handle.Spool.IsSealed)
-                throw new InvalidOperationException("Tombstone-GC approval spool must be sealed before commit.");
-            if (!_gcReferenceScans.Values.Any(scan =>
-                scan.ClientId == context.ClientId &&
-                scan.SessionGeneration == context.SessionGeneration))
-                throw new InvalidOperationException("Tombstone-GC spool commit requires an active Host reference scan.");
-
             try
             {
+                if (!handle.Spool.IsSealed)
+                    throw new InvalidOperationException("Tombstone-GC approval spool must be sealed before commit.");
+                if (!_gcReferenceScans.Values.Any(scan =>
+                    scan.ClientId == context.ClientId &&
+                    scan.SessionGeneration == context.SessionGeneration))
+                    throw new InvalidOperationException("Tombstone-GC spool commit requires an active Host reference scan.");
                 if (!_enableTombstoneGc)
                     throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
 
