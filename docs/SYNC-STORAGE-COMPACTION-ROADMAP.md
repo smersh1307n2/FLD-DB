@@ -2,6 +2,22 @@
 
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
+## 2026-11-16 — measured Storage index baseline and migration gate
+
+- Exact-head Storage index benchmark run `43837671951` on `aa82f758bfc8d67ee14b9d892870fee2f73f3837` completed successfully; its artifact contains all 12 expected method/cardinality rows with real Mean and Allocated values. The earlier `NA` harness defect is resolved.
+- Linux/.NET 10 baseline (BenchmarkDotNet, 128-byte values; these are cumulative allocations, not peak resident memory):
+
+| Entries | Fresh open + point lookup | Allocated | Fresh open + snapshot read | Allocated | Warm point lookup |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 4.164 ms | 0.515 MB | 4.205 ms | 0.531 MB | 54.82 ns |
+| 10,000 | 39.061 ms | 4.812 MB | 39.661 ms | 4.974 MB | 52.03 ns |
+| 100,000 | 405.743 ms | 46.882 MB | 415.037 ms | 48.491 MB | 44.90 ns |
+
+  Cached snapshot creation + one read measured 67.85 ns / 184 B at 1k, 86.61 ns / 184 B at 10k and 106.80 ns / 184 B at 100k. This confirms that steady-state point lookup is cheap, while open and first ordered-snapshot construction scale linearly in work and allocations. It is a baseline only; do not call it bounded-memory or use BenchmarkDotNet Allocated as a peak-heap/RSS measurement.
+- This baseline is the before-measurement for the copy-on-write paged B+ tree in `FLD-STORAGE-PAGED-INDEX-DESIGN.md`. The next production implementation should begin with Stage B page primitives, page identity/CRC validation, bounded page cache and generation pin registry, followed by Stage C reader/builder. Do not start by deleting Run mirrors.
+- Option B Run mirror removal is explicitly gated on a Run access path that can validate and query immutable Storage blobs without `ReadAllBytes`, without repairing/depending on `runs/*.fld1`, and without retaining the whole Run in a managed array. Current `RunReader` is span-backed and `EnsureRunCached` still materializes blob bytes / repairs a mirror; removing the mirror now would merely trade a file mapping for an unbounded managed allocation. First design and benchmark a page/range-capable Run reader over `StorageBlobReader`, then add a versioned manifest cutover, legacy-read migration, crash/reopen/rollback tests and old-format fixtures. Keep old files until the new manifest is durably published and every legacy reader/pin is drained.
+- The Storage Core source is now synchronized between FLD-DB and BIN-SYNC at the pinned source commit recorded in BIN-SYNC `external/Fld1.Storage/UPSTREAM-MANIFEST.json`; exact-head cross-repository build and 3-OS Storage Integration are green on BIN-SYNC `c007ee9`. Keep the provenance/drift gate enabled.
+
 ## 2026-11-16 — consolidation-first decision (active priority)
 
 Freeze new protocol features and prioritize the physical storage foundation. The protocol ownership model and two-DLL decision remain unchanged. This is a cross-repository work order; BIN-SYNC v3 Roadmap and Production Status contain the shared checkpoint and CI evidence.
