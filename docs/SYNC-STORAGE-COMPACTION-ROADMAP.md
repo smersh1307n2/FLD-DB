@@ -2616,3 +2616,8 @@ Exact source branch `fix/crash-consistency-outbox`, based on `3d670b3170a96f1fe8
 - Added randomized reference-model tests, multi-level split coverage, tombstone filtering, duplicate/unsorted-input rejection, empty-tree behavior, 1 MiB key reference and page corruption/identity tests.
 - Stage C remains a standalone primitive. No WAL integration, manifest v2, production routing, v1 migration, snapshot pin integration or physical generation deletion is enabled.
 - Dedicated benchmarks and exact-head cross-platform CI are required before performance claims or progression to production integration.
+
+
+### Stage C benchmark matrix added
+
+The existing Storage index benchmark now includes B+ tree bulk-build, warm point-lookup and prefix-scan cases at 1k / 10k / 100k entries. The benchmark verifier requires all 21 method/cardinality rows to have real Mean and Allocated measurements. Exact-head workflow results and before/after interpretation are still pending; no performance improvement is claimed.
