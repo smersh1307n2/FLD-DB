@@ -92,11 +92,8 @@ internal static class StoragePageCodec
             throw new InvalidDataException("Storage page payload length exceeds page capacity.");
         int payloadLength = checked((int)rawLength);
         ReadOnlySpan<byte> payload = bytes.Slice(HeaderSize, payloadLength);
-        foreach (byte padding in bytes.Slice(HeaderSize + payloadLength))
-        {
-            if (padding != 0)
-                throw new InvalidDataException("Storage page padding is non-zero.");
-        }
+        if (bytes.Slice(HeaderSize + payloadLength).IndexOfAnyExcept((byte)0) >= 0)
+            throw new InvalidDataException("Storage page padding is non-zero.");
 
         uint expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(CrcOffset));
         uint actualCrc = StorageChecksums.Crc32C(bytes.Slice(0, CrcOffset), payload);
