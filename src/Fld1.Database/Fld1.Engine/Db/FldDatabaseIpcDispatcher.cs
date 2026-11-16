@@ -27,6 +27,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private Guid _gcLeaseClientId;
     private ulong _gcLeaseSessionGeneration;
     private readonly Dictionary<Guid, GcReferenceScanHandle> _gcReferenceScans = new();
+    private const int MaxActiveGcApprovalSpools = 4;
     private readonly Dictionary<Guid, GcApprovalSpoolHandle> _gcApprovalSpools = new();
 
     private sealed record GcApprovalSpoolHandle(
@@ -475,6 +476,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
 
         lock (_gcLeaseGate)
         {
+            if (_gcApprovalSpools.Count >= MaxActiveGcApprovalSpools)
+                throw new InvalidOperationException("The Host has reached its active tombstone-GC approval-spool limit.");
             if (_gcApprovalSpools.Values.Any(item =>
                 item.ClientId == context.ClientId && item.SessionGeneration == context.SessionGeneration))
                 throw new InvalidOperationException("This IPC session already owns a tombstone-GC approval spool.");
@@ -523,6 +526,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
             if (!handle.Spool.IsSealed)
                 throw new InvalidOperationException("Tombstone-GC approval spool must be sealed before commit.");
+            if (!_gcReferenceScans.Values.Any(scan =>
+                scan.ClientId == context.ClientId &&
+                scan.SessionGeneration == context.SessionGeneration))
+                throw new InvalidOperationException("Tombstone-GC spool commit requires an active Host reference scan.");
 
             try
             {
