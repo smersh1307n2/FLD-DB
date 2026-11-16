@@ -51,7 +51,11 @@ public sealed class FldProviderSnapshotStreamingTests
                 Assert.Equal(recordIds[4], last.Entries[0].RecordId);
 
                 FldProviderSnapshotMetadataPage rewind = snapshot.ReadMetadataPage(0, 2);
-                Assert.Equal(first, rewind);
+                Assert.Equal(first.NextIndex, rewind.NextIndex);
+                Assert.Equal(first.HasMore, rewind.HasMore);
+                Assert.Equal(
+                    first.Entries.Select(entry => entry.RecordId),
+                    rewind.Entries.Select(entry => entry.RecordId));
             }
         }
         finally
