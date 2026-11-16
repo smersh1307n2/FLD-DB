@@ -50,8 +50,6 @@ public sealed partial class FldDatabase : IDisposable
 {
     // One root-wide lock: manifest, namespace WALs, runs and outboxes share this database owner.
     private const ulong StoragePartitionId = 0;
-    // Bound retained immutable Run images; larger Runs remain readable but are not cached.
-    private const long RunCacheBudgetBytes = 64L * 1024 * 1024;
     private readonly string _dbDir;
     private readonly Fld1.Storage.Engine.StoragePartitionLease _storageLease;
     private readonly Fld1.Storage.Engine.StorageDatabase _runStorage;
@@ -80,10 +78,8 @@ public sealed partial class FldDatabase : IDisposable
     private readonly object _commitLock = new();
     private WalManager _wal;
     private OutboxLog _outbox;
-    private readonly List<(ulong runId, string path, byte[]? cached, long lastAccess, MappedRunFile? mapped)> _runs = new();
+    private readonly List<(ulong runId, string path, MappedRunFile? mapped)> _runs = new();
     private readonly List<MappedRunFile> _retiredRunMappings = new();
-    private long _runCacheBytes;
-    private long _runCacheClock;
     private ulong _nextRunId = 1;
     private ulong _clientRequestSeq;
     private readonly byte[] _clientInstanceId = new byte[16];
@@ -319,7 +315,7 @@ public sealed partial class FldDatabase : IDisposable
                     $"Manifest references missing Run {re.RunId} in both Storage blobs and legacy Run files.");
             }
 
-            _runs.Add((re.RunId, path, null, 0, null));
+            _runs.Add((re.RunId, path, null));
             if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
         }
         _lastSealedCommitSeq = Math.Max(sealedSeq, _outbox.MaterializedThroughCommitSeq);
@@ -1438,7 +1434,7 @@ public sealed partial class FldDatabase : IDisposable
             _manifestDirty = false;
             _pendingFlushedCommitSeq = seqHi;
 
-            _runs.Add((runId, path, null, 0, null));
+            _runs.Add((runId, path, null));
             MapRun(_runs.Count - 1);
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
@@ -1968,10 +1964,9 @@ public sealed partial class FldDatabase : IDisposable
         _pendingFlushedCommitSeq = seqHi;
         RetireActiveRunMappingsUnderLock();
         _runs.Clear();
-        _runCacheBytes = 0;
         if (runId != 0)
         {
-            _runs.Add((runId, path!, null, 0, null));
+            _runs.Add((runId, path!, null));
             MapRun(_runs.Count - 1);
         }
         _overlay.Clear();
@@ -2268,32 +2263,25 @@ public sealed partial class FldDatabase : IDisposable
 
     private ReadOnlyMemory<byte> EnsureRunCached(int index)
     {
-        var (runId, path, cached, _, mapped) = _runs[index];
+        var (runId, path, mapped) = _runs[index];
         if (mapped is not null)
-        {
-            _runs[index] = (runId, path, cached, ++_runCacheClock, mapped);
             return mapped.ReadOnlyMemory;
-        }
-        if (cached is not null)
-        {
-            _runs[index] = (runId, path, cached, ++_runCacheClock, null);
-            return cached;
-        }
 
         // The Storage blob is authoritative. A mapped compatibility mirror is accepted
         // only when its whole-file SHA-256 matches the durable blob catalog digest.
         MappedRunFile? mappedFile = TryOpenValidatedRunMapping(runId, path);
         if (mappedFile is not null)
         {
-            _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+            _runs[index] = (runId, path, mappedFile);
             return mappedFile.ReadOnlyMemory;
         }
 
         Guid blobId = RunBlobId(runId);
+        byte[] bytes;
         if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
         {
             using (blobReader)
-                cached = blobReader.ReadAllBytes();
+                bytes = blobReader.ReadAllBytes();
         }
         else if (_runBlobStore.ContainsBlob(blobId))
         {
@@ -2305,14 +2293,14 @@ public sealed partial class FldDatabase : IDisposable
                 $"Run {runId} has no valid compatibility mirror and no authoritative Storage blob.");
         }
 
-        var reader = new RunReader(cached);
+        var reader = new RunReader(bytes);
         if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
             throw new InvalidDataException(
                 $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
 
         // Repair a missing or stale mirror from the digest-verified Storage blob, then
         // map the repaired immutable file instead of retaining the full managed array.
-        WriteRunAtomically(path, cached);
+        WriteRunAtomically(path, bytes);
         MapRun(index);
         return _runs[index].mapped!.ReadOnlyMemory;
     }
@@ -2363,7 +2351,7 @@ public sealed partial class FldDatabase : IDisposable
 
     private void MapRun(int index)
     {
-        var (runId, path, cached, _, mapped) = _runs[index];
+        var (runId, path, mapped) = _runs[index];
         if (mapped is not null)
             return;
         try
@@ -2371,9 +2359,7 @@ public sealed partial class FldDatabase : IDisposable
             MappedRunFile? mappedFile = TryOpenValidatedRunMapping(runId, path);
             if (mappedFile is null)
                 throw new InvalidDataException($"Run {runId} mirror is missing or does not match its Storage blob.");
-            if (cached is not null)
-                _runCacheBytes -= cached.LongLength;
-            _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+            _runs[index] = (runId, path, mappedFile);
         }
         catch
         {
@@ -2390,52 +2376,6 @@ public sealed partial class FldDatabase : IDisposable
         {
             if (run.mapped is not null)
                 _retiredRunMappings.Add(run.mapped);
-        }
-    }
-
-    private void CacheRun(int index, byte[] bytes)
-    {
-        var (runId, path, previous, _, mapped) = _runs[index];
-        if (previous is not null)
-            _runCacheBytes -= previous.LongLength;
-
-        if (bytes.LongLength > RunCacheBudgetBytes)
-        {
-            _runs[index] = (runId, path, null, 0, mapped);
-            return;
-        }
-
-        while (_runCacheBytes + bytes.LongLength > RunCacheBudgetBytes)
-        {
-            int victimIndex = -1;
-            long oldestAccess = long.MaxValue;
-            for (int i = 0; i < _runs.Count; i++)
-            {
-                if (i == index || _runs[i].cached is null)
-                    continue;
-                if (_runs[i].lastAccess < oldestAccess)
-                {
-                    oldestAccess = _runs[i].lastAccess;
-                    victimIndex = i;
-                }
-            }
-
-            if (victimIndex < 0)
-                break;
-
-            var victim = _runs[victimIndex];
-            _runCacheBytes -= victim.cached!.LongLength;
-            _runs[victimIndex] = (victim.runId, victim.path, null, 0, victim.mapped);
-        }
-
-        if (_runCacheBytes + bytes.LongLength <= RunCacheBudgetBytes)
-        {
-            _runs[index] = (runId, path, bytes, ++_runCacheClock, mapped);
-            _runCacheBytes += bytes.LongLength;
-        }
-        else
-        {
-            _runs[index] = (runId, path, null, 0, mapped);
         }
     }
 
