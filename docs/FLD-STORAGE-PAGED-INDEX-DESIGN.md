@@ -180,3 +180,15 @@ The paged index is not complete until:
 - point lookup, ordered scan and checkpoint performance are compared to the corrected baseline;
 - old generation deletion is proven safe across active readers and process restart;
 - docs and on-disk format spec are updated before enabling v2 by default.
+
+
+### 2026-11-16 benchmark review — hot-path defect found and fixed
+
+The first complete 30-case run (workflow 43875781259, code HEAD daf9dffcbbbabb76ddc475929bfbf458586e96a9) passed the verifier but exposed an implementation defect:
+- 100k-entry prefix scan: 51.22 s and 2.097 GB allocated per operation.
+- 100k-entry B+ tree point lookup: 1.135 ms and 24.9 KB allocated per operation.
+- 100k-entry bulk build: 76.95 ms and 8.31 MB allocated per operation.
+
+The prefix cursor decoded and allocated the entire current leaf on every TryReadNext, i.e. once per returned entry rather than once per leaf. Point lookup also decoded an entire leaf-entry array for a single key. Both hot paths have now been changed: cursor caches its decoded leaf until advancing to the next leaf; point lookup performs binary search directly in the validated leaf payload without allocating the full entry array. Internal-node traversal now decodes each page only once and bounds traversal depth to 64 to fail closed on cycles/corrupt trees.
+
+These are baseline defect measurements, not acceptable target performance. Exact-head cross-platform CI and a fresh 30-case benchmark after the fix are mandatory. Production integration remains blocked.
