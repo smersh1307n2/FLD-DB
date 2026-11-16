@@ -11,6 +11,7 @@ namespace Fld1.Engine.Db;
 internal sealed class FldTombstoneGcApprovalSpool : IDisposable
 {
     private const int CandidateBytes = 75;
+    private const int MaxEntries = 2_000_000;
     private readonly string _path;
     private FileStream? _writer;
     private byte[]? _sealedDigest;
@@ -45,7 +46,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         if (candidates.Count == 0)
             return;
         if (candidates.Count > FldDatabaseIpcProtocol.MaxTombstoneGcCandidates ||
-            Count > int.MaxValue - candidates.Count)
+            Count > MaxEntries - candidates.Count)
             throw new ArgumentOutOfRangeException(nameof(candidates));
 
         byte[] payload = FldDatabaseIpcProtocol.EncodeTombstoneGcRequest(candidates, candidates.Count);
@@ -133,7 +134,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         if (kind is not (1 or 2) || wall == 0 || authorEpoch == 0 || originSequence == 0)
             throw new InvalidDataException("Tombstone-GC approval spool entry identity is invalid.");
 
-        return new FldTombstoneGcCandidate(
+        return FldTombstoneGcCandidate.CreateOwned(
             recordId, fieldId, changeId, authorNodeId, wall, logical,
             authorEpoch, originSequence, kind == 1, kind == 2);
     }
@@ -155,6 +156,14 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             if (File.Exists(_path))
                 File.Delete(_path);
         }
+        catch (IOException)
+        {
+            // Scratch cleanup is retried at the next Host start; it is not commit authority.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Scratch cleanup is retried at the next Host start; it is not commit authority.
+        }
         finally
         {
             _sealedDigest = null;
@@ -167,6 +176,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         private readonly int _count;
         private int _read;
         private FldTombstoneGcCandidate? _next;
+        private readonly byte[] _entryBuffer = new byte[CandidateBytes];
         private bool _hasNext;
         private bool _disposed;
 
@@ -239,9 +249,8 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
                 return;
             }
 
-            byte[] entry = new byte[CandidateBytes];
-            _stream.ReadExactly(entry);
-            _next = DecodeCandidate(entry);
+            _stream.ReadExactly(_entryBuffer);
+            _next = DecodeCandidate(_entryBuffer);
             _hasNext = true;
             _read++;
         }
