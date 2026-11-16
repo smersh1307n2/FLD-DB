@@ -55,6 +55,50 @@ public sealed class StorageBTreeTests
         Assert.Throws<InvalidDataException>(()=>cursor.TryReadNext(out _));
     }
 
+
+    [Fact]
+    public void Reader_rejects_crc_valid_leaf_with_unsorted_keys()
+    {
+        byte[] first={0x01},second={0x02};
+        var pages=new Dictionary<ulong,byte[]>
+        {
+            [1]=StorageBTreePageCodec.EncodeLeaf(9,1,0,new[]
+            {
+                new StorageTreeLeafEntry(new(2,1),new(2,1,false)),
+                new StorageTreeLeafEntry(new(1,1),new(1,1,false))
+            })
+        };
+        var keys=new Dictionary<ulong,byte[]>{{1,first},{2,second}};
+        var reader=new StorageBTreeReader(9,1,id=>pages[id],r=>keys[r.Offset]);
+        Assert.Throws<InvalidDataException>(()=>reader.TryGet(first,out _));
+        Assert.Throws<InvalidDataException>(()=>
+        {
+            using var cursor=reader.OpenPrefixCursor(first);
+            cursor.TryReadNext(out _);
+        });
+    }
+
+    [Fact]
+    public void Reader_rejects_crc_valid_internal_page_with_unsorted_separators()
+    {
+        byte[] one={0x01},two={0x02},three={0x03};
+        var pages=new Dictionary<ulong,byte[]>
+        {
+            [1]=StorageBTreePageCodec.EncodeLeaf(10,1,0,new[]
+                {new StorageTreeLeafEntry(new(1,1),new(1,1,false))}),
+            [2]=StorageBTreePageCodec.EncodeLeaf(10,2,0,new[]
+                {new StorageTreeLeafEntry(new(2,1),new(2,1,false))}),
+            [3]=StorageBTreePageCodec.EncodeInternal(10,3,1,new[]
+            {
+                new StorageTreeChild(2,new(2,1)),
+                new StorageTreeChild(4,new(3,1))
+            })
+        };
+        var keys=new Dictionary<ulong,byte[]>{{1,one},{2,two},{3,one}};
+        var reader=new StorageBTreeReader(10,3,id=>pages[id],r=>keys[r.Offset]);
+        Assert.Throws<InvalidDataException>(()=>reader.TryGet(one,out _));
+    }
+
     [Fact] public void Builder_rejects_duplicate_and_unsorted_keys()
     {
         var duplicate=new[]{new StorageTreeBuildEntry(new byte[]{1},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};
