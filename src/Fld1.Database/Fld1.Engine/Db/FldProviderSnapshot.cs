@@ -67,8 +67,9 @@ public sealed class FldProviderSnapshot : IDisposable
     private RunReader[]? _runs;
     private Dictionary<MemFieldKey, MemFieldValue>? _overlayByKey;
     private Dictionary<(ulong Low, ulong High), ushort[]>? _overlayFieldsByRecord;
-    private byte[][]? _recordIds;
-    private int _recordIndex;
+    private readonly int _recordCount;
+    private PriorityQueue<RunRecordIdCursor, RecordIdPriority> _recordIdQueue;
+    private byte[]? _lastEmittedRecordId;
     private int _nextIndex;
     private byte[]? _currentRecordId;
     private ushort[]? _currentFieldIds;
@@ -84,7 +85,6 @@ public sealed class FldProviderSnapshot : IDisposable
         ulong sourceFeedWatermark,
         RunReader[] runs,
         KeyValuePair<MemFieldKey, MemFieldValue>[] overlay,
-        byte[][] recordIds,
         Action<FldProviderSnapshot> onDispose)
     {
         if (generation == Guid.Empty) throw new ArgumentException("Snapshot generation must be non-empty.", nameof(generation));
@@ -107,7 +107,9 @@ public sealed class FldProviderSnapshot : IDisposable
             pair.Value.Sort();
             _overlayFieldsByRecord.Add(pair.Key, pair.Value.ToArray());
         }
-        _recordIds = recordIds;
+        _recordIdQueue = CreateRecordIdQueue(runs);
+        _recordCount = CountDistinctRecordIds(runs);
+        _recordIdQueue = CreateRecordIdQueue(runs);
         _onDispose = onDispose;
     }
 
@@ -120,7 +122,7 @@ public sealed class FldProviderSnapshot : IDisposable
     /// <summary>Number of distinct RecordIds in the compact snapshot index.</summary>
     public int RecordCount
     {
-        get { lock (_gate) { EnsureOpen(); return _recordIds!.Length; } }
+        get { lock (_gate) { EnsureOpen(); return _recordCount; } }
     }
 
     /// <summary>
@@ -154,7 +156,7 @@ public sealed class FldProviderSnapshot : IDisposable
                 entries.Add(entry!);
 
             bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
-                || _recordIndex < _recordIds!.Length;
+                || _recordIdQueue.Count != 0;
             var page = new FldProviderSnapshotPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
             _lastPageLimit = limit;
@@ -195,7 +197,7 @@ public sealed class FldProviderSnapshot : IDisposable
                 entries.Add(metadata!);
 
             bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
-                || _recordIndex < _recordIds!.Length;
+                || _recordIdQueue.Count != 0;
             var page = new FldProviderSnapshotMetadataPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
             _lastPageLimit = limit;
@@ -268,7 +270,8 @@ public sealed class FldProviderSnapshot : IDisposable
 
     private void ResetCursor()
     {
-        _recordIndex = 0;
+        _recordIdQueue = CreateRecordIdQueue(_runs!);
+        _lastEmittedRecordId = null;
         _nextIndex = 0;
         _currentRecordId = null;
         _currentFieldIds = null;
@@ -289,7 +292,8 @@ public sealed class FldProviderSnapshot : IDisposable
             _runs = null;
             _overlayByKey = null;
             _overlayFieldsByRecord = null;
-            _recordIds = null;
+            _recordIdQueue.Clear();
+            _lastEmittedRecordId = null;
             _currentRecordId = null;
             _currentFieldIds = null;
             _lastPage = null;
@@ -298,17 +302,105 @@ public sealed class FldProviderSnapshot : IDisposable
         callback?.Invoke(this);
     }
 
+    private readonly record struct RecordIdPriority(
+        ulong High, ulong Low, int RunIndex) : IComparable<RecordIdPriority>
+    {
+        public int CompareTo(RecordIdPriority other)
+        {
+            int high = High.CompareTo(other.High);
+            if (high != 0) return high;
+            int low = Low.CompareTo(other.Low);
+            return low != 0 ? low : RunIndex.CompareTo(other.RunIndex);
+        }
+    }
+
+    private sealed class RunRecordIdCursor(RunReader run, int runIndex)
+    {
+        private uint _nextIndex;
+        public int RunIndex { get; } = runIndex;
+        public byte[] RecordId { get; } = new byte[16];
+
+        public bool MoveNext()
+        {
+            if (_nextIndex >= run.NumClusters)
+                return false;
+            if (!run.TryReadRecordIdAt(_nextIndex++, RecordId))
+                throw new InvalidDataException("Provider snapshot Run cluster index is invalid.");
+            return true;
+        }
+    }
+
+    private static PriorityQueue<RunRecordIdCursor, RecordIdPriority> CreateRecordIdQueue(
+        RunReader[] runs)
+    {
+        var queue = new PriorityQueue<RunRecordIdCursor, RecordIdPriority>();
+        for (int i = 0; i < runs.Length; i++)
+        {
+            var cursor = new RunRecordIdCursor(runs[i], i);
+            if (cursor.MoveNext())
+                queue.Enqueue(cursor, GetPriority(cursor.RecordId, i));
+        }
+        return queue;
+    }
+
+    private static RecordIdPriority GetPriority(ReadOnlySpan<byte> recordId, int runIndex)
+        => new(
+            BinaryPrimitives.ReadUInt64BigEndian(recordId),
+            BinaryPrimitives.ReadUInt64BigEndian(recordId.Slice(8)),
+            runIndex);
+
+    private static int CountDistinctRecordIds(RunReader[] runs)
+    {
+        var queue = CreateRecordIdQueue(runs);
+        RecordIdPriority? previous = null;
+        int count = 0;
+        while (queue.TryDequeue(out RunRecordIdCursor? cursor, out RecordIdPriority priority))
+        {
+            if (previous is null || priority.High != previous.Value.High ||
+                priority.Low != previous.Value.Low)
+            {
+                count = checked(count + 1);
+                previous = priority;
+            }
+            if (cursor.MoveNext())
+                queue.Enqueue(cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
+        }
+        return count;
+    }
+
+    private bool TryReadNextUniqueRecordId(out byte[]? recordId)
+    {
+        while (_recordIdQueue.TryDequeue(
+            out RunRecordIdCursor? cursor, out RecordIdPriority priority))
+        {
+            bool duplicate = _lastEmittedRecordId is not null &&
+                priority.High == BinaryPrimitives.ReadUInt64BigEndian(_lastEmittedRecordId) &&
+                priority.Low == BinaryPrimitives.ReadUInt64BigEndian(_lastEmittedRecordId.AsSpan(8));
+            byte[]? current = duplicate ? null : cursor.RecordId.ToArray();
+            if (cursor.MoveNext())
+                _recordIdQueue.Enqueue(
+                    cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
+            if (duplicate)
+                continue;
+
+            recordId = current!;
+            _lastEmittedRecordId = recordId;
+            return true;
+        }
+        recordId = null;
+        return false;
+    }
+
     private bool TryLoadNextRecord()
     {
         EnsureOpen();
-        if (_recordIndex >= _recordIds!.Length)
+        if (!TryReadNextUniqueRecordId(out byte[]? recordId))
         {
             _currentRecordId = null;
             _currentFieldIds = null;
             return false;
         }
 
-        byte[] recordId = _recordIds[_recordIndex++];
         var fields = new HashSet<ushort>();
         ulong low = BinaryPrimitives.ReadUInt64LittleEndian(recordId);
         ulong high = BinaryPrimitives.ReadUInt64LittleEndian(recordId.AsSpan(8));
