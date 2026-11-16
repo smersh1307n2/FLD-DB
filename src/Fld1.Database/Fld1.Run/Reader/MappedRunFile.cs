@@ -91,6 +91,8 @@ internal sealed unsafe class MappedRunFile : MemoryManager<byte>
 
     public override void Unpin() { }
 
+    public void Close() => ((IDisposable)this).Dispose();
+
     protected override void Dispose(bool disposing)
     {
         if (_disposed)
