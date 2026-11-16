@@ -56,7 +56,7 @@ public sealed class MappedRunFileTests
         try
         {
             MappedRunFile mapped = MappedRunFile.Open(path);
-            mapped.Dispose();
+            mapped.Close();
             Assert.Throws<ObjectDisposedException>(() => _ = mapped.ReadOnlyMemory);
         }
         finally
