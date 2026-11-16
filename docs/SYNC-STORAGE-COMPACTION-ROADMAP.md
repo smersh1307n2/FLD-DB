@@ -2466,7 +2466,7 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 
 ## 2026-11-16 — demand-paged Run mappings (implementation block)
 
-The database now opens immutable legacy `.fld1` Run mirrors through read-only memory-mapped views. This avoids materializing every opened Run as a managed `byte[]`; the OS faults pages in on access. RunReader remains zero-copy over `ReadOnlyMemory<byte>`.
+The database now opens immutable legacy `.fld1` Run mirrors through read-only memory-mapped views. This avoids materializing every opened Run as a managed `byte[]`; the OS owns page residency, and RunReader remains zero-copy over `ReadOnlyMemory<byte>`. Important: first mapping still validates the Run structure and scans the file to compare its SHA-256 with the authoritative Storage blob digest, so first-open validation reads the full file even though it does not create a second full managed copy.
 
 Integrity and lifetime safety are deliberately conservative:
 - Active mappings are retained for the lifetime of the database instance.
@@ -2482,8 +2482,9 @@ Validation added in this block:
 - Cross-platform Engine tests for mapped Run validation/readback, disposal, and file-handle release.
 - Regression test proving a previously returned Run slice survives Compaction and replacement of its source Run.
 - Regression test proving a stale-but-valid compatibility mirror is rejected and repaired from the authoritative Storage blob.
-- Full .NET CI on Windows, Ubuntu and macOS (final result recorded below after the cache-removal cleanup).
+- Full .NET CI passed on Windows, Ubuntu and macOS at final documentation HEAD `68cf32c656ccf3d8361314b82e86d712c97b496d` (run `43804483902`, 3/3 jobs).
 - Existing Run format, recovery, compaction, FULL_REPLACE and benchmark suites remain release gates.
+- The mapped-reader path has not yet received a dedicated cold/warm latency and peak-RSS benchmark; add that measurement before making quantitative performance claims.
 
 ## 2026-11-16 — bounded Run cache experiment (superseded)
 
