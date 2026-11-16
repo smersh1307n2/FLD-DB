@@ -41,6 +41,7 @@ internal static class StorageIndexMillionScale
                 false);
         }
 
+        long allocatedBeforeBuild = GC.GetTotalAllocatedBytes(true);
         var pages = new Dictionary<ulong, byte[]>();
         ulong nextPageId = 1;
         var buildWatch = Stopwatch.StartNew();
@@ -76,6 +77,27 @@ internal static class StorageIndexMillionScale
         if (scanned != EntryCount)
             throw new InvalidDataException($"B+ tree prefix scan returned {scanned}; expected {EntryCount}.");
 
+        var warmLookupWatch = Stopwatch.StartNew();
+        for (int i = 0; i < LookupCount; i++)
+        {
+            int index = (int)(((long)i * 104_729 + 17) % EntryCount);
+            BinaryPrimitives.WriteUInt64BigEndian(lookupKey, checked((ulong)index + 1));
+            if (!reader.TryGet(lookupKey, out StorageTreeValueReference value) || value.Length != ValueLength)
+                throw new InvalidDataException($"Warm B+ tree point lookup failed at index {index}.");
+        }
+        warmLookupWatch.Stop();
+
+        var warmScanWatch = Stopwatch.StartNew();
+        int warmScanned = 0;
+        using (var cursor = reader.OpenPrefixCursor(new byte[5]))
+        {
+            while (cursor.TryReadNext(out _))
+                warmScanned++;
+        }
+        warmScanWatch.Stop();
+        if (warmScanned != EntryCount)
+            throw new InvalidDataException($"Warm B+ tree prefix scan returned {warmScanned}; expected {EntryCount}.");
+
         process.Refresh();
         var report = new
         {
@@ -91,7 +113,10 @@ internal static class StorageIndexMillionScale
             BuildMilliseconds = buildWatch.Elapsed.TotalMilliseconds,
             PointLookupMilliseconds = lookupWatch.Elapsed.TotalMilliseconds,
             PrefixScanMilliseconds = scanWatch.Elapsed.TotalMilliseconds,
-            BuildAllocatedBytes = allocatedAfterBuild - allocatedBefore,
+            WarmRandomPointLookupMilliseconds = warmLookupWatch.Elapsed.TotalMilliseconds,
+            WarmPrefixScanMilliseconds = warmScanWatch.Elapsed.TotalMilliseconds,
+            FixtureAllocatedBytes = allocatedBeforeBuild - allocatedBefore,
+            BuildAllocatedBytes = allocatedAfterBuild - allocatedBeforeBuild,
             TotalAllocatedBytes = GC.GetTotalAllocatedBytes(true) - allocatedBefore,
             WorkingSetBeforeBytes = workingSetBefore,
             WorkingSetAfterBuildBytes = workingSetAfterBuild,

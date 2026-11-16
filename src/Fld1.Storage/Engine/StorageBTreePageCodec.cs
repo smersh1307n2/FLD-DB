@@ -207,12 +207,13 @@ internal static class StorageBTreeBuilder
         if(generation==0)throw new ArgumentOutOfRangeException(nameof(generation));
         ArgumentNullException.ThrowIfNull(input);ArgumentNullException.ThrowIfNull(allocate);ArgumentNullException.ThrowIfNull(write);
         var level=new List<StorageTreeChild>();var leaf=new List<StorageTreeLeafEntry>(StorageBTreePageCodec.MaxLeafEntries);
-        byte[]? previous=null;ulong leafId=0;StorageTreeKeyReference first=default;
+        // Input key memory is borrowed: it must remain immutable until Build returns.
+        ReadOnlyMemory<byte>? previous=null;ulong leafId=0;StorageTreeKeyReference first=default;
         foreach(var item in input)
         {
             if(item.Key.IsEmpty)throw new InvalidDataException("Empty key.");
             if(item.ValueLength<0 || (item.IsTombstone && item.ValueLength!=0))throw new InvalidDataException("Invalid value reference.");
-            if(previous is not null && previous.AsSpan().SequenceCompareTo(item.Key.Span)>=0)
+            if(previous.HasValue && previous.Value.Span.SequenceCompareTo(item.Key.Span)>=0)
                 throw new InvalidDataException("Input must be strictly sorted and contain no duplicate keys.");
             var key=new StorageTreeKeyReference(item.KeyOffset,item.Key.Length);
             var value=new StorageTreeValueReference(item.ValueOffset,item.ValueLength,item.IsTombstone);
@@ -222,7 +223,7 @@ internal static class StorageBTreeBuilder
                 level.Add(new(leafId,first));leafId=next;first=key;leaf.Clear();
             }
             if(leafId==0){leafId=Allocate(allocate);first=key;}
-            leaf.Add(new(key,value));previous=item.Key.ToArray();
+            leaf.Add(new(key,value));previous=item.Key;
         }
         if(leaf.Count==0)return 0;
         write(leafId,StorageBTreePageCodec.EncodeLeaf(generation,leafId,0,leaf));level.Add(new(leafId,first));
