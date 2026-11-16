@@ -1660,19 +1660,13 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     /// <summary>
-    /// Reclaim current field/record tombstones only when the caller's retention proof
-    /// approves the exact current identity. The caller must hold the composed
-    /// application/Metadata/FLD commit lease for the entire call. The limit bounds
-    /// reclaimed candidates, not scan size; a larger limit avoids repeatedly rewriting
-    /// the complete namespace when a full maintenance sweep is intentionally requested.
+    /// Reclaim every current field/record tombstone approved by the caller's
+    /// retention proof in one logical namespace sweep. The caller must hold the
+    /// composed application/Metadata/FLD commit lease for the entire call.
     /// </summary>
-    public int CompactTombstones(
-        Func<FldTombstoneGcCandidate, bool> canReclaim,
-        int limit = 4096)
+    public int CompactTombstones(Func<FldTombstoneGcCandidate, bool> canReclaim)
     {
         ArgumentNullException.ThrowIfNull(canReclaim);
-        if (limit <= 0)
-            throw new ArgumentOutOfRangeException(nameof(limit));
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         lock (_commitLock)
@@ -1686,7 +1680,7 @@ public sealed partial class FldDatabase : IDisposable
                 (Directory.Exists(snapshotRoot) && Directory.EnumerateDirectories(snapshotRoot).Any()))
                 return 0;
 
-            var filter = new TombstoneGcFilter(canReclaim, limit);
+            var filter = new TombstoneGcFilter(canReclaim);
             _ = CompactUnderLock(filter);
             return filter.ReclaimedCount;
         }
@@ -1736,19 +1730,15 @@ public sealed partial class FldDatabase : IDisposable
     private sealed class TombstoneGcFilter
     {
         private readonly Func<FldTombstoneGcCandidate, bool> _canReclaim;
-        private readonly int _limit;
 
         public int ReclaimedCount { get; private set; }
 
-        public TombstoneGcFilter(Func<FldTombstoneGcCandidate, bool> canReclaim, int limit)
-        {
-            _canReclaim = canReclaim;
-            _limit = limit;
-        }
+        public TombstoneGcFilter(Func<FldTombstoneGcCandidate, bool> canReclaim)
+            => _canReclaim = canReclaim;
 
         public bool TryReclaim(FldTombstoneGcCandidate candidate)
         {
-            if (ReclaimedCount >= _limit || !_canReclaim(candidate))
+            if (!_canReclaim(candidate))
                 return false;
             ReclaimedCount++;
             return true;
