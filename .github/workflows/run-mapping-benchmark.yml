@@ -38,7 +38,28 @@ jobs:
         run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --run-mapping-only
 
       - name: Verify all benchmark cases produced reports
-        run: test "$(find BenchmarkDotNet.Artifacts/results -name '*-report-github.md' | wc -l)" -ge 6
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+
+          reports = list(Path("BenchmarkDotNet.Artifacts/results").glob("*-report.csv"))
+          if len(reports) != 1:
+              raise SystemExit(f"Expected one consolidated BenchmarkDotNet CSV, found {len(reports)}")
+          with reports[0].open(newline="", encoding="utf-8-sig") as stream:
+              rows = list(csv.DictReader(stream))
+          if len(rows) != 6:
+              raise SystemExit(f"Expected 6 benchmark parameter cases, found {len(rows)}")
+          required = {"FreshDatabaseOpenAndFirstMappedLookup", "WarmMappedLookups"}
+          methods = {row.get("Method") for row in rows}
+          if methods != required:
+              raise SystemExit(f"Unexpected benchmark methods: {sorted(methods)}")
+          counts = {row.get("RunCount") for row in rows}
+          if counts != {"1", "16", "64"}:
+              raise SystemExit(f"Unexpected RunCount matrix: {sorted(counts)}")
+          print("Validated all six benchmark cases in the consolidated CSV.")
+          PY
 
       - name: Upload BenchmarkDotNet results
         if: always()
