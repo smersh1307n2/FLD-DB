@@ -29,7 +29,6 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort CommitPublishedOrigins = 0x2114;
     public const ushort TryGetMetadataStoreOwnedPublicationCutover = 0x2115;
     public const ushort EnableMetadataStoreOwnedPublication = 0x2116;
-    public const ushort CompactTombstones = 0x2117;
     public const ushort AcquireGcLease = 0x2118;
     public const ushort ReleaseGcLease = 0x2119;
     public const ushort OpenGcReferenceScan = 0x211A;
