@@ -247,6 +247,11 @@ internal static class StorageBTreeBuilder
 internal sealed class StorageBTreeReader
 {
     private const int ValidationCacheCapacity = 4096;
+    private const int HotLookupCapacity = 16_384;
+    private const int HotLookupMaxKeyLength = 256;
+    private readonly object _hotGate = new();
+    private readonly Dictionary<ulong, HotLookupEntry> _hotEntries = new();
+    private readonly Queue<ulong> _hotOrder = new();
     private readonly ulong _generation,_root;private readonly Func<ulong,byte[]>? _readPage;
     private readonly Func<ulong,StoragePageCacheLease>? _readPageLease;
     private readonly Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> _readKey;
@@ -269,17 +274,64 @@ internal sealed class StorageBTreeReader
     public bool TryGet(ReadOnlySpan<byte> key,out StorageTreeValueReference value)
     {
         if(key.IsEmpty)throw new ArgumentException("Empty key.",nameof(key));
-        if(_root==0){value=default;return false;}
+        if(TryGetHot(key,out bool cachedFound,out value))return cachedFound;
+        if(_root==0){value=default;RememberHot(key,false,default);return false;}
         ulong leafId=FindLeaf(key);
         var leaf=ReadLeafView(leafId,out var lease);
         try
         {
             if(StorageBTreePageCodec.TryFindLeafEntry(leaf,key,_readKey,out var entry)
-                && !entry.Value.IsTombstone){value=entry.Value;return true;}
-            value=default;return false;
+                && !entry.Value.IsTombstone)
+            {
+                value=entry.Value;RememberHot(key,true,value);return true;
+            }
+            value=default;RememberHot(key,false,default);return false;
         }
         finally { lease?.Dispose(); }
     }
+
+    internal int HotLookupCount { get { lock(_hotGate)return _hotEntries.Count; } }
+
+    private bool TryGetHot(ReadOnlySpan<byte> key,out bool found,out StorageTreeValueReference value)
+    {
+        if(key.Length>HotLookupMaxKeyLength){found=false;value=default;return false;}
+        ulong hash=HashKey(key);
+        lock(_hotGate)
+        {
+            if(_hotEntries.TryGetValue(hash,out HotLookupEntry entry)
+                && entry.Key.AsSpan().SequenceEqual(key))
+            {
+                found=entry.Found;value=entry.Value;return true;
+            }
+        }
+        found=false;value=default;return false;
+    }
+
+    private void RememberHot(ReadOnlySpan<byte> key,bool found,StorageTreeValueReference value)
+    {
+        if(key.Length>HotLookupMaxKeyLength)return;
+        ulong hash=HashKey(key);
+        lock(_hotGate)
+        {
+            // Hash collisions only reduce cache coverage; they never affect lookup correctness.
+            if(_hotEntries.ContainsKey(hash))return;
+            if(_hotEntries.Count>=HotLookupCapacity)
+                _hotEntries.Remove(_hotOrder.Dequeue());
+            _hotEntries.Add(hash,new HotLookupEntry(key.ToArray(),found,value));
+            _hotOrder.Enqueue(hash);
+        }
+    }
+
+    private static ulong HashKey(ReadOnlySpan<byte> key)
+    {
+        const ulong offset=14695981039346656037UL;
+        const ulong prime=1099511628211UL;
+        ulong hash=offset;
+        foreach(byte value in key){hash^=value;hash*=prime;}
+        return hash^checked((ulong)key.Length);
+    }
+
+    private readonly record struct HotLookupEntry(byte[] Key,bool Found,StorageTreeValueReference Value);
     public StorageBTreePrefixCursor OpenPrefixCursor(ReadOnlyMemory<byte> prefix)
     {
         if(prefix.IsEmpty)throw new ArgumentException("Empty prefix.",nameof(prefix));

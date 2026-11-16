@@ -127,6 +127,32 @@ public sealed class StorageBTreeTests
     }
 
 
+
+    [Fact]
+    public void Reader_hot_key_cache_serves_repeat_lookup_without_page_reads()
+    {
+        byte[] key = { 0x00, 0x2A };
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong next = 1;
+        ulong root = StorageBTreeBuilder.Build(13,
+            new[] { new StorageTreeBuildEntry(key, 1, 2, 8, false) },
+            () => next++, (id, page) => pages.Add(id, page));
+        int pageReads = 0;
+        var reader = new StorageBTreeReader(13, root, id =>
+        {
+            pageReads++;
+            return pages[id];
+        }, _ => new ReadOnlyMemory<byte>(key));
+
+        Assert.True(reader.TryGet(key, out var first));
+        int readsAfterFirstLookup = pageReads;
+        Assert.True(reader.TryGet(key, out var second));
+
+        Assert.Equal(first, second);
+        Assert.Equal(readsAfterFirstLookup, pageReads);
+        Assert.Equal(1, reader.HotLookupCount);
+    }
+
     [Fact]
     public void Reader_accepts_borrowed_key_memory_without_materializing_key_arrays()
     {
