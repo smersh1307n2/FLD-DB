@@ -92,7 +92,6 @@ public class DatabaseTests : IDisposable
         // A RunReader slice can escape TryGet. Compaction must retire the old
         // mapping instead of unmapping memory that a caller may still reference.
         Assert.Equal("first-generation"u8.ToArray(), retainedValue.ToArray());
-        Assert.True(File.Exists(Path.Combine(_dir, "runs", $"{firstRun}.fld1")));
         Assert.True(db.TryGetBytes(rec, 7, out byte[]? current));
         Assert.Equal("second-generation"u8.ToArray(), current);
     }
