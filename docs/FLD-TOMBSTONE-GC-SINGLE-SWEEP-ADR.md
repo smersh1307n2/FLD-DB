@@ -99,7 +99,7 @@ If future measurements show that holding the composed lease for one full sweep i
 - Remove or migrate every caller that loops `CompactTombstones(limit)` until no more candidates. There must be no compatibility shim that silently repeats full sweeps.
 - Receipt and ChangeId Metadata compactors retain their own independent bounded-page/cursor semantics. Do not change their limits or combine their retention domains with FLD tombstone compaction.
 - BIN-SYNC holds its Tombstone domain durable maintenance lease and Metadata writer admission through candidate scan, proof evaluation, approval transfer and final sweep. The provider acquires the Host-wide GC lease only for the final commit/compaction phase, after releasing the provider candidate snapshot; the dispatcher allows that lease owner to submit the sealed-spool commit operation while excluding other IPC sessions. Emergency Stop/cancellation before publication aborts the spool and prevents Manifest publication.
-- The coordinator now uses `TryFindLiveRecordReferences` against each bounded provider candidate page, retaining only page-matching RecordIds; it no longer calls `TryBuildLiveRecordReferenceSet` or materializes a namespace-wide Metadata `HashSet<RecordId>`. The legacy internal helper remains in `StorageMetadataStore`. The bounded lookup still scans all retained Metadata payloads once per candidate page, so its CPU cost can grow with page count and must be measured/optimized before release.
+- The coordinator now uses `TryFindLiveRecordReferences` against each bounded provider candidate page, retaining only page-matching RecordIds; it no longer calls `TryBuildLiveRecordReferenceSet` or materializes a namespace-wide Metadata `HashSet<RecordId>`. The legacy namespace-wide helper has now been removed. The in-process adapter uses `HasLiveRecordReference` for exact per-candidate lookup while its Metadata writer/transaction lease is held. The bounded lookup still scans all retained Metadata payloads once per candidate page, so its CPU cost can grow with page count and must be measured/optimized before release.
 - Keep all physical-GC feature switches false by default. Ghost GC remains excluded.
 
 ## 6. Required tests
@@ -214,3 +214,16 @@ The public FLD `CompactTombstones(predicate, limit)` overload has been replaced 
 - Removed the obsolete bounded-page Tombstone benchmark and removed the page-loop benchmark case. The remaining Tombstone sweep matrix measures one complete sweep and an isolated peak-memory probe at 1k–250k cardinalities. Historical repeated-page measurements remain recorded as baseline evidence.
 - Exact FLD HEAD `827f794064bb5e3db0810c2baf3e3d82eb5899fe` passed cross-platform .NET CI on Ubuntu, Windows and macOS 15 (run [43836634794](https://github.com/smersh1307n2/FLD-DB/actions/runs/43836634794), 3/3). The refreshed Tombstone sweep benchmark is still running (run `43836618247`); no new benchmark measurements are claimed yet.
 
+
+
+## 2026-11-16 follow-up — remove the Metadata-wide reference set
+
+The in-process `FldBinSyncHostAdapter` previously acquired a `TombstoneGcCommitLease` that carried a namespace-sized `IReadOnlySet<RecordId>`. This has been removed:
+
+- `StorageMetadataStore.AcquireTombstoneGcCommitGuard` now acquires the Metadata writer-admission and transaction gates without building a RecordId set.
+- `TombstoneGcCommitLease.HasLiveRecordReference` performs an exact fail-closed lookup for the current candidate while those gates remain held.
+- The old `TryBuildLiveRecordReferenceSet` and its payload-add helper are removed.
+- The in-process adapter no longer accepts a tombstone candidate limit; it calls the whole-sweep FLD API once.
+- The process-isolated coordinator continues to use `TryFindLiveRecordReferences` for bounded candidate pages.
+
+This removes another namespace-sized managed allocation. The trade-off is CPU: the in-process adapter scans retained Metadata payloads per tombstone candidate, while the process-isolated path scans them per candidate page. Both are exact and fail closed on malformed payloads/pending peer reservations; their scaling must be measured. No end-to-end performance claim is made from this memory change alone.
