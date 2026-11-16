@@ -134,9 +134,9 @@ Do not add TTL-based deletion. Do not infer that a generation is unpinned merely
 
 ### Stage C — immutable B+ tree builder/reader
 - [x] Build immutable leaf and internal pages from a strictly sorted input stream.
-- [x] Implement point lookup and forward prefix cursor over linked leaves.
+- [x] Implement point lookup and forward prefix cursor over linked leaves; cursor retains only the current leaf and detects link cycles through strict key ordering.
 - [x] Keep variable-length keys and values external to index pages using generation-local offset/length references.
-- [x] Randomized reference-model tests, tombstones, duplicate/unsorted-input rejection, multi-level splits, empty tree and 1 MiB key reference.
+- [x] Randomized reference-model tests, tombstones, duplicate/unsorted-input rejection, multi-level splits, empty tree, 1 MiB key reference, bounded cursor state and leaf-cycle detection.
 - [x] Add BenchmarkDotNet cases for bulk build, warm/random point lookup, prefix scan, large-value references and a four-page cache-pressure path alongside the existing Storage baseline matrix.
 - [ ] Complete the exact-head benchmark workflow and compare measured time/allocations; no performance win is assumed.
 - No production routing through the tree yet.
