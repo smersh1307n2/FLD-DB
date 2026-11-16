@@ -36,20 +36,24 @@ A later rerun in §1.169 measured 34.037 s / 9.21 GB versus 266.557 ms / 87.94 M
 
 ## 3. Required algorithm
 
-### 3.1 Stable source view and exclusion
+### 3.1 Candidate approval and stable source view
 
-- Enter through the existing FLD commit/maintenance synchronization boundary. Hold the composed Host application guard, Metadata writer-admission/maintenance lease, and FLD Host IPC commit lease for the entire logical tombstone sweep, through the final Manifest publication or abort.
-- Under the FLD database commit gate, capture the exact namespace Manifest generation, ordered source Run IDs, and sealed commit/WAL boundary. The overlay must be empty and the source view must be immutable for the operation.
-- Existing provider snapshot pins and reference-scan rules remain global vetoes where currently specified. Do not reclaim a candidate while a relevant immutable snapshot pin exists.
-- No new writer may mutate the source namespace between source capture and publication. The initial implementation deliberately prefers this simple, auditable exclusion model over a multi-invocation resumable stage.
-- If the required lease/gate cannot be acquired, the operation does no physical work and reports a blocked result. If cancellation, I/O failure, proof failure, or source-generation mismatch occurs before publication, abandon the unpublished output and leave the old Manifest authoritative.
+The current process-isolated contract discovers candidates in the FLD Host, evaluates signed proof and Metadata references in BIN-SYNC, then sends exact approved identities back to the Host. A whole sweep must preserve that trust boundary without collecting every candidate in a giant managed list.
+
+- BIN-SYNC holds its async namespace-admission gate and StorageMetadata writer-admission lease from proof snapshot creation through candidate enumeration, approval transfer and final Host compaction. The signed roster/checkpoint and Metadata reference view therefore remain stable for this operation.
+- Open one immutable FLD provider snapshot and read its ordered pages sequentially. Do not reopen the snapshot for each candidate page. Release this provider snapshot before final compaction because an active provider snapshot pin is a global FLD tombstone-GC veto.
+- For each tombstone candidate, BIN-SYNC applies the existing signed proof and exact Metadata reference checks. Approved identities are streamed in canonical RecordId/FieldId order to a Host-owned temporary approval spool using bounded IPC batches; no full candidate or approved-candidate list is retained in memory.
+- The Host seals and validates the approval spool (count, digest, strict order, uniqueness and candidate encoding). It is scratch input only: it is not a recovery journal, is never referenced by Manifest, and is discarded after success, failure, cancellation, disconnect or Host restart.
+- The final Host compaction operation acquires the existing Host GC admission/commit boundary, opens one fresh FLD reference snapshot, verifies no provider snapshot pins/drafts remain, and captures the exact current Manifest generation, source Run IDs and sealed WAL boundary. The sorted approval stream is consumed alongside the one-pass source merge. Every approved identity is still revalidated against current FLD field state and Host ChangeId/Record references before removal.
+- A source mutation between candidate discovery and final compaction is safe: an identity that is no longer the exact current candidate is not removed; newly created tombstones absent from the approval stream are retained for a later sweep. Metadata proof/reference state remains fenced by the coordinator's writer-admission lease.
+- If any required lease, proof, spool validation or Host reference check fails, fail closed. The old Manifest remains authoritative if failure occurs before publication.
 
 ### 3.2 One ordered merge, not a namespace-wide index
 
 - Add sequential per-Run cursors over the existing canonical RecordId slot order (including use of `RunReader.TryReadRecordIdAt` where suitable).
 - Perform a k-way ordered merge of source Run RecordIds. Process one RecordId at a time; collect only that record's bounded FieldId/resolution state from the Runs that contain it.
 - Resolve the winning field value, tombstone, HLC, author, ChangeId and immutable Origin using the same comparator and semantics as ordinary FLD reads/compaction.
-- Evaluate record tombstone and field tombstone candidates exactly once against the supplied authoritative predicate. Preserve the existing rule that a record tombstone which is not reclaimable prevents removal of its older field state; preserve newer-than-record-delete behavior.
+- Evaluate each current tombstone candidate once against the sorted Host approval stream and exact current Host references. The coordinator has already checked the signed proof and Metadata references. Preserve the existing rule that a record tombstone which is not approved prevents removal of its older field state; preserve newer-than-record-delete behavior.
 - Do not create a namespace-wide RecordId dictionary, a complete RecordId list, or a complete output-record list.
 - Complexity target: one sequential visit to each source Run's record slots plus bounded per-record merge/resolve work. The implementation must report counters that make repeated full scans detectable.
 
@@ -87,11 +91,15 @@ If future measurements show that holding the composed lease for one full sweep i
 
 ## 5. API and Host semantics
 
-- The current `limit` means maximum number of reclaimed candidates, not maximum scan/read/write work. It must not remain the apparent bound for this new operation.
+- Replace `ReadTombstoneGcCandidatesAsync(limit)` with one snapshot-scoped paged candidate scan. The snapshot token is opened once, pages advance one monotonic cursor, and the snapshot is released before final compaction.
+- Replace the all-at-once approved-candidate array with a Host-owned approval-spool session: begin, append bounded sorted batches, seal (count + digest), commit sweep, and abort/release. The IPC protocol must authenticate every operation to the owning client/session and reject replay, duplicate, out-of-order or cross-session tokens.
+- The spool is temporary scratch, not a durable journal: it is never used to resume after process restart and must be deleted on every terminal path and at Host startup. A crash before Manifest publication leaves the old generation authoritative; a crash after publication leaves the new generation authoritative.
+- The FLD compactor consumes the sealed approval stream in RecordId/FieldId order while scanning source Runs once. It must compare full candidate identity (RecordId, FieldId, ChangeId, author, HLC and Origin), not only RecordId/FieldId.
 - Replace the tombstone maintenance contract with an explicit whole-sweep operation/result. The result should distinguish completed, blocked, cancelled and failed outcomes and include reclaimed candidate count plus internal work counters.
 - Remove or migrate every caller that loops `CompactTombstones(limit)` until no more candidates. There must be no compatibility shim that silently repeats full sweeps.
 - Receipt and ChangeId Metadata compactors retain their own independent bounded-page/cursor semantics. Do not change their limits or combine their retention domains with FLD tombstone compaction.
-- Host must acquire the exact Tombstone domain durable maintenance lease and hold it, together with the composed application guard, through the entire FLD sweep. Emergency Stop/cancellation must prevent publication if it arrives before the publication point.
+- BIN-SYNC holds its Tombstone domain durable maintenance lease and Metadata writer admission through candidate scan, proof evaluation, approval transfer and final sweep. The Host separately fences its final commit/compaction phase and revalidates FLD references. Emergency Stop/cancellation before publication aborts the spool and prevents Manifest publication.
+- `TryBuildLiveRecordReferenceSet` currently materializes a Metadata-wide `HashSet<RecordId>`. This is a separate composed-memory cost and must be measured and either replaced with bounded/streamed exact reference lookup or explicitly bounded before claiming end-to-end bounded memory.
 - Keep all physical-GC feature switches false by default. Ghost GC remains excluded.
 
 ## 6. Required tests
@@ -145,11 +153,12 @@ The prior single-rewrite benchmark is a useful baseline, not an acceptance proof
 
 ## 9. Implementation order
 
-1. Add internal ordered Run cursors and a chunked Run output writer; preserve existing Run validation and provenance.
-2. Implement one-pass merge/resolve/filter with internal work counters; do not route production calls to it until tests pass.
-3. Integrate one Manifest publication, root-global Run allocation, old-generation pinning and orphan recovery.
-4. Replace the old candidate-page Host/API loop and migrate all callers.
-5. Add adversarial semantic, crash, cancellation, writer-exclusion and complexity tests.
-6. Add FLD-only and composed Host/Metadata benchmarks.
-7. Run exact-head CI and all benchmark gates; leave every physical-GC switch default-off.
+1. Add snapshot-scoped sequential candidate paging and a Host-owned temporary approval-spool IPC session; validate ownership, order, digest, cleanup and restart discard.
+2. Add internal ordered Run cursors and a chunked Run output writer; preserve existing Run validation and provenance.
+3. Implement one-pass merge/resolve using the sealed approval stream and internal work counters; do not route production calls to it until tests pass.
+4. Integrate one Manifest publication, root-global Run allocation, old-generation pinning and orphan recovery.
+5. Replace the old candidate-page Host/API loop and migrate all callers; keep Metadata admission and policy leases held through the complete operation.
+6. Add adversarial semantic, crash, cancellation, writer-exclusion and complexity tests.
+7. Measure and bound the Metadata live-record-reference set; add FLD-only and composed Host/Metadata benchmarks.
+8. Run exact-head CI and all benchmark gates; leave every physical-GC switch default-off.
 
