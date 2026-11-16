@@ -190,7 +190,6 @@ public sealed partial class FldDatabase
             }
 
             RunReader[] runReaders = readers.ToArray();
-            byte[][] recordIds = BuildProviderRecordIdIndex(runReaders);
             var snapshot = new FldProviderSnapshot(
                 generation,
                 manifest.SourceFeedWatermark,
