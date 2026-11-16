@@ -16,6 +16,7 @@ public class StorageIndexBench
     private string _directory = null!;
     private string _freshDirectory = null!;
     private StorageDatabase _database = null!;
+    private StorageSnapshot _storageSnapshot = null!;
     private byte[][] _keys = null!;
     private int _probeIndex;
     private StorageTreeBuildEntry[] _treeEntries = null!;
@@ -61,6 +62,7 @@ public class StorageIndexBench
         CopyDirectory(_directory, _freshDirectory);
 
         _database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
+        _storageSnapshot = _database.OpenSnapshot();
         _probeIndex = EntryCount / 2;
         if (!_database.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("Storage index benchmark fixture failed validation.");
@@ -115,6 +117,7 @@ public class StorageIndexBench
     [GlobalCleanup]
     public void Cleanup()
     {
+        _storageSnapshot?.Dispose();
         _database?.Dispose();
         try { Directory.Delete(_directory, recursive: true); } catch { }
         try { Directory.Delete(_freshDirectory, recursive: true); } catch { }
@@ -162,6 +165,17 @@ public class StorageIndexBench
         if (!_treeReader.TryGet(_keys[_probeIndex], out StorageTreeValueReference value))
             throw new InvalidDataException("B+ tree lookup did not find the fixture key.");
         return value.Length;
+    }
+
+    [Benchmark]
+    public int StoragePrefixScan()
+    {
+        int count = 0;
+        using var cursor = _storageSnapshot.OpenPrefixCursor(new byte[] { 0, 0, 0, 0 });
+        while (cursor.TryReadNext(out _)) count++;
+        if (count != EntryCount)
+            throw new InvalidDataException($"Storage prefix scan returned {count} entries; expected {EntryCount}.");
+        return count;
     }
 
     [Benchmark]
