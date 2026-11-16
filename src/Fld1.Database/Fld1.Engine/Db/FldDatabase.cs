@@ -1966,10 +1966,12 @@ public sealed partial class FldDatabase : IDisposable
         _manifestDirty = false;
         _pendingFlushedCommitSeq = seqHi;
         _runs.Clear();
-            _runCacheBytes = 0;
+        _runCacheBytes = 0;
         if (runId != 0)
+        {
             _runs.Add((runId, path!, null, 0));
             CacheRun(_runs.Count - 1, runBytes!);
+        }
         _overlay.Clear();
         _dirty.Clear();
         _lastSealedCommitSeq = seqHi;
