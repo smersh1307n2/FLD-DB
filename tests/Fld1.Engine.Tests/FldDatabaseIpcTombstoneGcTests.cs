@@ -88,7 +88,7 @@ public sealed class FldDatabaseIpcTombstoneGcTests
             await client.AppendTombstoneGcApprovalSpoolAsync(pinnedSpool, approved);
             await client.SealTombstoneGcApprovalSpoolAsync(pinnedSpool);
             Guid pinnedLease = await client.AcquireGcLeaseAsync();
-            FldDatabaseIpcGcReferenceScan pinnedScan = await client.OpenGcReferenceScanAsync();
+            FldDatabaseIpcGcReferenceScan pinnedScan = await client.OpenTombstoneGcReferenceScanAsync();
             try
             {
                 Assert.True(pinnedScan.HasSnapshotPin);
@@ -111,7 +111,7 @@ public sealed class FldDatabaseIpcTombstoneGcTests
             Assert.Equal(32, approvalDigest.Length);
 
             Guid gcLease = await client.AcquireGcLeaseAsync();
-            FldDatabaseIpcGcReferenceScan referenceScan = await client.OpenGcReferenceScanAsync();
+            FldDatabaseIpcGcReferenceScan referenceScan = await client.OpenTombstoneGcReferenceScanAsync();
             try
             {
                 Assert.False(referenceScan.HasSnapshotPin);
