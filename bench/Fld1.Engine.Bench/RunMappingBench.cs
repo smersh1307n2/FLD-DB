@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using BenchmarkDotNet.Attributes;
 using Fld1.Engine.Db;
 using Fld1.Core.Uuid;
