@@ -1031,25 +1031,6 @@ public static class FldDatabaseIpcProtocol
         return (limit, candidates);
     }
 
-    public static byte[] EncodeTombstoneGcResponse(int reclaimedCount, int limit)
-    {
-        if (reclaimedCount < 0 || reclaimedCount > limit || limit is < 1 or > MaxTombstoneGcCandidates)
-            throw new ArgumentOutOfRangeException(nameof(reclaimedCount));
-        byte[] response = new byte[4];
-        BinaryPrimitives.WriteInt32LittleEndian(response, reclaimedCount);
-        return response;
-    }
-
-    public static int DecodeTombstoneGcResponse(ReadOnlyMemory<byte> response, int limit)
-    {
-        if (response.Length != 4 || limit is < 1 or > MaxTombstoneGcCandidates)
-            throw new InvalidDataException("FLD tombstone-GC response length or limit is invalid.");
-        int reclaimed = BinaryPrimitives.ReadInt32LittleEndian(response.Span);
-        if (reclaimed < 0 || reclaimed > limit)
-            throw new InvalidDataException("FLD tombstone-GC response count is invalid.");
-        return reclaimed;
-    }
-
     public static byte[] EncodeTombstoneGcApprovalSpoolAppend(
         Guid token, IReadOnlyList<FldTombstoneGcCandidate> candidates)
     {
