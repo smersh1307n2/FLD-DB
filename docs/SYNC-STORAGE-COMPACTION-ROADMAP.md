@@ -2525,3 +2525,18 @@ A source/API audit found an additional cross-repository constraint: BIN-SYNC cur
 The ADR now specifies a snapshot-scoped sequential candidate scan and a Host-owned temporary approval spool. BIN-SYNC evaluates its unchanged signed proof and Metadata references as each candidate page arrives, then streams only approved exact identities to the Host in bounded IPC batches. The Host seals the sorted spool with count/digest validation and consumes it during one FLD source-Run sweep. The spool is disposable scratch, not an authoritative journal and not a crash-resume source; it is deleted on terminal paths and after Host restart. The provider snapshot is released before final compaction so its own pin does not veto the sweep. Host FLD references are revalidated during final compaction.
 
 The same audit identified `TryBuildLiveRecordReferenceSet` as a separate Metadata-wide `HashSet<RecordId>` allocation. The composed implementation must measure and bound or replace that set before claiming end-to-end bounded memory. The FLD compaction ADR does not conceal this adjacent cost.
+
+## 2026-11-16 — first Tombstone single-sweep implementation
+
+The accepted ADR now has its first implementation block. Exact FLD HEAD
+`faed2685f961e70f10b7f258d67d4b0d68f6d7ac` passed cross-platform .NET CI
+(run [43833606630](https://github.com/smersh1307n2/FLD-DB/actions/runs/43833606630),
+Ubuntu/macOS 15/Windows, 3/3).
+
+- The old candidate-array IPC operation is removed. A session-owned Host approval spool accepts bounded ordered batches, rejects duplicate/out-of-order identities, seals with count + SHA-256, and is discarded on every terminal path and Host startup. It is capped at 2M entries and four active sessions.
+- Candidate enumeration is snapshot-scoped and sequential. The provider snapshot is released before the Host GC lease and final reference scan.
+- Tombstone-specific reference scan seals committed WAL before snapshot capture. The Host commit reuses that exact snapshot, requires the owning lease and active scan, and holds the lease/commit guard through the single Manifest publication.
+- FLD compaction now merges ordered record cursors and emits bounded immutable Run chunks. Regression coverage merges 5,000 fields for one RecordId across five source Runs and verifies the two output Runs (same RecordId bounds) after reopen.
+- IPC tests cover spool sealing, exact identity matching, provider snapshot-pin veto and reference revalidation. The test suite passes on all three CI platforms.
+
+**Not yet release-complete:** no composed 1M candidate benchmark, peak managed heap / OS RSS proof, source-byte work counters or high-Run-count performance evidence. BIN-SYNC currently scans retained Metadata payloads once per candidate page; this is memory-bounded per page but may multiply CPU work. Overlay snapshot residency and direct Metadata writer-bypass fencing also remain open. All physical GC flags remain default-off; Ghost GC remains excluded.
