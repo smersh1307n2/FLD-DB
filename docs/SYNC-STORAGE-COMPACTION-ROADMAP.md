@@ -2549,3 +2549,8 @@ The eager provider snapshot RecordId array and namespace-wide deduplication Hash
 Exact FLD HEAD `99e8175368dc3b9641c2e3133ac6d04b02ac2a18` passed cross-platform .NET CI on Ubuntu, Windows and macOS 15 (run [43835665775](https://github.com/smersh1307n2/FLD-DB), 3/3). The new test covers repeated RecordIds across four source Runs, ordered pages, retry caching and backward seek.
 
 This closes the provider snapshot's namespace-sized RecordId index allocation. It does not yet prove total composed peak memory: overlay snapshot construction, high Run-count behavior, retained Metadata payload rescans per candidate page, source-byte work counters, and 1M candidate heap/RSS measurements remain open. Keep all physical-GC flags default-off.
+
+
+### 2026-11-16 follow-up — no bounded-delete Tombstone API
+
+The public FLD `CompactTombstones(predicate, limit)` overload is now `CompactTombstones(predicate)`. The candidate-count quota and the test that repeated one-candidate rewrites until empty have been removed. The Host consumes the sealed approval spool in one whole-sweep call; it no longer passes `int.MaxValue` to emulate an unlimited quota. The obsolete bounded-page benchmark has been removed; the remaining benchmark measures one full sweep and an isolated peak-memory probe. Exact-head CI and the refreshed benchmark are pending.
