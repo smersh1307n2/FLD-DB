@@ -263,7 +263,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             EnsureGcLeaseOwner(context);
             if (_gcReferenceScans.Count != 0)
                 throw new InvalidOperationException("The Host GC lease already owns an active reference scan.");
-            bool tombstoneWalSealSucceeded = true;
+            bool tombstoneWalSealSucceeded = false;
             if (sealCommittedWal)
             {
                 // Tombstone sweep captures its final reference horizon only after
