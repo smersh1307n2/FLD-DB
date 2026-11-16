@@ -137,7 +137,7 @@ Do not add TTL-based deletion. Do not infer that a generation is unpinned merely
 - [x] Implement point lookup and forward prefix cursor over linked leaves.
 - [x] Keep variable-length keys and values external to index pages using generation-local offset/length references.
 - [x] Randomized reference-model tests, tombstones, duplicate/unsorted-input rejection, multi-level splits, empty tree and 1 MiB key reference.
-- [x] Add BenchmarkDotNet cases for B+ tree bulk build, warm point lookup and prefix scan alongside the existing Storage baseline matrix.
+- [x] Add BenchmarkDotNet cases for bulk build, warm/random point lookup, prefix scan, large-value references and a four-page cache-pressure path alongside the existing Storage baseline matrix.
 - [ ] Complete the exact-head benchmark workflow and compare measured time/allocations; no performance win is assumed.
 - No production routing through the tree yet.
 
