@@ -20,6 +20,41 @@ public sealed class StorageBTreeTests
         string[] expected=reference.Where(x=>x.Key.StartsWith(prefix,StringComparison.Ordinal)&&!x.Value.Deleted).Select(x=>x.Key).ToArray();
         Assert.Equal(expected,actual);
     }
+    [Fact]
+    public void Prefix_cursor_reads_each_leaf_once_and_uses_constant_cursor_state()
+    {
+        var entries=new List<StorageTreeBuildEntry>();var keys=new Dictionary<ulong,byte[]>();ulong offset=1;
+        for(int i=0;i<1400;i++)
+        {
+            byte[] key=new byte[4];System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(key,i);
+            keys.Add(offset,key);entries.Add(new(key,offset,offset,1,false));offset++;
+        }
+        var pages=new Dictionary<ulong,byte[]>();ulong next=1;
+        ulong root=StorageBTreeBuilder.Build(4,entries,()=>next++,(id,page)=>pages.Add(id,page));
+        int reads=0;var reader=new StorageBTreeReader(4,root,id=>{reads++;return pages[id];},r=>keys[r.Offset]);
+        using var cursor=reader.OpenPrefixCursor(new byte[]{0,0});
+        Assert.True(cursor.TryReadNext(out _));int afterFirst=reads;
+        Assert.True(cursor.TryReadNext(out _));Assert.Equal(afterFirst,reads);
+        int total=2;while(cursor.TryReadNext(out _))total++;
+        Assert.Equal(1400,total);Assert.True(reads>=3);
+    }
+
+    [Fact]
+    public void Prefix_cursor_detects_leaf_cycle_by_strict_key_order()
+    {
+        byte[] k1={0,1},k2={0,2};var keys=new Dictionary<ulong,byte[]>{{1,k1},{2,k2}};
+        var entries=new[]{new StorageTreeBuildEntry(k1,1,1,1,false),new StorageTreeBuildEntry(k2,2,2,1,false)};
+        var pages=new Dictionary<ulong,byte[]>();ulong next=1;
+        ulong root=StorageBTreeBuilder.Build(5,entries,()=>next++,(id,page)=>pages.Add(id,page));
+        pages[1]=StorageBTreePageCodec.EncodeLeaf(5,1,1,new[]{
+            new StorageTreeLeafEntry(new(1,2),new(1,1,false)),
+            new StorageTreeLeafEntry(new(2,2),new(2,1,false))});
+        var reader=new StorageBTreeReader(5,root,id=>pages[id],r=>keys[r.Offset]);
+        using var cursor=reader.OpenPrefixCursor(new byte[]{0});
+        Assert.True(cursor.TryReadNext(out _));Assert.True(cursor.TryReadNext(out _));
+        Assert.Throws<InvalidDataException>(()=>cursor.TryReadNext(out _));
+    }
+
     [Fact] public void Builder_rejects_duplicate_keys(){var a=new[]{new StorageTreeBuildEntry(new byte[]{1},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};ulong id=1;Assert.Throws<InvalidDataException>(()=>StorageBTreeBuilder.Build(1,a,()=>id++,(_,_)=>{}));}
     [Fact] public void Empty_tree_and_one_megabyte_external_key_work(){ulong id=1;Assert.Equal(0UL,StorageBTreeBuilder.Build(1,Array.Empty<StorageTreeBuildEntry>(),()=>id++,(_,_)=>{}));byte[] k=new byte[1024*1024];k[^1]=1;var pages=new Dictionary<ulong,byte[]>();ulong p=1;ulong root=StorageBTreeBuilder.Build(2,new[]{new StorageTreeBuildEntry(k,99,100,3,false)},()=>p++,(n,b)=>pages.Add(n,b));var reader=new StorageBTreeReader(2,root,n=>pages[n],_=>k);Assert.True(reader.TryGet(k,out var v));Assert.Equal(3,v.Length);}
     [Fact] public void Page_codec_rejects_identity_and_crc_corruption(){byte[] p=StorageBTreePageCodec.EncodeLeaf(3,4,0,new[]{new StorageTreeLeafEntry(new(1,2),new(10,5,false))});Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,5));p[^1]=0x7f;Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,4));}
