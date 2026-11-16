@@ -86,7 +86,7 @@ internal sealed class StoragePageCache
 
     private void MakeRoom(int requiredBytes)
     {
-        while (_residentBytes + requiredBytes > _capacityBytes)
+        while (_residentBytes > _capacityBytes - requiredBytes)
         {
             LinkedListNode<Entry>? node = _lru.Last;
             while (node is not null && node.Value.PinCount != 0)
@@ -135,6 +135,7 @@ internal sealed class StoragePageCacheLease : IDisposable
         _entry = entry;
     }
 
+    /// <summary>The page memory is borrowed and must not outlive this lease.</summary>
     public ReadOnlyMemory<byte> Page
     {
         get
