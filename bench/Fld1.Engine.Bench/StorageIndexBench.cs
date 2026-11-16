@@ -14,6 +14,7 @@ public class StorageIndexBench
 {
     private const int ValueLength = 128;
     private string _directory = null!;
+    private string _freshDirectory = null!;
     private StorageDatabase _database = null!;
     private byte[][] _keys = null!;
     private int _probeIndex;
@@ -44,25 +45,18 @@ public class StorageIndexBench
             seed.Checkpoint();
         }
 
+        // Keep fresh-open measurements on a separate physical directory so the
+        // warm fixture can retain its own process-local WAL writer fence.
+        _freshDirectory = Path.Combine(Path.GetTempPath(), "fld-storage-index-fresh-" + Guid.NewGuid().ToString("N"));
+        string freshSnapshots = Path.Combine(_freshDirectory, "snapshots");
+        Directory.CreateDirectory(freshSnapshots);
+        foreach (string snapshotFile in Directory.EnumerateFiles(Path.Combine(_directory, "snapshots")))
+            File.Copy(snapshotFile, Path.Combine(freshSnapshots, Path.GetFileName(snapshotFile)));
+
         _database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
         _probeIndex = EntryCount / 2;
         if (!_database.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("Storage index benchmark fixture failed validation.");
-    }
-
-    [IterationSetup(Target = nameof(FreshOpenAndPointLookup))]
-    [IterationSetup(Target = nameof(FreshOpenAndSnapshotReadOneEntry))]
-    public void ReleaseFixtureWriterFence()
-    {
-        _database.Dispose();
-        _database = null!;
-    }
-
-    [IterationCleanup(Target = nameof(FreshOpenAndPointLookup))]
-    [IterationCleanup(Target = nameof(FreshOpenAndSnapshotReadOneEntry))]
-    public void ReopenFixtureDatabase()
-    {
-        _database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
     }
 
     [GlobalCleanup]
@@ -70,12 +64,13 @@ public class StorageIndexBench
     {
         _database?.Dispose();
         try { Directory.Delete(_directory, recursive: true); } catch { }
+        try { Directory.Delete(_freshDirectory, recursive: true); } catch { }
     }
 
     [Benchmark]
     public int FreshOpenAndPointLookup()
     {
-        using var database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
+        using var database = StorageDatabase.Open(_freshDirectory, 0, walRotateAfterBytes: 0);
         if (!database.TryGet(_keys[_probeIndex], out byte[]? value))
             throw new InvalidDataException("Fresh Storage lookup did not find the fixture key.");
         return value!.Length;
@@ -84,7 +79,7 @@ public class StorageIndexBench
     [Benchmark]
     public int FreshOpenAndSnapshotReadOneEntry()
     {
-        using var database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
+        using var database = StorageDatabase.Open(_freshDirectory, 0, walRotateAfterBytes: 0);
         using var snapshot = database.OpenSnapshot();
         if (!snapshot.TryGet(_keys[_probeIndex], out byte[]? value))
             throw new InvalidDataException("Fresh Storage snapshot did not find the fixture key.");
