@@ -406,6 +406,15 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcGcProtocol.DecodeScanResponse(response);
     }
 
+    public async Task<FldDatabaseIpcGcReferenceScan> OpenTombstoneGcReferenceScanAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.OpenGcReferenceScan,
+            new byte[] { 1 }, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeScanResponse(response);
+    }
+
     public async Task<bool> HasGcChangeIdReferenceAsync(
         Guid token, ReadOnlyMemory<byte> changeId,
         CancellationToken cancellationToken = default)
