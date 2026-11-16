@@ -81,3 +81,19 @@ At 250k, this rerun measured approximately 128x lower elapsed time and 105x lowe
 The child-process diagnostic again produced eight samples per cardinality. At 250k, sampled managed-heap delta ranged around 190.1–191.0 MiB (mean approximately 190.9 MiB). Every sample still reported `WorkingSetDeltaBytes=0`; process RSS remains unmeasured reliably. The diagnostic must not be used as an RSS/capacity bound.
 
 This remains an FLD-only physical compaction measurement. The signed Metadata proof + real Host IPC reference scan + coordinator scheduling benchmark is still open and is tracked in BIN-SYNC Roadmap V3 §1.168.
+
+
+### Demand-paged Run mapping benchmark
+
+Run the dedicated mapping matrix with:
+
+```bash
+dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --run-mapping-only
+```
+
+The fixture contains 1 / 16 / 64 immutable Runs, each with 128 records and 64-byte values. It reports two distinct paths:
+
+- `FreshDatabaseOpenAndFirstMappedLookup`: opens a new database instance and performs the first lookup, including lazy Run mapping, structural validation and comparison with the authoritative Storage blob digest.
+- `WarmMappedLookups`: measures one lookup in every Run after all process mappings have already been established.
+
+BenchmarkDotNet reports elapsed time and managed allocations. "Fresh" means a new process-local mapping/database instance, **not a cold operating-system page cache**; the OS may retain file pages between invocations. This matrix does not claim peak RSS or cold-storage latency. A separate isolated-process OS-level peak-working-set measurement is still required before making capacity claims. The workflow is `.github/workflows/run-mapping-benchmark.yml` and uploads its BenchmarkDotNet artifact.
