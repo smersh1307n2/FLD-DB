@@ -37,6 +37,9 @@ jobs:
       - name: Run fresh-map and warm-map benchmark matrix
         run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --run-mapping-only
 
+      - name: Verify all benchmark cases produced reports
+        run: test "$(find BenchmarkDotNet.Artifacts/results -name '*-report-github.md' | wc -l)" -ge 6
+
       - name: Upload BenchmarkDotNet results
         if: always()
         uses: actions/upload-artifact@v4
