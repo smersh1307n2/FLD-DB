@@ -170,6 +170,8 @@ public class StorageIndexBench
         int count = 0;
         using var cursor = _treeReader.OpenPrefixCursor(new byte[] { 0, 0, 0, 0 });
         while (cursor.TryReadNext(out _)) count++;
+        if (count != EntryCount)
+            throw new InvalidDataException($"B+ tree prefix scan returned {count} entries; expected {EntryCount}.");
         return count;
     }
 
