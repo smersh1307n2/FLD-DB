@@ -2594,3 +2594,15 @@ The refreshed `TombstoneGcSweepBench` completed on Ubuntu/.NET 10 (workflow [438
 The isolated child-process sampler (2 ms interval; diagnostic only) observed median deltas at 250k of **71.68 MiB working set** and **15.96 MiB managed heap**. At 50k and 100k the sampled managed-heap deltas were 15.79 and 15.92 MiB respectively, while working-set deltas were 19.14 and 30.11 MiB. This is consistent with bounded managed compaction state plus increasing residency of memory-mapped source Run pages; it is not a hard RSS bound, and the sampler can miss short peaks.
 
 Historical 250k single-rewrite baseline was about 266.6 ms / 87.94 MB cumulative allocation. The new chunked sweep is about 12% slower and 27% more cumulative allocations in this non-identical historical comparison. The new path materially changes the memory shape, but it is **not yet a performance win**. Keep optimizing Run traversal/output chunking and measure high Run counts before declaring the GC path complete. No 1M or composed Host/Metadata peak-memory result is claimed.
+
+
+## 2026-11-16 — Stage B paged-index primitives implemented
+
+Exact source branch `fix/crash-consistency-outbox`, based on `3d670b3170a96f1fe87a57309ad2b840a8e588ad`.
+
+- Added `StoragePageCache`: fixed-size page entries, byte-budgeted LRU, generation-aware keys, disposable page leases, pinned-entry protection, explicit generation eviction and fail-closed behavior when all resident capacity is pinned. The cache does not exceed its configured budget.
+- Added `StorageGenerationPins`: explicit generation registration, snapshot/cursor pin leases, retirement that rejects new pins, and atomic dequeue of a retired generation only after its pin count reaches zero.
+- Added `IStorageRandomAccessFile` / `StorageRandomAccessFile`: positional reads/writes through `RandomAccess`, exact-read semantics, checked offsets, and explicit stable-storage flush. No shared stream position is used.
+- Added Storage unit tests for LRU ordering, pinned-page budget exhaustion, generation separation, lease disposal, concurrent generation pins, positional I/O, short reads and invalid offsets.
+- These are Stage B primitives only. They are not wired into `StorageDatabase`, do not yet build or traverse a B+ tree, and do not authorize removal of v1 snapshots or `.fld1` mirrors. The production dictionary/snapshot path remains authoritative.
+- CI is the acceptance gate for this block. Stage C (immutable B+ tree builder/reader) starts only after exact-head cross-platform tests pass.

@@ -1,6 +1,6 @@
 # FLD Storage Core — paged ordered index design
 
-Status: DESIGN PROPOSAL; implementation not yet started
+Status: Stage B primitives implemented; production tree integration not started
 Date: 2026-11-16
 Scope: Fld1.Storage physical key/value engine only. No BIN-SYNC protocol changes and no FLD field/tombstone policy changes.
 
@@ -127,9 +127,10 @@ Do not add TTL-based deletion. Do not infer that a generation is unpinned merely
 - Add tests for snapshot lifetime, cursor lifetime, large key/value behavior and current v1 compatibility before changing storage internals.
 
 ### Stage B — page primitives
-- Add page codec, CRC/identity validation, bounded page cache, generation pin registry and random-access file abstraction.
-- Unit-test page split/merge boundaries, short reads, corruption, invalid offsets, cache eviction and concurrent readers.
-- No production routing through the new tree yet.
+- [x] Add page codec, CRC/identity validation, bounded page cache, generation pin registry and positional random-access file abstraction.
+- [x] Unit-test page identity/CRC validation, short reads, invalid offsets, cache eviction, pinned-page budget behavior, generation retirement and concurrent pin accounting.
+- [ ] Add page split/merge boundary tests with the B+ tree node codec in Stage C.
+- No production routing through the new tree yet. Cache misses are currently serialized under the cache lock for duplicate-load safety; parallel miss loading is a later optimization only if profiling justifies it.
 
 ### Stage C — immutable B+ tree builder/reader
 - Build a v2 tree from a sorted input stream.
