@@ -354,8 +354,10 @@ public sealed class FldProviderSnapshot : IDisposable
         var queue = CreateRecordIdQueue(runs);
         RecordIdPriority? previous = null;
         int count = 0;
-        while (queue.TryDequeue(out RunRecordIdCursor cursor, out RecordIdPriority priority))
+        while (queue.TryDequeue(out RunRecordIdCursor? cursor, out RecordIdPriority priority))
         {
+            if (cursor is null)
+                throw new InvalidDataException("Provider snapshot Run cursor queue contained a null entry.");
             if (previous is null || priority.High != previous.Value.High ||
                 priority.Low != previous.Value.Low)
             {
@@ -371,8 +373,10 @@ public sealed class FldProviderSnapshot : IDisposable
     private bool TryReadNextUniqueRecordId(out byte[]? recordId)
     {
         while (_recordIdQueue.TryDequeue(
-            out RunRecordIdCursor cursor, out RecordIdPriority priority))
+            out RunRecordIdCursor? cursor, out RecordIdPriority priority))
         {
+            if (cursor is null)
+                throw new InvalidDataException("Provider snapshot Run cursor queue contained a null entry.");
             bool duplicate = _lastEmittedRecordId is not null &&
                 priority.High == BinaryPrimitives.ReadUInt64BigEndian(_lastEmittedRecordId) &&
                 priority.Low == BinaryPrimitives.ReadUInt64BigEndian(_lastEmittedRecordId.AsSpan(8));
