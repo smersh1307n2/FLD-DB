@@ -2624,3 +2624,8 @@ The existing Storage index benchmark now includes B+ tree bulk-build, warm point
 
 
 The B+ tree benchmark matrix now covers bulk build, warm and randomized point lookup, forward prefix scan, 1 MiB value references, and point lookup under a four-page LRU cache budget at 1k / 10k / 100k entries. The verifier expects 30 measured rows (10 methods × 3 cardinalities), rejects missing/NA results and is part of the dedicated workflow. Measurements remain pending; no improvement is assumed.
+
+
+### Stage C benchmark review and corrective hot-path pass — 2026-11-16
+
+The first full 30-case B+ tree matrix completed successfully, but results were unacceptable: at 100k entries prefix scan took 51.22 s / 2.097 GB allocations and point lookup took 1.135 ms / 24.9 KB allocations. Root cause: cursor decoded/allocated the same leaf once per returned entry; point lookup allocated the entire leaf entry array for a single key. Both are corrected in FLD-DB and vendored to BIN-SYNC. The cursor now retains one decoded leaf per page, point lookup binary-searches the validated leaf payload directly, and internal traversal validates/decode pages once with a bounded depth guard. Fresh exact-head CI and all 30 benchmark measurements are pending; this is not yet a performance win and does not authorize production integration.
