@@ -512,7 +512,11 @@ public sealed class StorageBlobReader : IDisposable
         }
     }
 
-    /// <summary>Streams all pages and verifies the total length and whole-blob SHA-256 before returning. The destination may contain partial bytes if validation or I/O fails.</summary>
+    /// <summary>
+    /// Streams all pages through a fixed-size pooled buffer and verifies the total
+    /// length and whole-blob SHA-256 before returning. The destination may contain
+    /// partial bytes if validation or I/O fails.
+    /// </summary>
     public void CopyTo(Stream destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -520,17 +524,43 @@ public sealed class StorageBlobReader : IDisposable
         {
             _ = GetSnapshot();
             using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            ulong copied = 0;
-            for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
+            byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+            try
             {
-                byte[] page = ReadPage(pageIndex);
-                copied = checked(copied + (ulong)page.Length);
-                hash.AppendData(page);
-                destination.Write(page);
+                ulong copied = 0;
+                for (int pageIndex = 0; pageIndex < _metadata.PageCount; pageIndex++)
+                {
+                    string path = Path.Combine(
+                        _directory, pageIndex.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) + ".page");
+                    int expectedLength = (int)Math.Min(
+                        (ulong)_metadata.PageSize,
+                        _metadata.Length - (ulong)pageIndex * (ulong)_metadata.PageSize);
+                    using var page = new FileStream(
+                        path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                        bufferSize: 4096, FileOptions.SequentialScan);
+                    int remaining = expectedLength;
+                    while (remaining > 0)
+                    {
+                        int read = page.Read(buffer, 0, Math.Min(buffer.Length, remaining));
+                        if (read == 0)
+                            throw new InvalidDataException($"Storage blob page {pageIndex} is truncated.");
+                        hash.AppendData(buffer.AsSpan(0, read));
+                        destination.Write(buffer, 0, read);
+                        copied = checked(copied + (uint)read);
+                        remaining -= read;
+                    }
+                    if (page.ReadByte() != -1)
+                        throw new InvalidDataException($"Storage blob page {pageIndex} has trailing bytes.");
+                }
+
+                if (copied != _metadata.Length ||
+                    !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
+                    throw new InvalidDataException("Storage blob content digest mismatch.");
             }
-            if (copied != _metadata.Length ||
-                !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), _metadata.Digest))
-                throw new InvalidDataException("Storage blob content digest mismatch.");
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 
