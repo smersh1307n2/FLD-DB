@@ -13,7 +13,6 @@ namespace Fld1.Engine.Bench;
 [MemoryDiagnoser]
 public class TombstoneGcSweepBench
 {
-    private const int PageLimit = 4_096;
     // Keep each WAL GroupCommit payload below the 16 MiB wire/storage limit.
     // The final checkpoint still consolidates each phase into one Run.
     private const int SetupCommitBatchSize = 8_192;
@@ -82,43 +81,17 @@ public class TombstoneGcSweepBench
     public void Cleanup()
     {
         Console.WriteLine(
-            $"TOMBSTONE_GC_SWEEP_ALLOCATED_BYTES Count={TombstoneCount} PageLimit={PageLimit} Bytes={_lastGcAllocatedBytes}");
+            $"TOMBSTONE_GC_SWEEP_ALLOCATED_BYTES Count={TombstoneCount} Bytes={_lastGcAllocatedBytes}");
         if (_database is not null)
             _database.Dispose();
         try { Directory.Delete(_directory, recursive: true); } catch { }
-    }
-
-    [Benchmark(Description = "Complete FLD tombstone-GC sweep using bounded maintenance pages")]
-    public int ReclaimAllTombstonesInBoundedPages()
-    {
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        int reclaimedTotal = 0;
-        int pageCount = 0;
-
-        while (reclaimedTotal < TombstoneCount)
-        {
-            int reclaimed = _database.CompactTombstones(static _ => true, PageLimit);
-            if (reclaimed <= 0)
-                throw new InvalidOperationException(
-                    $"Tombstone sweep stopped after reclaiming {reclaimedTotal}/{TombstoneCount} entries.");
-            reclaimedTotal += reclaimed;
-            pageCount++;
-        }
-
-        _lastGcAllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-        int expectedPages = (TombstoneCount + PageLimit - 1) / PageLimit;
-        if (reclaimedTotal != TombstoneCount || pageCount != expectedPages)
-            throw new InvalidOperationException(
-                $"Tombstone sweep reclaimed {reclaimedTotal} in {pageCount} pages; expected {TombstoneCount} in {expectedPages}.");
-
-        return reclaimedTotal;
     }
 
     [Benchmark(Description = "Complete FLD tombstone-GC sweep in one namespace rewrite")]
     public int ReclaimAllTombstonesInSinglePass()
     {
         long before = GC.GetAllocatedBytesForCurrentThread();
-        int reclaimed = _database.CompactTombstones(static _ => true, TombstoneCount);
+        int reclaimed = _database.CompactTombstones(static _ => true);
         _lastGcAllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
         if (reclaimed != TombstoneCount)
             throw new InvalidOperationException(
@@ -164,7 +137,7 @@ public class TombstoneGcSweepBench
     {
         using var database = FldDatabase.Open(directory, 0);
         using var sampler = new PeakMemorySampler();
-        int reclaimed = database.CompactTombstones(static _ => true, tombstoneCount);
+        int reclaimed = database.CompactTombstones(static _ => true);
         sampler.Stop();
         Console.WriteLine(
             $"TOMBSTONE_GC_PEAK_SAMPLE Count={tombstoneCount} IntervalMs=2 " +
