@@ -27,6 +27,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private Guid _gcLeaseClientId;
     private ulong _gcLeaseSessionGeneration;
     private readonly Dictionary<Guid, GcReferenceScanHandle> _gcReferenceScans = new();
+    private readonly Dictionary<Guid, GcApprovalSpoolHandle> _gcApprovalSpools = new();
+
+    private sealed record GcApprovalSpoolHandle(
+        Guid ClientId, ulong SessionGeneration, FldTombstoneGcApprovalSpool Spool);
 
     private sealed record GcReferenceScanHandle(
         Guid ClientId, ulong SessionGeneration, FldReferenceSnapshot Snapshot);
@@ -47,6 +51,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     {
         _database = database ?? throw new ArgumentNullException(nameof(database));
         _enableTombstoneGc = enableTombstoneGc;
+        string scratchDirectory = _database.GetTombstoneGcScratchDirectory();
+        // The database root is process-owned. Any spool left by a previous Host
+        // generation is disposable scratch, never a recovery input.
+        foreach (string staleSpool in Directory.EnumerateFiles(
+                     scratchDirectory, "*.tombstone-gc-approval.tmp"))
+        {
+            try { File.Delete(staleSpool); } catch { /* Retry on the next Host start. */ }
+        }
         _gcLeaseIdleTimeout = gcLeaseIdleTimeout ?? TimeSpan.FromMinutes(5);
         if (_gcLeaseIdleTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(gcLeaseIdleTimeout));
@@ -131,6 +143,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                     _gcReferenceScans[scanToken].Snapshot.Dispose();
                     _gcReferenceScans.Remove(scanToken);
                 }
+                AbortApprovalSpoolsForSession(context.ClientId, context.SessionGeneration);
                 _gcLeaseToken = Guid.Empty;
                 _gcLeaseClientId = Guid.Empty;
                 _gcLeaseSessionGeneration = 0;
@@ -152,7 +165,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             FldDatabaseIpcOperationCodes.QueryGcReferenceScan or
             FldDatabaseIpcOperationCodes.QueryGcChangeIdBatch or
             FldDatabaseIpcOperationCodes.ReleaseGcReferenceScan or
-            FldDatabaseIpcOperationCodes.RenewGcLease))
+            FldDatabaseIpcOperationCodes.RenewGcLease or
+            FldDatabaseIpcOperationCodes.CommitTombstoneGcApprovalSpool or
+            FldDatabaseIpcOperationCodes.AbortTombstoneGcApprovalSpool))
             throw new InvalidOperationException(
                 "The FLD GC lease owner may only access its reference scan until the Host-wide lease is released.");
         IDisposable? dispatchLease = ownsGcLease
@@ -185,6 +200,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 FldDatabaseIpcOperationCodes.TryGetMetadataStoreOwnedPublicationCutover => HandleTryGetMetadataStoreOwnedPublicationCutover(operation.Payload),
                 FldDatabaseIpcOperationCodes.EnableMetadataStoreOwnedPublication => HandleEnableMetadataStoreOwnedPublication(operation.Payload),
                 FldDatabaseIpcOperationCodes.CompactTombstones => HandleCompactTombstones(operation.Payload),
+                FldDatabaseIpcOperationCodes.BeginTombstoneGcApprovalSpool => HandleBeginTombstoneGcApprovalSpool(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.AppendTombstoneGcApprovalSpool => HandleAppendTombstoneGcApprovalSpool(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.SealTombstoneGcApprovalSpool => HandleSealTombstoneGcApprovalSpool(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.CommitTombstoneGcApprovalSpool => HandleCommitTombstoneGcApprovalSpool(context, operation.Payload),
+                FldDatabaseIpcOperationCodes.AbortTombstoneGcApprovalSpool => HandleAbortTombstoneGcApprovalSpool(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.OpenGcReferenceScan => HandleOpenGcReferenceScan(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.QueryGcReferenceScan => HandleQueryGcReferenceScan(context, operation.Payload),
                 FldDatabaseIpcOperationCodes.QueryGcChangeIdBatch => HandleQueryGcChangeIdBatch(context, operation.Payload),
@@ -215,6 +235,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 _gcReferenceScans[scanToken].Snapshot.Dispose();
                 _gcReferenceScans.Remove(scanToken);
             }
+            AbortApprovalSpoolsForSession(clientId, sessionGeneration);
             if (_gcLeaseToken != Guid.Empty && _gcLeaseClientId == clientId &&
                 _gcLeaseSessionGeneration == sessionGeneration)
             {
@@ -356,6 +377,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     // client keeps its pipe open without issuing another scan operation.
     private void ClearGcLeaseLocked()
     {
+        AbortApprovalSpoolsForSession(_gcLeaseClientId, _gcLeaseSessionGeneration);
         foreach (GcReferenceScanHandle scan in _gcReferenceScans.Values)
             scan.Snapshot.Dispose();
         _gcReferenceScans.Clear();
@@ -481,6 +503,142 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
             limit);
         return FldDatabaseIpcProtocol.EncodeTombstoneGcResponse(reclaimed, limit);
+    }
+
+    private byte[] HandleBeginTombstoneGcApprovalSpool(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        if (!_enableTombstoneGc)
+            throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
+        if (!payload.IsEmpty)
+            throw new InvalidDataException("Tombstone-GC approval-spool begin payload must be empty.");
+
+        lock (_gcLeaseGate)
+        {
+            if (_gcApprovalSpools.Values.Any(item =>
+                item.ClientId == context.ClientId && item.SessionGeneration == context.SessionGeneration))
+                throw new InvalidOperationException("This IPC session already owns a tombstone-GC approval spool.");
+            Guid token = Guid.NewGuid();
+            var spool = new FldTombstoneGcApprovalSpool(
+                _database.GetTombstoneGcScratchDirectory(), token);
+            _gcApprovalSpools.Add(token,
+                new GcApprovalSpoolHandle(context.ClientId, context.SessionGeneration, spool));
+            return FldDatabaseIpcProtocol.EncodeGcLeaseToken(token);
+        }
+    }
+
+    private byte[] HandleAppendTombstoneGcApprovalSpool(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        (Guid token, FldTombstoneGcCandidate[] candidates) =
+            FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolAppend(payload);
+        lock (_gcLeaseGate)
+        {
+            GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
+            handle.Spool.Append(candidates);
+        }
+        return Array.Empty<byte>();
+    }
+
+    private byte[] HandleSealTombstoneGcApprovalSpool(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(payload);
+        lock (_gcLeaseGate)
+        {
+            GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
+            byte[] digest = handle.Spool.Seal();
+            return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolSealResponse(
+                handle.Spool.Count, digest);
+        }
+    }
+
+    private byte[] HandleCommitTombstoneGcApprovalSpool(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(payload);
+        GcApprovalSpoolHandle handle;
+        lock (_gcLeaseGate)
+        {
+            EnsureGcLeaseOwner(context);
+            handle = GetApprovalSpool(context, token);
+            if (!handle.Spool.IsSealed)
+                throw new InvalidOperationException("Tombstone-GC approval spool must be sealed before commit.");
+        }
+
+        try
+        {
+            if (!_enableTombstoneGc)
+                throw new NotSupportedException("Physical tombstone GC is disabled by FLD Database Host configuration.");
+
+            using IDisposable commitLease = _database.AcquireCommitGuard();
+            if (!_database.TrySealCommittedWalForTombstoneGc())
+                return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
+
+            using FldReferenceSnapshot references = _database.OpenReferenceSnapshot();
+            FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
+            if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
+                draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
+                return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
+
+            using FldTombstoneGcApprovalSpool.Reader approved = handle.Spool.OpenReader();
+            int reclaimed = _database.CompactTombstones(candidate =>
+                approved.IsApproved(candidate) &&
+                !references.HasChangeIdReference(candidate.ChangeId.Span) &&
+                !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
+                int.MaxValue);
+            return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(reclaimed);
+        }
+        finally
+        {
+            lock (_gcLeaseGate)
+            {
+                if (_gcApprovalSpools.Remove(token, out GcApprovalSpoolHandle? current))
+                    current.Spool.Dispose();
+            }
+        }
+    }
+
+    private byte[] HandleAbortTombstoneGcApprovalSpool(
+        StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
+    {
+        Guid token = FldDatabaseIpcProtocol.DecodeGcLeaseToken(payload);
+        lock (_gcLeaseGate)
+        {
+            if (!_gcApprovalSpools.TryGetValue(token, out GcApprovalSpoolHandle? handle))
+                return Array.Empty<byte>();
+            if (handle.ClientId != context.ClientId ||
+                handle.SessionGeneration != context.SessionGeneration)
+                throw new InvalidDataException("Tombstone-GC approval spool belongs to another IPC session.");
+            _gcApprovalSpools.Remove(token);
+            handle.Spool.Dispose();
+        }
+        return Array.Empty<byte>();
+    }
+
+    private GcApprovalSpoolHandle GetApprovalSpool(StorageIpcRequestContext context, Guid token)
+    {
+        if (!_gcApprovalSpools.TryGetValue(token, out GcApprovalSpoolHandle? handle) ||
+            handle.ClientId != context.ClientId ||
+            handle.SessionGeneration != context.SessionGeneration)
+            throw new InvalidDataException("Tombstone-GC approval spool token is unknown or belongs to another IPC session.");
+        return handle;
+    }
+
+    // Caller holds _gcLeaseGate.
+    private void AbortApprovalSpoolsForSession(Guid clientId, ulong sessionGeneration)
+    {
+        if (clientId == Guid.Empty || sessionGeneration == 0)
+            return;
+        foreach (Guid token in _gcApprovalSpools
+            .Where(pair => pair.Value.ClientId == clientId &&
+                pair.Value.SessionGeneration == sessionGeneration)
+            .Select(pair => pair.Key).ToArray())
+        {
+            GcApprovalSpoolHandle handle = _gcApprovalSpools[token];
+            _gcApprovalSpools.Remove(token);
+            handle.Spool.Dispose();
+        }
     }
 
     private byte[] HandleGetLocalAuthor(ReadOnlyMemory<byte> payload)
@@ -865,6 +1023,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         IDisposable? boundaryLease;
         lock (_gcLeaseGate)
         {
+            foreach (GcApprovalSpoolHandle spool in _gcApprovalSpools.Values)
+                spool.Spool.Dispose();
+            _gcApprovalSpools.Clear();
             foreach (GcReferenceScanHandle scan in _gcReferenceScans.Values)
                 scan.Snapshot.Dispose();
             _gcReferenceScans.Clear();
