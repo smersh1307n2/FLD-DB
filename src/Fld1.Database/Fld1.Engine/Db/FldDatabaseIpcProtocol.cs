@@ -37,6 +37,11 @@ public static class FldDatabaseIpcOperationCodes
     public const ushort ReleaseGcReferenceScan = 0x211C;
     public const ushort RenewGcLease = 0x211D;
     public const ushort QueryGcChangeIdBatch = 0x211E;
+    public const ushort BeginTombstoneGcApprovalSpool = 0x2120;
+    public const ushort AppendTombstoneGcApprovalSpool = 0x2121;
+    public const ushort SealTombstoneGcApprovalSpool = 0x2122;
+    public const ushort CommitTombstoneGcApprovalSpool = 0x2123;
+    public const ushort AbortTombstoneGcApprovalSpool = 0x2124;
 }
 
 public sealed record FldDatabaseIpcMutation(
@@ -1042,6 +1047,76 @@ public static class FldDatabaseIpcProtocol
         int reclaimed = BinaryPrimitives.ReadInt32LittleEndian(response.Span);
         if (reclaimed < 0 || reclaimed > limit)
             throw new InvalidDataException("FLD tombstone-GC response count is invalid.");
+        return reclaimed;
+    }
+
+    public static byte[] EncodeTombstoneGcApprovalSpoolAppend(
+        Guid token, IReadOnlyList<FldTombstoneGcCandidate> candidates)
+    {
+        if (token == Guid.Empty)
+            throw new ArgumentException("Tombstone-GC approval-spool token must be nonzero.", nameof(token));
+        ArgumentNullException.ThrowIfNull(candidates);
+        if (candidates.Count is < 1 or > MaxTombstoneGcCandidates)
+            throw new ArgumentOutOfRangeException(nameof(candidates));
+        byte[] encoded = EncodeTombstoneGcRequest(candidates, candidates.Count);
+        byte[] payload = new byte[checked(16 + encoded.Length)];
+        token.TryWriteBytes(payload.AsSpan(0, 16), bigEndian: true, out _);
+        encoded.CopyTo(payload, 16);
+        return payload;
+    }
+
+    public static (Guid Token, FldTombstoneGcCandidate[] Candidates)
+        DecodeTombstoneGcApprovalSpoolAppend(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length < 20)
+            throw new InvalidDataException("Tombstone-GC approval-spool append is truncated.");
+        Guid token = new(payload.Span[..16], bigEndian: true);
+        if (token == Guid.Empty)
+            throw new InvalidDataException("Tombstone-GC approval-spool token must be nonzero.");
+        (_, FldTombstoneGcCandidate[] candidates) =
+            DecodeTombstoneGcRequest(payload[16..]);
+        if (candidates.Length == 0)
+            throw new InvalidDataException("Tombstone-GC approval-spool append cannot be empty.");
+        return (token, candidates);
+    }
+
+    public static byte[] EncodeTombstoneGcApprovalSpoolSealResponse(int count, ReadOnlySpan<byte> digest)
+    {
+        if (count < 0 || digest.Length != 32)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        byte[] response = new byte[36];
+        BinaryPrimitives.WriteInt32LittleEndian(response, count);
+        digest.CopyTo(response.AsSpan(4));
+        return response;
+    }
+
+    public static (int Count, byte[] Digest)
+        DecodeTombstoneGcApprovalSpoolSealResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != 36)
+            throw new InvalidDataException("Tombstone-GC approval-spool seal response length is invalid.");
+        int count = BinaryPrimitives.ReadInt32LittleEndian(response.Span);
+        if (count < 0)
+            throw new InvalidDataException("Tombstone-GC approval-spool entry count is invalid.");
+        return (count, response.Span.Slice(4, 32).ToArray());
+    }
+
+    public static byte[] EncodeTombstoneGcApprovalSpoolCommitResponse(int reclaimedCount)
+    {
+        if (reclaimedCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(reclaimedCount));
+        byte[] response = new byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(response, reclaimedCount);
+        return response;
+    }
+
+    public static int DecodeTombstoneGcApprovalSpoolCommitResponse(ReadOnlyMemory<byte> response)
+    {
+        if (response.Length != 4)
+            throw new InvalidDataException("Tombstone-GC approval-spool commit response length is invalid.");
+        int reclaimed = BinaryPrimitives.ReadInt32LittleEndian(response.Span);
+        if (reclaimed < 0)
+            throw new InvalidDataException("Tombstone-GC approval-spool reclaimed count is invalid.");
         return reclaimed;
     }
 
