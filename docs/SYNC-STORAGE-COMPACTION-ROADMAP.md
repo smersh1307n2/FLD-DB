@@ -2524,7 +2524,7 @@ A source/API audit found an additional cross-repository constraint: BIN-SYNC cur
 
 The ADR now specifies a snapshot-scoped sequential candidate scan and a Host-owned temporary approval spool. BIN-SYNC evaluates its unchanged signed proof and Metadata references as each candidate page arrives, then streams only approved exact identities to the Host in bounded IPC batches. The Host seals the sorted spool with count/digest validation and consumes it during one FLD source-Run sweep. The spool is disposable scratch, not an authoritative journal and not a crash-resume source; it is deleted on terminal paths and after Host restart. The provider snapshot is released before final compaction so its own pin does not veto the sweep. Host FLD references are revalidated during final compaction.
 
-The coordinator now uses `TryFindLiveRecordReferences` against each bounded candidate page, so it retains only page-matching RecordIds rather than a namespace-wide Metadata `HashSet`. The old internal `TryBuildLiveRecordReferenceSet` helper remains but is not used by the coordinator. The bounded lookup still scans retained Metadata payloads once per candidate page; its repeated CPU cost remains a composed benchmark/optimization gate.
+The coordinator now uses `TryFindLiveRecordReferences` against each bounded candidate page, so it retains only page-matching RecordIds rather than a namespace-wide Metadata `HashSet`. The old `TryBuildLiveRecordReferenceSet` helper and its payload-add helper have now been removed. The bounded lookup still scans retained Metadata payloads once per candidate page; its repeated CPU cost remains a composed benchmark/optimization gate.
 
 ## 2026-11-16 — first Tombstone single-sweep implementation
 
@@ -2554,3 +2554,10 @@ This closes the provider snapshot's namespace-sized RecordId index allocation. I
 ### 2026-11-16 follow-up — no bounded-delete Tombstone API
 
 The public FLD `CompactTombstones(predicate, limit)` overload is now `CompactTombstones(predicate)`. The candidate-count quota and the test that repeated one-candidate rewrites until empty have been removed. The Host consumes the sealed approval spool in one whole-sweep call; it no longer passes `int.MaxValue` to emulate an unlimited quota. The obsolete bounded-page benchmark has been removed; the remaining benchmark measures one full sweep and an isolated peak-memory probe. Exact FLD HEAD `827f794064bb5e3db0810c2baf3e3d82eb5899fe` passed cross-platform .NET CI (run [43836634794](https://github.com/smersh1307n2/FLD-DB/actions/runs/43836634794), 3/3). The refreshed whole-sweep benchmark remains in progress (run `43836618247`); no new measurements are claimed yet.
+
+
+### 2026-11-16 follow-up — remove Metadata-wide live RecordId set
+
+The in-process adapter no longer receives a namespace-sized `IReadOnlySet<RecordId>` from `TombstoneGcCommitLease`. The Metadata guard now holds writer admission + transaction lock, and `TombstoneGcCommitLease.HasLiveRecordReference` performs exact per-candidate fail-closed lookups while the lease is held. The old `TryBuildLiveRecordReferenceSet` implementation is removed. The in-process adapter's tombstone method no longer takes a candidate limit and invokes one full FLD sweep.
+
+Memory no longer scales with the number of distinct live Metadata RecordIds, but the in-process path scans retained payloads per tombstone candidate. The process-isolated path scans retained payloads per candidate page. This CPU trade-off is explicitly a composed performance gate; no end-to-end bounded-memory/performance claim is made until measured.
