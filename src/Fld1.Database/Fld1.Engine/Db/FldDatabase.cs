@@ -80,7 +80,8 @@ public sealed partial class FldDatabase : IDisposable
     private readonly object _commitLock = new();
     private WalManager _wal;
     private OutboxLog _outbox;
-    private readonly List<(ulong runId, string path, byte[]? cached, long lastAccess)> _runs = new();
+    private readonly List<(ulong runId, string path, byte[]? cached, long lastAccess, MappedRunFile? mapped)> _runs = new();
+    private readonly List<MappedRunFile> _retiredRunMappings = new();
     private long _runCacheBytes;
     private long _runCacheClock;
     private ulong _nextRunId = 1;
@@ -318,7 +319,7 @@ public sealed partial class FldDatabase : IDisposable
                     $"Manifest references missing Run {re.RunId} in both Storage blobs and legacy Run files.");
             }
 
-            _runs.Add((re.RunId, path, null, 0));
+            _runs.Add((re.RunId, path, null, 0, null));
             if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
         }
         _lastSealedCommitSeq = Math.Max(sealedSeq, _outbox.MaterializedThroughCommitSeq);
@@ -1437,8 +1438,8 @@ public sealed partial class FldDatabase : IDisposable
             _manifestDirty = false;
             _pendingFlushedCommitSeq = seqHi;
 
-            _runs.Add((runId, path, null, 0));
-            CacheRun(_runs.Count - 1, runBytes);
+            _runs.Add((runId, path, null, 0, null));
+            MapRun(_runs.Count - 1);
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
             _dirty.Clear();
@@ -1931,7 +1932,7 @@ public sealed partial class FldDatabase : IDisposable
         if (seqHi == 0)
             seqHi = _lastSealedCommitSeq;
 
-        var oldRuns = _runs.Select(run => (runId: run.runId, path: run.path)).ToList();
+        var oldRuns = _runs.Select(run => (runId: run.runId, path: run.path, mapped: run.mapped)).ToList();
         try
         {
             _manifestStore.Update(manifest =>
@@ -1965,12 +1966,13 @@ public sealed partial class FldDatabase : IDisposable
 
         _manifestDirty = false;
         _pendingFlushedCommitSeq = seqHi;
+        RetireActiveRunMappingsUnderLock();
         _runs.Clear();
         _runCacheBytes = 0;
         if (runId != 0)
         {
-            _runs.Add((runId, path!, null, 0));
-            CacheRun(_runs.Count - 1, runBytes!);
+            _runs.Add((runId, path!, null, 0, null));
+            MapRun(_runs.Count - 1);
         }
         _overlay.Clear();
         _dirty.Clear();
@@ -1982,7 +1984,7 @@ public sealed partial class FldDatabase : IDisposable
             bool deleted = false;
             try
             {
-                if (oldRun.runId == runId || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
+                if (oldRun.runId == runId || oldRun.mapped is not null || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
                     continue;
                 _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
                 if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
@@ -2264,21 +2266,41 @@ public sealed partial class FldDatabase : IDisposable
             onRecordId(recordId);
     }
 
-    private byte[] EnsureRunCached(int index)
+    private ReadOnlyMemory<byte> EnsureRunCached(int index)
     {
-        var (runId, path, cached, _) = _runs[index];
+        var (runId, path, cached, _, mapped) = _runs[index];
+        if (mapped is not null)
+        {
+            _runs[index] = (runId, path, cached, ++_runCacheClock, mapped);
+            return mapped.ReadOnlyMemory;
+        }
         if (cached is not null)
         {
-            _runs[index] = (runId, path, cached, ++_runCacheClock);
+            _runs[index] = (runId, path, cached, ++_runCacheClock, null);
             return cached;
         }
 
-        byte[] bytes;
+        // The compatibility mirror is immutable once published. Map it read-only so
+        // the OS pages data on demand instead of allocating a managed array per Run.
+        if (File.Exists(path))
+        {
+            MappedRunFile mappedFile = MappedRunFile.Open(path);
+            var mappedReader = new RunReader(mappedFile.ReadOnlyMemory);
+            if (mappedReader.TryValidate(out var mappedVerify) &&
+                mappedReader.NamespaceId == _namespaceId)
+            {
+                _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+                return mappedFile.ReadOnlyMemory;
+            }
+            mappedFile.Dispose();
+        }
+
+        // Missing/corrupt legacy mirror: recover from the authoritative Storage blob.
         Guid blobId = RunBlobId(runId);
         if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
         {
             using (blobReader)
-                bytes = blobReader.ReadAllBytes();
+                cached = blobReader.ReadAllBytes();
         }
         else if (_runBlobStore.ContainsBlob(blobId))
         {
@@ -2286,27 +2308,55 @@ public sealed partial class FldDatabase : IDisposable
         }
         else
         {
-            bytes = File.ReadAllBytes(path);
+            throw new InvalidDataException($"Run {runId} has neither a valid legacy mirror nor a complete Storage blob.");
         }
 
-        var reader = new RunReader(bytes);
+        var reader = new RunReader(cached);
         if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
             throw new InvalidDataException(
                 $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
 
-        CacheRun(index, bytes);
-        return bytes;
+        CacheRun(index, cached);
+        return cached;
+    }
+
+    private void MapRun(int index)
+    {
+        var (runId, path, cached, _, mapped) = _runs[index];
+        if (mapped is not null)
+            return;
+        MappedRunFile mappedFile = MappedRunFile.Open(path);
+        var reader = new RunReader(mappedFile.ReadOnlyMemory);
+        if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+        {
+            mappedFile.Dispose();
+            throw new InvalidDataException(
+                $"Run {runId} mirror is invalid after publication: {verify.Status} {verify.Detail}");
+        }
+
+        if (cached is not null)
+            _runCacheBytes -= cached.LongLength;
+        _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+    }
+
+    private void RetireActiveRunMappingsUnderLock()
+    {
+        foreach (var run in _runs)
+        {
+            if (run.mapped is not null)
+                _retiredRunMappings.Add(run.mapped);
+        }
     }
 
     private void CacheRun(int index, byte[] bytes)
     {
-        var (runId, path, previous, _) = _runs[index];
+        var (runId, path, previous, _, mapped) = _runs[index];
         if (previous is not null)
             _runCacheBytes -= previous.LongLength;
 
         if (bytes.LongLength > RunCacheBudgetBytes)
         {
-            _runs[index] = (runId, path, null, 0);
+            _runs[index] = (runId, path, null, 0, mapped);
             return;
         }
 
@@ -2330,17 +2380,17 @@ public sealed partial class FldDatabase : IDisposable
 
             var victim = _runs[victimIndex];
             _runCacheBytes -= victim.cached!.LongLength;
-            _runs[victimIndex] = (victim.runId, victim.path, null, 0);
+            _runs[victimIndex] = (victim.runId, victim.path, null, 0, victim.mapped);
         }
 
         if (_runCacheBytes + bytes.LongLength <= RunCacheBudgetBytes)
         {
-            _runs[index] = (runId, path, bytes, ++_runCacheClock);
+            _runs[index] = (runId, path, bytes, ++_runCacheClock, mapped);
             _runCacheBytes += bytes.LongLength;
         }
         else
         {
-            _runs[index] = (runId, path, null, 0);
+            _runs[index] = (runId, path, null, 0, mapped);
         }
     }
 
@@ -3317,6 +3367,11 @@ public sealed partial class FldDatabase : IDisposable
                 catch { /* best-effort on dispose */ }
             }
             DisposeProviderSnapshotsUnderLock();
+            foreach (var run in _runs)
+                run.mapped?.Dispose();
+            foreach (MappedRunFile mapped in _retiredRunMappings)
+                mapped.Dispose();
+            _retiredRunMappings.Clear();
             _disposed = true;
             try
             {

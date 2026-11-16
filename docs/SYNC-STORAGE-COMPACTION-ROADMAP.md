@@ -2464,6 +2464,24 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [!] This proof is still opt-in and does not enable production physical GC. Keep Tombstone, ChangeId, Receipt and Ghost reclamation disabled by default until the remaining crash/cancellation and receipt-horizon matrix is complete.
 
 
+## 2026-11-16 — demand-paged Run mappings (implementation block)
+
+The database now opens immutable legacy `.fld1` Run mirrors through read-only memory-mapped views. This avoids materializing every opened Run as a managed `byte[]`; the OS faults pages in on access. RunReader remains zero-copy over `ReadOnlyMemory<byte>`.
+
+Lifetime safety is deliberately conservative:
+- Active mappings are retained for the lifetime of the database instance.
+- Mappings replaced by Compaction or FULL_REPLACE are retired, not unmapped while returned RunReader slices may still be referenced.
+- Retired mappings are released on database Dispose. Their obsolete mirror files are left for the existing next-open orphan cleanup, avoiding Windows delete-while-mapped failures.
+- A missing or invalid mirror falls back to the authoritative Storage blob, validates the recovered Run, and uses the existing 64 MiB LRU only for that fallback managed buffer.
+- Checkpoint-created and FULL_REPLACE-installed mirrors are validated after durable publication before becoming mapped readers.
+
+This removes the full managed-array allocation on the normal legacy-mirror read path, but it does **not** impose a strict process RSS cap: memory-mapped pages are demand-paged and the OS controls residency. It also deliberately trades mapping/file-handle lifetime for safe zero-copy slice semantics. A future lease-based reader API could permit earlier unmapping, but must first remove or constrain public slices that can outlive a database operation.
+
+Validation added in this block:
+- Cross-platform Engine tests for mapped Run validation/readback, disposal, and file-handle release.
+- Full .NET CI on Windows, Ubuntu and macOS.
+- Existing Run format, recovery, compaction, FULL_REPLACE and benchmark suites remain release gates.
+
 ## 2026-11-16 — bounded Run cache implementation
 
 The first bounded-cache step is implemented on `fix/crash-consistency-outbox`:
