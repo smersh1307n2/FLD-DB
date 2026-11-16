@@ -2561,3 +2561,20 @@ The public FLD `CompactTombstones(predicate, limit)` overload is now `CompactTom
 The in-process adapter no longer receives a namespace-sized `IReadOnlySet<RecordId>` from `TombstoneGcCommitLease`. The Metadata guard now holds writer admission + transaction lock, and `TombstoneGcCommitLease.HasLiveRecordReference` performs exact per-candidate fail-closed lookups while the lease is held. The old `TryBuildLiveRecordReferenceSet` implementation is removed. The in-process adapter's tombstone method no longer takes a candidate limit and invokes one full FLD sweep.
 
 Memory no longer scales with the number of distinct live Metadata RecordIds, but the in-process path scans retained payloads per tombstone candidate. The process-isolated path scans retained payloads per candidate page. This CPU trade-off is explicitly a composed performance gate; no end-to-end bounded-memory/performance claim is made until measured.
+
+
+## 2026-11-16 direct FLD sweep benchmark — 250k completed
+
+The refreshed `TombstoneGcSweepBench` completed on Ubuntu/.NET 10 (workflow [43837671944](https://github.com/smersh1307n2/FLD-DB/actions/runs/43837671944), artifact `14212261168`, code HEAD `aa82f758bfc8d67ee14b9d892870fee2f73f3837`). It performs one direct FLD whole-namespace sweep over a single consolidated live Run plus a tombstone Run; it is not the composed BIN-SYNC/Host benchmark and does not exercise high Run counts.
+
+| Tombstones | Mean sweep time | Cumulative managed allocations |
+|---:|---:|---:|
+| 1,000 | 8.305 ms | 523 KB |
+| 10,000 | 38.391 ms | 4.42 MB |
+| 50,000 | 56.297 ms | 21.82 MB |
+| 100,000 | 125.194 ms | 43.57 MB |
+| 250,000 | 299.524 ms | 108.82 MB |
+
+The isolated child-process sampler (2 ms interval; diagnostic only) observed median deltas at 250k of **71.68 MiB working set** and **15.96 MiB managed heap**. At 50k and 100k the sampled managed-heap deltas were 15.79 and 15.92 MiB respectively, while working-set deltas were 19.14 and 30.11 MiB. This is consistent with bounded managed compaction state plus increasing residency of memory-mapped source Run pages; it is not a hard RSS bound, and the sampler can miss short peaks.
+
+Historical 250k single-rewrite baseline was about 266.6 ms / 87.94 MB cumulative allocation. The new chunked sweep is about 12% slower and 27% more cumulative allocations in this non-identical historical comparison. The new path materially changes the memory shape, but it is **not yet a performance win**. Keep optimizing Run traversal/output chunking and measure high Run counts before declaring the GC path complete. No 1M or composed Host/Metadata peak-memory result is claimed.
