@@ -459,11 +459,17 @@ public class SyncApplyTests : IDisposable
         }
 
         var lease = db.AcquireOutboxLease(Author(9));
-        var visitTask = Task.Run(() => db.VisitOutboxBatch(0, 1, lease, Block));
+        // The visitor deliberately blocks. Use dedicated workers so thread-pool
+        // injection latency cannot masquerade as the database lock being held.
+        var visitTask = Task.Factory.StartNew(
+            () => db.VisitOutboxBatch(0, 1, lease, Block),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         try
         {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
-            var writeTask = Task.Run(() => db.Put(rec, 2, "parallel"u8));
+            var writeTask = Task.Factory.StartNew(
+                () => db.Put(rec, 2, "parallel"u8),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             Assert.True(writeTask.Wait(TimeSpan.FromSeconds(5)),
                 "Outbox encoding must not hold the database commit lock.");
         }
