@@ -2606,3 +2606,13 @@ Exact source branch `fix/crash-consistency-outbox`, based on `3d670b3170a96f1fe8
 - Added Storage unit tests for LRU ordering, pinned-page budget exhaustion, generation separation, lease disposal, concurrent generation pins, positional I/O, short reads and invalid offsets.
 - These are Stage B primitives only. They are not wired into `StorageDatabase`, do not yet build or traverse a B+ tree, and do not authorize removal of v1 snapshots or `.fld1` mirrors. The production dictionary/snapshot path remains authoritative.
 - CI is the acceptance gate for this block. Stage C (immutable B+ tree builder/reader) starts only after exact-head cross-platform tests pass.
+
+
+## 2026-11-16 — Stage C immutable B+ tree builder/reader implemented
+
+- Added generation-local leaf and internal node codecs on top of the Stage B SPG2 page envelope.
+- Keys and values remain in the append-only generation data file; index pages store checked offset/length references. This preserves the existing 1 MiB key and large-value model without reducing node fan-out.
+- Added a sorted bulk builder, immutable internal levels, forward-linked leaves, point lookup and prefix cursor. Tombstones remain represented in leaf pages and are excluded from point lookup/prefix results.
+- Added randomized reference-model tests, multi-level split coverage, tombstone filtering, duplicate/unsorted-input rejection, empty-tree behavior, 1 MiB key reference and page corruption/identity tests.
+- Stage C remains a standalone primitive. No WAL integration, manifest v2, production routing, v1 migration, snapshot pin integration or physical generation deletion is enabled.
+- Dedicated benchmarks and exact-head cross-platform CI are required before performance claims or progression to production integration.
