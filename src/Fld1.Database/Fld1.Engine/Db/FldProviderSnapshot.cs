@@ -57,8 +57,9 @@ public sealed record FldProviderSnapshotValueChunk(
 /// <summary>
 /// Immutable, ordered FLD current-state view for BIN-SYNC provider snapshots.
 /// The snapshot retains immutable Run buffers referenced by a durable generation
-/// manifest plus a compact snapshot Overlay Run. Only the RecordId index is
-/// materialized eagerly; field payloads are resolved and copied for requested pages.
+/// manifest plus a compact snapshot Overlay Run. RecordIds are enumerated by a
+/// bounded k-way merge over the sorted source Run cluster indexes; no namespace-wide
+/// RecordId array or deduplication set is retained.
 /// </summary>
 public sealed class FldProviderSnapshot : IDisposable
 {
@@ -401,18 +402,19 @@ public sealed class FldProviderSnapshot : IDisposable
             return false;
         }
 
+        byte[] currentRecordId = recordId!;
         var fields = new HashSet<ushort>();
-        ulong low = BinaryPrimitives.ReadUInt64LittleEndian(recordId);
-        ulong high = BinaryPrimitives.ReadUInt64LittleEndian(recordId.AsSpan(8));
+        ulong low = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId);
+        ulong high = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId.AsSpan(8));
         if (_overlayFieldsByRecord!.TryGetValue((low, high), out ushort[]? overlayFields))
         {
             foreach (ushort fieldId in overlayFields)
                 fields.Add(fieldId);
         }
         foreach (RunReader run in _runs!)
-            run.ScanFieldIds(recordId, fieldId => { fields.Add(fieldId); });
+            run.ScanFieldIds(currentRecordId, fieldId => { fields.Add(fieldId); });
 
-        _currentRecordId = recordId;
+        _currentRecordId = currentRecordId;
         _currentFieldIds = fields.Order().ToArray();
         _fieldIndex = 0;
         return true;
