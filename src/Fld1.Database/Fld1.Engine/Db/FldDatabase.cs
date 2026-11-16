@@ -2280,22 +2280,15 @@ public sealed partial class FldDatabase : IDisposable
             return cached;
         }
 
-        // The compatibility mirror is immutable once published. Map it read-only so
-        // the OS pages data on demand instead of allocating a managed array per Run.
-        if (File.Exists(path))
+        // The Storage blob is authoritative. A mapped compatibility mirror is accepted
+        // only when its whole-file SHA-256 matches the durable blob catalog digest.
+        MappedRunFile? mappedFile = TryOpenValidatedRunMapping(runId, path);
+        if (mappedFile is not null)
         {
-            MappedRunFile mappedFile = MappedRunFile.Open(path);
-            var mappedReader = new RunReader(mappedFile.ReadOnlyMemory);
-            if (mappedReader.TryValidate(out var mappedVerify) &&
-                mappedReader.NamespaceId == _namespaceId)
-            {
-                _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
-                return mappedFile.ReadOnlyMemory;
-            }
-            mappedFile.Close();
+            _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+            return mappedFile.ReadOnlyMemory;
         }
 
-        // Missing/corrupt legacy mirror: recover from the authoritative Storage blob.
         Guid blobId = RunBlobId(runId);
         if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
         {
@@ -2308,7 +2301,8 @@ public sealed partial class FldDatabase : IDisposable
         }
         else
         {
-            throw new InvalidDataException($"Run {runId} has neither a valid legacy mirror nor a complete Storage blob.");
+            throw new InvalidDataException(
+                $"Run {runId} has no valid compatibility mirror and no authoritative Storage blob.");
         }
 
         var reader = new RunReader(cached);
@@ -2316,8 +2310,55 @@ public sealed partial class FldDatabase : IDisposable
             throw new InvalidDataException(
                 $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
 
-        CacheRun(index, cached);
-        return cached;
+        // Repair a missing or stale mirror from the digest-verified Storage blob, then
+        // map the repaired immutable file instead of retaining the full managed array.
+        WriteRunAtomically(path, cached);
+        MapRun(index);
+        return _runs[index].mapped!.ReadOnlyMemory;
+    }
+
+    private MappedRunFile? TryOpenValidatedRunMapping(ulong runId, string path)
+    {
+        if (!File.Exists(path))
+            return null;
+
+        MappedRunFile mappedFile = MappedRunFile.Open(path);
+        try
+        {
+            var reader = new RunReader(mappedFile.ReadOnlyMemory);
+            if (!reader.TryValidate(out _) || reader.NamespaceId != _namespaceId)
+            {
+                mappedFile.Close();
+                return null;
+            }
+
+            Guid blobId = RunBlobId(runId);
+            if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
+            {
+                using (blobReader)
+                {
+                    byte[] actualDigest = System.Security.Cryptography.SHA256.HashData(
+                        mappedFile.ReadOnlyMemory.Span);
+                    if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                        actualDigest, blobReader.Digest))
+                    {
+                        mappedFile.Close();
+                        return null;
+                    }
+                }
+            }
+            else if (_runBlobStore.ContainsBlob(blobId))
+            {
+                throw new InvalidDataException($"Run {runId} references an incomplete Storage blob.");
+            }
+
+            return mappedFile;
+        }
+        catch
+        {
+            mappedFile.Close();
+            throw;
+        }
     }
 
     private void MapRun(int index)
@@ -2327,15 +2368,9 @@ public sealed partial class FldDatabase : IDisposable
             return;
         try
         {
-            MappedRunFile mappedFile = MappedRunFile.Open(path);
-            var reader = new RunReader(mappedFile.ReadOnlyMemory);
-            if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
-            {
-                mappedFile.Close();
-                throw new InvalidDataException(
-                    $"Run {runId} mirror is invalid after publication: {verify.Status} {verify.Detail}");
-            }
-
+            MappedRunFile? mappedFile = TryOpenValidatedRunMapping(runId, path);
+            if (mappedFile is null)
+                throw new InvalidDataException($"Run {runId} mirror is missing or does not match its Storage blob.");
             if (cached is not null)
                 _runCacheBytes -= cached.LongLength;
             _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
