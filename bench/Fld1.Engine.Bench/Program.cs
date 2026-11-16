@@ -23,6 +23,12 @@ if (args.Contains("--run-mapping-only", StringComparer.Ordinal))
     return;
 }
 
+if (args.Contains("--storage-index-only", StringComparer.Ordinal))
+{
+    BenchmarkRunner.Run<StorageIndexBench>();
+    return;
+}
+
 if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
 {
     // Each invocation compacts one bounded page from a freshly seeded on-disk namespace.
@@ -87,7 +93,6 @@ public class EngineBench
         return _db.TryGet(_rec, 1, out _);
     }
 }
-
 
 [MemoryDiagnoser]
 public class OutboxBench
@@ -158,4 +163,3 @@ public class OutboxBench
         return true;
     }
 }
-
