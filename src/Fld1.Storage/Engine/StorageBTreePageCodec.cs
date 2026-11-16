@@ -145,20 +145,23 @@ internal static class StorageBTreePageCodec
 
     public static bool TryFindLeafEntry(ReadOnlyMemory<byte> bytes,ulong generation,ulong id,
         ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,byte[]> readKey,out StorageTreeLeafEntry entry)
+        => TryFindLeafEntry(DecodeLeafView(bytes,generation,id),target,readKey,out entry);
+
+    public static bool TryFindLeafEntry(StorageBTreeLeafPageView leaf,
+        ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,byte[]> readKey,out StorageTreeLeafEntry entry)
     {
-        var page=StoragePageCodec.Decode(bytes,generation,id);
-        if(page.Kind!=StoragePageKind.Leaf)throw new InvalidDataException("Expected B+ tree leaf.");
-        var p=page.Payload.Span;int n=ReadHeader(p,LeafEntry,false);int lo=0,hi=n;
+        ArgumentNullException.ThrowIfNull(readKey);
+        int lo=0,hi=leaf.Count;
         while(lo<hi)
         {
-            int mid=lo+(hi-lo)/2;var candidate=ReadLeafEntry(p,mid);
+            int mid=lo+(hi-lo)/2;var candidate=leaf.GetEntry(mid);
             byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
             if(key.Length!=candidate.Key.Length)throw new InvalidDataException("Key length mismatch.");
             if(key.AsSpan().SequenceCompareTo(target)<0)lo=mid+1;else hi=mid;
         }
-        if(lo<n)
+        if(lo<leaf.Count)
         {
-            var candidate=ReadLeafEntry(p,lo);byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
+            var candidate=leaf.GetEntry(lo);byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
             if(key.Length!=candidate.Key.Length)throw new InvalidDataException("Key length mismatch.");
             if(key.AsSpan().SequenceEqual(target)){entry=candidate;return true;}
         }
@@ -240,8 +243,12 @@ internal static class StorageBTreeBuilder
 
 internal sealed class StorageBTreeReader
 {
+    private const int ValidationCacheCapacity = 4096;
     private readonly ulong _generation,_root;private readonly Func<ulong,byte[]> _readPage;
     private readonly Func<StorageTreeKeyReference,byte[]> _readKey;
+    private readonly object _validationGate = new();
+    private readonly HashSet<ulong> _validatedPages = new();
+    private readonly Queue<ulong> _validationOrder = new();
     public StorageBTreeReader(ulong generation,ulong root,Func<ulong,byte[]> readPage,Func<StorageTreeKeyReference,byte[]> readKey)
     {
         if(generation==0)throw new ArgumentOutOfRangeException(nameof(generation));
@@ -253,7 +260,8 @@ internal sealed class StorageBTreeReader
         if(key.IsEmpty)throw new ArgumentException("Empty key.",nameof(key));
         if(_root==0){value=default;return false;}
         ulong leafId=FindLeaf(key);
-        if(StorageBTreePageCodec.TryFindLeafEntry(_readPage(leafId),_generation,leafId,key,_readKey,out var entry)
+        var leaf=ReadLeafView(leafId);
+        if(StorageBTreePageCodec.TryFindLeafEntry(leaf,key,_readKey,out var entry)
             && !entry.Value.IsTombstone){value=entry.Value;return true;}
         value=default;return false;
     }
@@ -264,7 +272,24 @@ internal sealed class StorageBTreeReader
         ulong id=FindLeaf(prefix.Span);var leaf=ReadLeafView(id);return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),leaf);
     }
     internal StorageBTreeLeafPageView ReadLeafView(ulong id)
-        => StorageBTreePageCodec.DecodeLeafView(_readPage(id),_generation,id);
+    {
+        byte[] bytes=_readPage(id)??throw new InvalidDataException("Page reader returned null.");
+        var leaf=StorageBTreePageCodec.DecodeLeafView(bytes,_generation,id);
+        if(!IsValidated(id))
+        {
+            byte[]? previous=null;
+            for(int i=0;i<leaf.Count;i++)
+            {
+                var entry=leaf.GetEntry(i);
+                byte[] current=ReadKey(entry.Key);
+                if(previous is not null && previous.AsSpan().SequenceCompareTo(current)>=0)
+                    throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
+                previous=current;
+            }
+            MarkValidated(id);
+        }
+        return leaf;
+    }
     internal byte[] ReadKey(StorageTreeKeyReference r){byte[] key=_readKey(r)??throw new InvalidDataException("Key reader returned null.");if(key.Length!=r.Length)throw new InvalidDataException("Key length mismatch.");return key;}
     internal bool HasPrefix(ReadOnlySpan<byte> key,ReadOnlySpan<byte> prefix)=>key.StartsWith(prefix);
     private ulong FindLeaf(ReadOnlySpan<byte> key)
@@ -275,9 +300,36 @@ internal sealed class StorageBTreeReader
             byte[] bytes=_readPage(id)??throw new InvalidDataException("Page reader returned null.");
             var view=StoragePageCodec.Decode(bytes,_generation,id);
             if(view.Kind==StoragePageKind.Leaf)return id;
+            if(!IsValidated(id))
+            {
+                var node=StorageBTreePageCodec.DecodeInternal(view);
+                var children=new HashSet<ulong>{node.FirstChild};
+                byte[]? previous=null;
+                foreach(var separator in node.Separators)
+                {
+                    byte[] current=ReadKey(separator.FirstKey);
+                    if(previous is not null && previous.AsSpan().SequenceCompareTo(current)>=0)
+                        throw new InvalidDataException("B+ tree internal separators are not strictly ordered.");
+                    if(!children.Add(separator.PageId))
+                        throw new InvalidDataException("B+ tree internal page contains a duplicate child reference.");
+                    previous=current;
+                }
+                MarkValidated(id);
+            }
             id=StorageBTreePageCodec.SelectInternalChild(view,key,ReadKey);
         }
         throw new InvalidDataException("B+ tree depth exceeds the supported maximum or contains a cycle.");
+    }
+    private bool IsValidated(ulong id){lock(_validationGate)return _validatedPages.Contains(id);}
+    private void MarkValidated(ulong id)
+    {
+        lock(_validationGate)
+        {
+            if(!_validatedPages.Add(id))return;
+            _validationOrder.Enqueue(id);
+            while(_validationOrder.Count>ValidationCacheCapacity)
+                _validatedPages.Remove(_validationOrder.Dequeue());
+        }
     }
     private int LowerBound(StorageBTreeLeafPageView leaf,ReadOnlySpan<byte> key)
     {
