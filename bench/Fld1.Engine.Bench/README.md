@@ -27,7 +27,7 @@ dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj -c Release
 - `CachedSnapshotAndReadOneEntry`: measures the cached snapshot path after the sorted index has already been constructed.
 - `WarmPointLookup`: measures a point lookup against the already-open in-memory dictionary.
 
-Each entry uses an 8-byte ordered key and a 128-byte value. Fixture creation/checkpointing is outside measured operations. BenchmarkDotNet's `MemoryDiagnoser` reports cumulative managed allocations per operation.
+Each entry uses an 8-byte ordered key and a 128-byte value. Fixture creation/checkpointing is outside measured operations. Fresh-open cases release the fixture database's process-local WAL writer fence in `IterationSetup` and reacquire it in `IterationCleanup`; this keeps the measured open exclusive without including fixture lock handoff in the measured operation. BenchmarkDotNet's `MemoryDiagnoser` reports cumulative managed allocations per operation. The workflow runs `eng/verify-storage-index-benchmark.py`, which rejects missing/`NA` results and requires the full 4 × 3 matrix before an artifact can be published as successful.
 
 **Interpretation:** this is an explicit baseline of the current dictionary + full sorted-index architecture. It is not a bounded-memory benchmark and it does not demonstrate an out-of-core implementation. The measured allocations are not peak live heap or process RSS. The purpose is to quantify cardinality scaling before replacing the monolithic index, and to prevent claiming a memory improvement without comparing the same workload on the replacement engine.
 
@@ -101,6 +101,12 @@ The child-process diagnostic again produced eight samples per cardinality. At 25
 
 This remains an FLD-only physical compaction measurement. The signed Metadata proof + real Host IPC reference scan + coordinator scheduling benchmark is still open and is tracked in BIN-SYNC Roadmap V3 §1.168.
 
+
+### Storage index benchmark harness correction (2026-11-16)
+
+The first green Storage index benchmark workflow (run `43814169482`, SHA `4e7f3dfc9efe534b59dbff14b1e3d92fe7299949`) was **not a valid full baseline**. Its six fresh-open cases were reported as `NA`: the benchmark fixture kept `StorageDatabase` open from `GlobalSetup`, so the measured fresh open collided with the process-local WAL writer fence (`WAL partition is already open for writing`). The workflow initially uploaded the report without checking for missing measurements. Only the six warm/cached cases yielded values; those values are not a substitute for the full matrix.
+
+The harness now releases the fixture database before each fresh-open measurement and reopens it after the iteration. A report verifier requires all 12 method/cardinality combinations to have non-`NA` mean and allocation fields; the workflow fails before artifact publication if any case is missing. The earlier run is retained as a diagnostic of the harness defect and must not be used as a before/after performance baseline. Await the corrected workflow artifact before recording baseline numbers.
 
 ### Demand-paged Run mapping benchmark
 
