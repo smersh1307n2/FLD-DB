@@ -23,6 +23,10 @@ public class StorageIndexBench
     private Dictionary<ulong, byte[]> _treePages = null!;
     private StorageBTreeReader _treeReader = null!;
     private ulong _treeRoot;
+    private StorageBTreeReader _pressureReader = null!;
+    private StoragePageCache _treePageCache = null!;
+    private StorageBTreeReader _largeValueReader = null!;
+    private int _randomProbe;
 
 
     [Params(1_000, 10_000, 100_000)]
@@ -77,6 +81,20 @@ public class StorageIndexBench
             key => _treeKeys[key.Offset]);
         if (!_treeReader.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("B+ tree benchmark fixture failed validation.");
+
+        _treePageCache = new StoragePageCache(StoragePageCodec.PageSize * 4L);
+        _pressureReader = new StorageBTreeReader(1, _treeRoot, ReadCachedTreePage,
+            key => _treeKeys[key.Offset]);
+
+        var largeValuePages = new Dictionary<ulong, byte[]>();
+        ulong largePageId = 1;
+        StorageTreeBuildEntry[] largeValueEntries = _treeEntries
+            .Select(entry => new StorageTreeBuildEntry(entry.Key, entry.KeyOffset, entry.ValueOffset, 1024 * 1024, false))
+            .ToArray();
+        ulong largeRoot = StorageBTreeBuilder.Build(3, largeValueEntries, () => largePageId++,
+            (pageId, page) => largeValuePages.Add(pageId, page));
+        _largeValueReader = new StorageBTreeReader(3, largeRoot, pageId => largeValuePages[pageId],
+            key => _treeKeys[key.Offset]);
     }
 
     private static void CopyDirectory(string source, string destination)
@@ -86,6 +104,12 @@ public class StorageIndexBench
             Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
         foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
             File.Copy(file, Path.Combine(destination, Path.GetRelativePath(source, file)));
+    }
+
+    private byte[] ReadCachedTreePage(ulong pageId)
+    {
+        using var lease = _treePageCache.Acquire(new StoragePageKey(1, pageId), () => _treePages[pageId]);
+        return lease.Page.ToArray();
     }
 
     [GlobalCleanup]
@@ -157,5 +181,31 @@ public class StorageIndexBench
         ulong root = StorageBTreeBuilder.Build(2, _treeEntries, () => nextPageId++,
             (pageId, page) => pages.Add(pageId, page));
         return checked(pages.Count + (int)root);
+    }
+
+    [Benchmark]
+    public int BTreeRandomPointLookup()
+    {
+        _randomProbe = (_randomProbe + 7919) % EntryCount;
+        if (!_treeReader.TryGet(_keys[_randomProbe], out StorageTreeValueReference value))
+            throw new InvalidDataException("B+ tree random lookup missed the fixture.");
+        return value.Length;
+    }
+
+    [Benchmark]
+    public int BTreePageCachePressureLookup()
+    {
+        _randomProbe = (_randomProbe + 3571) % EntryCount;
+        if (!_pressureReader.TryGet(_keys[_randomProbe], out StorageTreeValueReference value))
+            throw new InvalidDataException("B+ tree cache-pressure lookup missed the fixture.");
+        return value.Length;
+    }
+
+    [Benchmark]
+    public int BTreeLargeValueReferenceLookup()
+    {
+        if (!_largeValueReader.TryGet(_keys[_probeIndex], out StorageTreeValueReference value))
+            throw new InvalidDataException("B+ tree large-value lookup missed the fixture.");
+        return value.Length;
     }
 }
