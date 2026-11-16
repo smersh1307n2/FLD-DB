@@ -6,51 +6,50 @@ namespace Fld1.Engine.Db.Tests;
 public sealed class FldDatabaseStreamingCompactionTests
 {
     [Fact]
-    public void Compaction_merges_multiple_source_runs_and_publishes_multiple_bounded_output_runs()
+    public void Compaction_merges_same_record_across_source_runs_and_splits_output_run()
     {
         const uint namespaceId = 0x781;
-        const int recordCount = 5_000;
+        const int fieldCount = 5_000;
         const int commitPageSize = 1_000;
         string root = Path.Combine(
             Path.GetTempPath(), "fld-streaming-compaction-" + Guid.NewGuid().ToString("N"));
-        var records = new (byte[] RecordId, byte[] Value)[recordCount];
+        byte[] recordId = FldDatabase.NewRecordId();
+        var fields = new (ushort FieldId, byte[] Value)[fieldCount];
 
         try
         {
-            for (int i = 0; i < recordCount; i++)
-            {
-                records[i] = (FldDatabase.NewRecordId(), BitConverter.GetBytes(i));
-            }
+            for (int i = 0; i < fieldCount; i++)
+                fields[i] = (checked((ushort)(i + 1)), BitConverter.GetBytes(i));
 
             using (var database = FldDatabase.Open(root, namespaceId, Id(0x71)))
             {
-                for (int offset = 0; offset < recordCount; offset += commitPageSize)
+                // Each checkpoint creates another immutable source Run containing
+                // fields for the same RecordId. The merged record exceeds one output
+                // chunk, so the result has two Runs with the same record bounds.
+                for (int offset = 0; offset < fieldCount; offset += commitPageSize)
                 {
-                    int end = Math.Min(recordCount, offset + commitPageSize);
+                    int end = Math.Min(fieldCount, offset + commitPageSize);
                     for (int i = offset; i < end; i++)
-                        database.Put(records[i].RecordId, 7, records[i].Value);
+                        database.Put(recordId, fields[i].FieldId, fields[i].Value);
 
                     Assert.NotEqual(0UL, database.Commit());
                     Assert.NotEqual(0UL, database.Checkpoint());
                 }
 
-                // 5,000 live fields exceed the per-output-Run field target. The return
-                // value identifies the final immutable output Run; all chunks are made
-                // visible by the same Manifest publication.
                 Assert.NotEqual(0UL, database.Compact());
 
-                foreach (var item in records)
+                foreach (var field in fields)
                 {
-                    Assert.True(database.TryGetBytes(item.RecordId, 7, out byte[]? actual));
-                    Assert.Equal(item.Value, actual);
+                    Assert.True(database.TryGetBytes(recordId, field.FieldId, out byte[]? actual));
+                    Assert.Equal(field.Value, actual);
                 }
             }
 
             using var reopened = FldDatabase.Open(root, namespaceId, Id(0x71));
-            foreach (var item in records)
+            foreach (var field in fields)
             {
-                Assert.True(reopened.TryGetBytes(item.RecordId, 7, out byte[]? actual));
-                Assert.Equal(item.Value, actual);
+                Assert.True(reopened.TryGetBytes(recordId, field.FieldId, out byte[]? actual));
+                Assert.Equal(field.Value, actual);
             }
         }
         finally
