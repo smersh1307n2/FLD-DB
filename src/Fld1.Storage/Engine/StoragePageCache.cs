@@ -30,6 +30,12 @@ internal sealed class StoragePageCache
     public StoragePageCacheLease Acquire(StoragePageKey key, Func<byte[]> loadPage)
     {
         ArgumentNullException.ThrowIfNull(loadPage);
+        return Acquire(key, _ => loadPage());
+    }
+
+    public StoragePageCacheLease Acquire(StoragePageKey key, Func<ulong, byte[]> loadPage)
+    {
+        ArgumentNullException.ThrowIfNull(loadPage);
         if (key.Generation == 0) throw new ArgumentOutOfRangeException(nameof(key));
         if (key.PageId == 0) throw new ArgumentOutOfRangeException(nameof(key));
 
@@ -44,7 +50,7 @@ internal sealed class StoragePageCache
 
             // Loading under the cache lock prevents duplicate concurrent misses and
             // guarantees that the budget check and insertion are one atomic operation.
-            byte[] page = loadPage() ?? throw new InvalidDataException("Storage page loader returned null.");
+            byte[] page = loadPage(key.PageId) ?? throw new InvalidDataException("Storage page loader returned null.");
             if (page.Length != StoragePageCodec.PageSize)
                 throw new InvalidDataException($"Storage page loader must return exactly {StoragePageCodec.PageSize} bytes.");
 

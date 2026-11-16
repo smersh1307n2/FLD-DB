@@ -52,8 +52,9 @@ internal static class StorageIndexMillionScale
         long workingSetAfterBuild = process.WorkingSet64;
 
         var pageCache = new StoragePageCache(StoragePageCodec.PageSize * 2048L);
+        Func<ulong, byte[]> pageLoader = pageId => pages[pageId];
         var reader = new StorageBTreeReader(1, root,
-            pageId => pageCache.Acquire(new StoragePageKey(1, pageId), () => pages[pageId]),
+            pageId => pageCache.Acquire(new StoragePageKey(1, pageId), pageLoader),
             reference => new ReadOnlyMemory<byte>(keyBytes, checked((int)reference.Offset), reference.Length));
         byte[] lookupKey = new byte[KeyLength];
         var lookupWatch = Stopwatch.StartNew();

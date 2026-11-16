@@ -128,6 +128,40 @@ public sealed class StorageBTreeTests
 
 
 
+
+    [Fact]
+    public void Prefix_cursor_rejects_out_of_order_leaf_chain_boundary()
+    {
+        byte[][] keys =
+        {
+            new byte[] { 0xAA, 0x00 },
+            new byte[] { 0xAA, 0x01 },
+            new byte[] { 0xAA, 0x02 },
+            new byte[] { 0xAA, 0x03 }
+        };
+        var pages = new Dictionary<ulong, byte[]>
+        {
+            [1] = StorageBTreePageCodec.EncodeLeaf(21, 1, 2, new[]
+            {
+                new StorageTreeLeafEntry(new(1, 2), new(0, 1, false)),
+                new StorageTreeLeafEntry(new(2, 2), new(1, 1, false))
+            }),
+            [2] = StorageBTreePageCodec.EncodeLeaf(21, 2, 0, new[]
+            {
+                new StorageTreeLeafEntry(new(0, 2), new(2, 1, false)),
+                new StorageTreeLeafEntry(new(3, 2), new(3, 1, false))
+            }),
+            [3] = StorageBTreePageCodec.EncodeInternal(21, 3, 1, Array.Empty<StorageTreeChild>())
+        };
+        var reader = new StorageBTreeReader(21, 3, id => pages[id],
+            reference => new ReadOnlyMemory<byte>(keys[checked((int)reference.Offset)]));
+
+        using var cursor = reader.OpenPrefixCursor(new byte[] { 0xAA });
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.Throws<InvalidDataException>(() => cursor.TryReadNext(out _));
+    }
+
     [Fact]
     public void Reader_hot_key_cache_serves_repeat_lookup_without_page_reads()
     {
