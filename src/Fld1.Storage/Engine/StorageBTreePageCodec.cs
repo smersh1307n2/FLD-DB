@@ -8,6 +8,25 @@ internal readonly record struct StorageTreeBuildEntry(ReadOnlyMemory<byte> Key,u
 internal readonly record struct StorageTreeLeafEntry(StorageTreeKeyReference Key,StorageTreeValueReference Value);
 internal readonly record struct StorageTreeChild(ulong PageId,StorageTreeKeyReference FirstKey);
 internal sealed record StorageTreeLeafPage(ulong NextPageId,StorageTreeLeafEntry[] Entries);
+internal readonly struct StorageBTreeLeafPageView
+{
+    private readonly ReadOnlyMemory<byte> _payload;
+    public ulong NextPageId { get; }
+    public int Count { get; }
+
+    public StorageBTreeLeafPageView(ReadOnlyMemory<byte> payload, ulong nextPageId, int count)
+    {
+        _payload = payload;
+        NextPageId = nextPageId;
+        Count = count;
+    }
+
+    public StorageTreeLeafEntry GetEntry(int index)
+    {
+        if ((uint)index >= (uint)Count) throw new ArgumentOutOfRangeException(nameof(index));
+        return StorageBTreePageCodec.ReadLeafEntry(_payload.Span, index);
+    }
+}
 internal sealed record StorageTreeInternalPage(ulong FirstChild,StorageTreeChild[] Separators);
 
 internal static class StorageBTreePageCodec
@@ -83,6 +102,15 @@ internal static class StorageBTreePageCodec
         return child;
     }
 
+    public static StorageBTreeLeafPageView DecodeLeafView(ReadOnlyMemory<byte> bytes,ulong generation,ulong id)
+    {
+        var page=StoragePageCodec.Decode(bytes,generation,id);
+        if(page.Kind!=StoragePageKind.Leaf)throw new InvalidDataException("Expected B+ tree leaf.");
+        var payload=page.Payload.Span;int count=ReadHeader(payload,LeafEntry,false);
+        ulong next=BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(4,8));
+        return new StorageBTreeLeafPageView(page.Payload,next,count);
+    }
+
     public static StorageTreeLeafPage DecodeLeaf(ReadOnlyMemory<byte> bytes,ulong generation,ulong id)
     {
         var page=StoragePageCodec.Decode(bytes,generation,id);
@@ -137,7 +165,7 @@ internal static class StorageBTreePageCodec
         entry=default;return false;
     }
 
-    private static StorageTreeLeafEntry ReadLeafEntry(ReadOnlySpan<byte> p,int index)
+    internal static StorageTreeLeafEntry ReadLeafEntry(ReadOnlySpan<byte> p,int index)
     {
         int o=checked(Header+index*LeafEntry);var key=ReadKey(p.Slice(o,12));o+=12;
         ulong valueOffset=BinaryPrimitives.ReadUInt64LittleEndian(p.Slice(o,8));
@@ -233,10 +261,10 @@ internal sealed class StorageBTreeReader
     {
         if(prefix.IsEmpty)throw new ArgumentException("Empty prefix.",nameof(prefix));
         if(_root==0)return new(this,0,0,prefix.ToArray());
-        ulong id=FindLeaf(prefix.Span);var leaf=ReadLeaf(id);return new(this,id,LowerBound(leaf.Entries,prefix.Span),prefix.ToArray());
+        ulong id=FindLeaf(prefix.Span);var leaf=ReadLeafView(id);return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),leaf);
     }
-    internal StorageTreeLeafPage ReadLeaf(ulong id)
-        => StorageBTreePageCodec.DecodeLeaf(_readPage(id),_generation,id);
+    internal StorageBTreeLeafPageView ReadLeafView(ulong id)
+        => StorageBTreePageCodec.DecodeLeafView(_readPage(id),_generation,id);
     internal byte[] ReadKey(StorageTreeKeyReference r){byte[] key=_readKey(r)??throw new InvalidDataException("Key reader returned null.");if(key.Length!=r.Length)throw new InvalidDataException("Key length mismatch.");return key;}
     internal bool HasPrefix(ReadOnlySpan<byte> key,ReadOnlySpan<byte> prefix)=>key.StartsWith(prefix);
     private ulong FindLeaf(ReadOnlySpan<byte> key)
@@ -251,9 +279,16 @@ internal sealed class StorageBTreeReader
         }
         throw new InvalidDataException("B+ tree depth exceeds the supported maximum or contains a cycle.");
     }
-    private int LowerBound(StorageTreeLeafEntry[] entries,ReadOnlySpan<byte> key)
+    private int LowerBound(StorageBTreeLeafPageView leaf,ReadOnlySpan<byte> key)
     {
-        int lo=0,hi=entries.Length;while(lo<hi){int mid=lo+(hi-lo)/2;if(ReadKey(entries[mid].Key).AsSpan().SequenceCompareTo(key)<0)lo=mid+1;else hi=mid;}return lo;
+        int lo=0,hi=leaf.Count;
+        while(lo<hi)
+        {
+            int mid=lo+(hi-lo)/2;
+            if(ReadKey(leaf.GetEntry(mid).Key).AsSpan().SequenceCompareTo(key)<0)lo=mid+1;
+            else hi=mid;
+        }
+        return lo;
     }
 }
 
@@ -261,8 +296,12 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
     private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
-    private StorageTreeLeafPage? _leafPage;
-    internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix){_reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;}
+    private StorageBTreeLeafPageView? _leafPage;
+    internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix,StorageBTreeLeafPageView? initialLeaf=null)
+    {
+        _reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;
+        _leafPage=initialLeaf;_entered=initialLeaf.HasValue;
+    }
     public bool TryReadNext(out StorageTreeEntry entry)
     {
         ObjectDisposedException.ThrowIf(_disposed,this);
@@ -270,12 +309,12 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
         {
             if(!_entered)
             {
-                _leafPage=_reader.ReadLeaf(_page);_entered=true;
+                _leafPage=_reader.ReadLeafView(_page);_entered=true;
             }
-            var leaf=_leafPage!;
-            while(_index<leaf.Entries.Length)
+            var leaf=_leafPage!.Value;
+            while(_index<leaf.Count)
             {
-                var e=leaf.Entries[_index++];byte[] key=_reader.ReadKey(e.Key);
+                var e=leaf.GetEntry(_index++);byte[] key=_reader.ReadKey(e.Key);
                 if(_lastKey is not null&&_lastKey.AsSpan().SequenceCompareTo(key)>=0)throw new InvalidDataException("Leaf chain ordering error.");
                 _lastKey=key;if(!_reader.HasPrefix(key,_prefix)){_finished=true;break;}
                 if(!e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
