@@ -167,11 +167,7 @@ internal sealed class StorageBTreeReader
         ulong id=FindLeaf(prefix.Span);var leaf=ReadLeaf(id);return new(this,id,LowerBound(leaf.Entries,prefix.Span),prefix.ToArray());
     }
     internal StorageTreeLeafPage ReadLeaf(ulong id)
-    {
-        var leaf=StorageBTreePageCodec.DecodeLeaf(_readPage(id),_generation,id);byte[]? prior=null;
-        foreach(var e in leaf.Entries){byte[] key=ReadKey(e.Key);if(prior is not null&&prior.AsSpan().SequenceCompareTo(key)>=0)throw new InvalidDataException("Leaf keys are not ordered.");prior=key;}
-        return leaf;
-    }
+        => StorageBTreePageCodec.DecodeLeaf(_readPage(id),_generation,id);
     internal byte[] ReadKey(StorageTreeKeyReference r){byte[] key=_readKey(r)??throw new InvalidDataException("Key reader returned null.");if(key.Length!=r.Length)throw new InvalidDataException("Key length mismatch.");return key;}
     internal bool HasPrefix(ReadOnlySpan<byte> key,ReadOnlySpan<byte> prefix)=>key.StartsWith(prefix);
     private ulong FindLeaf(ReadOnlySpan<byte> key)
@@ -182,13 +178,15 @@ internal sealed class StorageBTreeReader
             if(!visited.Add(id))throw new InvalidDataException("Internal page cycle.");
             byte[] bytes=_readPage(id)??throw new InvalidDataException("Page reader returned null.");
             var view=StoragePageCodec.Decode(bytes,_generation,id);if(view.Kind==StoragePageKind.Leaf)return id;
-            var node=StorageBTreePageCodec.DecodeInternal(bytes,_generation,id);ulong child=node.FirstChild;byte[]? prior=null;
-            foreach(var sep in node.Separators)
+            var node=StorageBTreePageCodec.DecodeInternal(bytes,_generation,id);
+            int lo=0,hi=node.Separators.Length;
+            while(lo<hi)
             {
-                byte[] sk=ReadKey(sep.FirstKey);if(prior is not null&&prior.AsSpan().SequenceCompareTo(sk)>=0)throw new InvalidDataException("Separators are not ordered.");
-                prior=sk;if(key.SequenceCompareTo(sk)<0)break;child=sep.PageId;
+                int mid=lo+(hi-lo)/2;
+                if(key.SequenceCompareTo(ReadKey(node.Separators[mid].FirstKey))>=0)lo=mid+1;
+                else hi=mid;
             }
-            id=child;
+            id=lo==0?node.FirstChild:node.Separators[lo-1].PageId;
         }
     }
     private int LowerBound(StorageTreeLeafEntry[] entries,ReadOnlySpan<byte> key)
