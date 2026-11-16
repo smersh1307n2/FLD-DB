@@ -268,6 +268,58 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcProtocol.DecodeTombstoneGcResponse(response, limit);
     }
 
+    public async Task<Guid> BeginTombstoneGcApprovalSpoolAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.BeginTombstoneGcApprovalSpool,
+            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeGcLeaseToken(response);
+    }
+
+    public async Task AppendTombstoneGcApprovalSpoolAsync(
+        Guid token, IReadOnlyList<FldTombstoneGcCandidate> candidates,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolAppend(token, candidates);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AppendTombstoneGcApprovalSpool,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("Tombstone-GC approval-spool append response must be empty.");
+    }
+
+    public async Task<(int Count, byte[] Digest)> SealTombstoneGcApprovalSpoolAsync(
+        Guid token, CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeGcLeaseToken(token);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.SealTombstoneGcApprovalSpool,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolSealResponse(response);
+    }
+
+    public async Task<int> CommitTombstoneGcApprovalSpoolAsync(
+        Guid token, CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeGcLeaseToken(token);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.CommitTombstoneGcApprovalSpool,
+            payload, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolCommitResponse(response);
+    }
+
+    public async Task AbortTombstoneGcApprovalSpoolAsync(
+        Guid token, CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeGcLeaseToken(token);
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AbortTombstoneGcApprovalSpool,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("Tombstone-GC approval-spool abort response must be empty.");
+    }
+
     /// <summary>
     /// Appends provider-owned local drafts with stable ChangeId, HLC and author epoch.
     /// Retry with the same OperationId, ClientSequence and exact mutation payload.
