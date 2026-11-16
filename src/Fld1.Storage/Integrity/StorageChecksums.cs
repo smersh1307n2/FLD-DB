@@ -40,9 +40,9 @@ internal static class StorageChecksums
     private static uint[] CreateTable(uint polynomial)
     {
         var table = new uint[256];
-        for (uint i = 0; i < table.Length; i++)
+        for (int i = 0; i < table.Length; i++)
         {
-            uint value = i;
+            uint value = (uint)i;
             for (int bit = 0; bit < 8; bit++)
                 value = (value >> 1) ^ ((value & 1) == 0 ? 0u : polynomial);
             table[i] = value;
