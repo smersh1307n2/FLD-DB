@@ -56,6 +56,33 @@ public sealed class StorageBTreeTests
     }
 
 
+
+    [Fact]
+    public void Prefix_cursor_holds_cache_lease_until_disposed()
+    {
+        byte[] key={0x01};
+        var pages=new Dictionary<ulong,byte[]>();
+        ulong next=1;
+        ulong root=StorageBTreeBuilder.Build(11,new[]
+        {
+            new StorageTreeBuildEntry(key,1,1,1,false)
+        },()=>next++,(id,page)=>pages.Add(id,page));
+        var cache=new StoragePageCache(StoragePageCodec.PageSize);
+        var reader=new StorageBTreeReader(11,root,
+            id=>cache.Acquire(new StoragePageKey(11,id),()=>pages[id]),
+            _=>key);
+        var cursor=reader.OpenPrefixCursor(key);
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.Equal(StoragePageCodec.PageSize,cache.ResidentBytes);
+        Assert.Throws<InvalidOperationException>(()=>
+        {
+            using var other=cache.Acquire(new StoragePageKey(11,root+100),()=>new byte[StoragePageCodec.PageSize]);
+        });
+        cursor.Dispose();
+        using var replacement=cache.Acquire(new StoragePageKey(11,root+100),()=>new byte[StoragePageCodec.PageSize]);
+        Assert.Equal(StoragePageCodec.PageSize,cache.ResidentBytes);
+    }
+
     [Fact]
     public void Reader_rejects_crc_valid_leaf_with_unsorted_keys()
     {
