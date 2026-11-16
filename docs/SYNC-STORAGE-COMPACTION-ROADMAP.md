@@ -2462,3 +2462,19 @@ BIN-SYNC implementation commits: `9d33cddbbcf2af5281fe580d6fdd5885f3efe9b1`, `60
 - [x T] BIN-SYNC's two-real-Host integration test now exercises bounded tombstone deletion after signed rejoin, ChangeId-GC admission before and after the Host WAL seal, restart of both Host processes between tombstone pages, and successful second-page deletion after ChangeId ledger reclamation.
 - [x CI] Exact FLD-DB documentation/source HEAD `d311cbd1b5275f4bbf37cd57886e7c94e92972a7`: push run `43594987549` and PR run `43594993073` passed all three platforms.
 - [!] This proof is still opt-in and does not enable production physical GC. Keep Tombstone, ChangeId, Receipt and Ghost reclamation disabled by default until the remaining crash/cancellation and receipt-horizon matrix is complete.
+
+
+## 2026-11-16 — bounded Run cache implementation
+
+The first bounded-cache step is implemented on `fix/crash-consistency-outbox`:
+
+- `FldDatabase` retains at most 64 MiB of immutable Run byte arrays in its in-memory cache.
+- Cache admission uses LRU eviction; a Run larger than the cache budget remains readable but is not retained.
+- Cache accounting is reset when compaction replaces the active Run set and when FULL_REPLACE installs a replacement generation.
+- Run v1/v2 bytes, WAL, Manifest publication, and legacy `.fld1` compatibility mirrors are unchanged.
+
+Validation at commit `dceec6640ef6c4b26111871ee15ddd60291ea213`:
+- .NET CI passed on Ubuntu, macOS, and Windows (run `43801939580`, 3/3 jobs).
+- The bounded Tombstone-GC benchmark workflow was still running when this note was written (run `43801939584`).
+
+Scope limitation: this bounds **retained cache residency**, not peak process memory. A cache miss still materializes the complete Run into a byte array because the current `RunReader` API requires contiguous `ReadOnlyMemory<byte>`; an active read can temporarily exceed the cache budget. The next phase must introduce a page/window-backed Run reader and measure peak RSS before claiming out-of-core bounded memory. Do not remove legacy Run mirrors or change the physical format as part of that reader work.
