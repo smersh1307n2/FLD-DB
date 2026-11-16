@@ -50,6 +50,21 @@ public class StorageIndexBench
             throw new InvalidDataException("Storage index benchmark fixture failed validation.");
     }
 
+    [IterationSetup(Target = nameof(FreshOpenAndPointLookup))]
+    [IterationSetup(Target = nameof(FreshOpenAndSnapshotReadOneEntry))]
+    public void ReleaseFixtureWriterFence()
+    {
+        _database.Dispose();
+        _database = null!;
+    }
+
+    [IterationCleanup(Target = nameof(FreshOpenAndPointLookup))]
+    [IterationCleanup(Target = nameof(FreshOpenAndSnapshotReadOneEntry))]
+    public void ReopenFixtureDatabase()
+    {
+        _database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
+    }
+
     [GlobalCleanup]
     public void Cleanup()
     {
