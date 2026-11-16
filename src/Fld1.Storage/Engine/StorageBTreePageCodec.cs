@@ -66,8 +66,10 @@ internal static class StorageBTreePageCodec
         return new(next,entries);
     }
     public static StorageTreeInternalPage DecodeInternal(ReadOnlyMemory<byte> bytes,ulong generation,ulong id)
+        => DecodeInternal(StoragePageCodec.Decode(bytes,generation,id));
+
+    public static StorageTreeInternalPage DecodeInternal(StoragePageView page)
     {
-        var page=StoragePageCodec.Decode(bytes,generation,id);
         if(page.Kind!=StoragePageKind.Internal)throw new InvalidDataException("Expected B+ tree internal page.");
         var p=page.Payload.Span;int n=ReadHeader(p,InternalEntry,true);ulong first=BinaryPrimitives.ReadUInt64LittleEndian(p.Slice(4,8));
         if(first==0)throw new InvalidDataException("Null first child.");
@@ -78,6 +80,39 @@ internal static class StorageBTreePageCodec
             if(child==0)throw new InvalidDataException("Null child.");children[i]=new(child,key);o+=InternalEntry;
         }
         return new(first,children);
+    }
+
+    public static bool TryFindLeafEntry(ReadOnlyMemory<byte> bytes,ulong generation,ulong id,
+        ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,byte[]> readKey,out StorageTreeLeafEntry entry)
+    {
+        var page=StoragePageCodec.Decode(bytes,generation,id);
+        if(page.Kind!=StoragePageKind.Leaf)throw new InvalidDataException("Expected B+ tree leaf.");
+        var p=page.Payload.Span;int n=ReadHeader(p,LeafEntry,false);int lo=0,hi=n;
+        while(lo<hi)
+        {
+            int mid=lo+(hi-lo)/2;var candidate=ReadLeafEntry(p,mid);
+            byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
+            if(key.Length!=candidate.Key.Length)throw new InvalidDataException("Key length mismatch.");
+            if(key.AsSpan().SequenceCompareTo(target)<0)lo=mid+1;else hi=mid;
+        }
+        if(lo<n)
+        {
+            var candidate=ReadLeafEntry(p,lo);byte[] key=readKey(candidate.Key)??throw new InvalidDataException("Key reader returned null.");
+            if(key.Length!=candidate.Key.Length)throw new InvalidDataException("Key length mismatch.");
+            if(key.AsSpan().SequenceEqual(target)){entry=candidate;return true;}
+        }
+        entry=default;return false;
+    }
+
+    private static StorageTreeLeafEntry ReadLeafEntry(ReadOnlySpan<byte> p,int index)
+    {
+        int o=checked(Header+index*LeafEntry);var key=ReadKey(p.Slice(o,12));o+=12;
+        ulong valueOffset=BinaryPrimitives.ReadUInt64LittleEndian(p.Slice(o,8));
+        int valueLength=BinaryPrimitives.ReadInt32LittleEndian(p.Slice(o+8,4));byte flags=p[o+12];
+        if(valueLength<0 || flags>1 || (flags==1 && valueLength!=0))
+            throw new InvalidDataException("Invalid B+ tree value reference.");
+        _=checked(valueOffset+(ulong)valueLength);
+        return new(key,new(valueOffset,valueLength,flags==1));
     }
     private static int ReadHeader(ReadOnlySpan<byte> p,int size,bool empty)
     {
@@ -156,8 +191,9 @@ internal sealed class StorageBTreeReader
     {
         if(key.IsEmpty)throw new ArgumentException("Empty key.",nameof(key));
         if(_root==0){value=default;return false;}
-        var leaf=ReadLeaf(FindLeaf(key));int i=LowerBound(leaf.Entries,key);
-        if(i<leaf.Entries.Length){var e=leaf.Entries[i];if(ReadKey(e.Key).AsSpan().SequenceEqual(key)&&!e.Value.IsTombstone){value=e.Value;return true;}}
+        ulong leafId=FindLeaf(key);
+        if(StorageBTreePageCodec.TryFindLeafEntry(_readPage(leafId),_generation,leafId,key,_readKey,out var entry)
+            && !entry.Value.IsTombstone){value=entry.Value;return true;}
         value=default;return false;
     }
     public StorageBTreePrefixCursor OpenPrefixCursor(ReadOnlyMemory<byte> prefix)
@@ -172,13 +208,13 @@ internal sealed class StorageBTreeReader
     internal bool HasPrefix(ReadOnlySpan<byte> key,ReadOnlySpan<byte> prefix)=>key.StartsWith(prefix);
     private ulong FindLeaf(ReadOnlySpan<byte> key)
     {
-        ulong id=_root;var visited=new HashSet<ulong>();
-        while(true)
+        ulong id=_root;
+        for(int depth=0;depth<64;depth++)
         {
-            if(!visited.Add(id))throw new InvalidDataException("Internal page cycle.");
             byte[] bytes=_readPage(id)??throw new InvalidDataException("Page reader returned null.");
-            var view=StoragePageCodec.Decode(bytes,_generation,id);if(view.Kind==StoragePageKind.Leaf)return id;
-            var node=StorageBTreePageCodec.DecodeInternal(bytes,_generation,id);
+            var view=StoragePageCodec.Decode(bytes,_generation,id);
+            if(view.Kind==StoragePageKind.Leaf)return id;
+            var node=StorageBTreePageCodec.DecodeInternal(view);
             int lo=0,hi=node.Separators.Length;
             while(lo<hi)
             {
@@ -188,6 +224,7 @@ internal sealed class StorageBTreeReader
             }
             id=lo==0?node.FirstChild:node.Separators[lo-1].PageId;
         }
+        throw new InvalidDataException("B+ tree depth exceeds the supported maximum or contains a cycle.");
     }
     private int LowerBound(StorageTreeLeafEntry[] entries,ReadOnlySpan<byte> key)
     {
@@ -199,14 +236,19 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;private readonly HashSet<ulong> _visited=new();
     private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
+    private StorageTreeLeafPage? _currentLeaf;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix){_reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;}
     public bool TryReadNext(out StorageTreeEntry entry)
     {
         ObjectDisposedException.ThrowIf(_disposed,this);
         while(!_finished)
         {
-            if(!_entered){if(!_visited.Add(_page))throw new InvalidDataException("Leaf chain cycle.");_entered=true;}
-            var leaf=_reader.ReadLeaf(_page);
+            if(!_entered)
+            {
+                if(!_visited.Add(_page))throw new InvalidDataException("Leaf chain cycle.");
+                _currentLeaf=_reader.ReadLeaf(_page);_entered=true;
+            }
+            var leaf=_currentLeaf!;
             while(_index<leaf.Entries.Length)
             {
                 var e=leaf.Entries[_index++];byte[] key=_reader.ReadKey(e.Key);
@@ -214,9 +256,10 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
                 _lastKey=key;if(!_reader.HasPrefix(key,_prefix)){_finished=true;break;}
                 if(!e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
             }
-            if(_finished||leaf.NextPageId==0){_finished=true;break;}_page=leaf.NextPageId;_index=0;_entered=false;
+            if(_finished||leaf.NextPageId==0){_finished=true;break;}
+            _page=leaf.NextPageId;_index=0;_entered=false;_currentLeaf=null;
         }
         entry=default;return false;
     }
-    public void Dispose(){_disposed=true;_finished=true;_visited.Clear();}
+    public void Dispose(){_disposed=true;_finished=true;_currentLeaf=null;_visited.Clear();}
 }
