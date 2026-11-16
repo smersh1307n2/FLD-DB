@@ -29,6 +29,12 @@ if (args.Contains("--storage-index-only", StringComparer.Ordinal))
     return;
 }
 
+if (args.Contains("--storage-index-million-scale", StringComparer.Ordinal))
+{
+    StorageIndexMillionScale.Run();
+    return;
+}
+
 if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
 {
     // Each invocation performs one complete namespace sweep on a freshly seeded database.

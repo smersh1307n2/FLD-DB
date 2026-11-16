@@ -204,3 +204,10 @@ This hardening is still Stage C reader correctness work. It does not add a durab
 ### 2026-11-16 lease-aware page reader
 
 The B+ tree reader now accepts a page source that returns `StoragePageCacheLease`. Internal-page leases are released after each descent step; point lookup holds its leaf lease through the lookup; prefix cursors retain the current leaf lease until the cursor advances or is disposed. Cursor construction failure releases the acquired lease. A bounded-cache test proves that a live cursor prevents eviction and that disposal releases the pin. The cache-pressure benchmark now uses this lease-aware reader overload and no longer materializes a page copy with `ToArray()`.
+
+
+## 2026-11-16 — dedicated 1M-entry B+ tree scale gate added
+
+A separate, manually dispatchable/push-triggered Ubuntu workflow exercises a one-million-entry immutable B+ tree without adding this expensive case to the normal 1k/10k/100k PR matrix. The harness builds sorted 8-byte keys into the current standalone B+ tree builder, validates 10,000 deterministic point lookups, and completes a full one-million-entry prefix scan. It records build/lookup/scan elapsed time, managed allocation deltas, page count, managed heap, and process working-set observations; `/usr/bin/time -v` records process maximum RSS independently. The verifier rejects missing measurements, an incomplete scan, wrong cardinality, or absent RSS data.
+
+**Interpretation boundary:** this is an isolated B+ tree scale/stress gate, not a comparison against the current `StorageDatabase`, not an on-disk durability test, and not evidence of production readiness. It intentionally does not claim WAL replay, durable root publication, snapshot pinning, crash consistency, or bounded RSS. Results must be reviewed before selecting page size or proceeding to production routing. The 1k/10k/100k comparative matrix remains the performance-regression gate.
