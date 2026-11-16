@@ -45,7 +45,7 @@ public sealed class FldDatabaseTombstoneGcTests
                 {
                     Assert.True(candidate.IsFieldTombstone);
                     return true;
-                }, limit: 4097);
+                });
                 Assert.Equal(1, reclaimed);
                 Assert.False(database.TryGetBytes(recordId, 7, out _));
             }
@@ -264,13 +264,14 @@ public sealed class FldDatabaseTombstoneGcTests
     }
 
     [Fact]
-    public void Tombstone_gc_reclaims_only_one_bounded_page_and_repeats_until_empty()
+    public void Tombstone_gc_reclaims_all_approved_candidates_in_one_sweep()
     {
-        string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-pages-" + Guid.NewGuid().ToString("N"));
+        string root = Path.Combine(Path.GetTempPath(), "fld-tombstone-gc-sweep-" + Guid.NewGuid().ToString("N"));
         const uint namespaceId = 0x758;
         byte[][] recordIds = Enumerable.Range(0, 3)
             .Select(_ => FldDatabase.NewRecordId())
             .ToArray();
+        int predicateCalls = 0;
 
         try
         {
@@ -287,18 +288,15 @@ public sealed class FldDatabaseTombstoneGcTests
                 Assert.NotEqual(0UL, database.Checkpoint());
                 SealAndAcknowledgeOutbox(database);
 
-                for (int page = 0; page < recordIds.Length; page++)
+                int reclaimed = database.CompactTombstones(candidate =>
                 {
-                    int reclaimed = database.CompactTombstones(
-                        static _ => true, limit: 1);
-                    Assert.Equal(1, reclaimed);
+                    predicateCalls++;
+                    Assert.True(candidate.IsFieldTombstone);
+                    return true;
+                });
 
-                    int remaining = recordIds.Count(recordId =>
-                        database.TryResolve(recordId, 7, out var current) && current.IsTombstone);
-                    Assert.Equal(recordIds.Length - page - 1, remaining);
-                }
-
-                Assert.Equal(0, database.CompactTombstones(static _ => true, limit: 1));
+                Assert.Equal(recordIds.Length, reclaimed);
+                Assert.Equal(recordIds.Length, predicateCalls);
                 foreach (byte[] recordId in recordIds)
                     Assert.False(database.TryResolve(recordId, 7, out _));
             }
