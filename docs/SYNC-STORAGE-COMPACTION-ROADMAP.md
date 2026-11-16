@@ -2516,3 +2516,12 @@ The accepted implementation direction is documented in [FLD Tombstone GC Single-
 The current candidate-count API and every caller that loops it must be replaced/migrated; it must not be retained as a compatibility shim that silently repeats full compaction. The output chunk size is a memory/write-amplification parameter, not a candidate deletion limit.
 
 **Status:** design decision recorded; implementation, fault tests, complexity counters, composed benchmark and exact-head CI are pending. Do not enable Receipt, ChangeId or Tombstone physical GC. Ghost GC remains excluded. The previous one-rewrite benchmark is a baseline only, not release authorization.
+
+
+### 2026-11-16 follow-up — process-isolated approval flow
+
+A source/API audit found an additional cross-repository constraint: BIN-SYNC currently asks the FLD IPC provider for up to `limit` tombstone candidates, builds managed candidate/approved lists, then sends the approved array back to the Host. Merely changing FLD's internal compactor would leave this candidate-page boundary and its repeated snapshot enumeration in place, while raising the limit would make memory proportional to candidate cardinality.
+
+The ADR now specifies a snapshot-scoped sequential candidate scan and a Host-owned temporary approval spool. BIN-SYNC evaluates its unchanged signed proof and Metadata references as each candidate page arrives, then streams only approved exact identities to the Host in bounded IPC batches. The Host seals the sorted spool with count/digest validation and consumes it during one FLD source-Run sweep. The spool is disposable scratch, not an authoritative journal and not a crash-resume source; it is deleted on terminal paths and after Host restart. The provider snapshot is released before final compaction so its own pin does not veto the sweep. Host FLD references are revalidated during final compaction.
+
+The same audit identified `TryBuildLiveRecordReferenceSet` as a separate Metadata-wide `HashSet<RecordId>` allocation. The composed implementation must measure and bound or replace that set before claiming end-to-end bounded memory. The FLD compaction ADR does not conceal this adjacent cost.
