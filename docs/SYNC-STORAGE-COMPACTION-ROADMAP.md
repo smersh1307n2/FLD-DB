@@ -2524,7 +2524,7 @@ A source/API audit found an additional cross-repository constraint: BIN-SYNC cur
 
 The ADR now specifies a snapshot-scoped sequential candidate scan and a Host-owned temporary approval spool. BIN-SYNC evaluates its unchanged signed proof and Metadata references as each candidate page arrives, then streams only approved exact identities to the Host in bounded IPC batches. The Host seals the sorted spool with count/digest validation and consumes it during one FLD source-Run sweep. The spool is disposable scratch, not an authoritative journal and not a crash-resume source; it is deleted on terminal paths and after Host restart. The provider snapshot is released before final compaction so its own pin does not veto the sweep. Host FLD references are revalidated during final compaction.
 
-The same audit identified `TryBuildLiveRecordReferenceSet` as a separate Metadata-wide `HashSet<RecordId>` allocation. The composed implementation must measure and bound or replace that set before claiming end-to-end bounded memory. The FLD compaction ADR does not conceal this adjacent cost.
+The coordinator now uses `TryFindLiveRecordReferences` against each bounded candidate page, so it retains only page-matching RecordIds rather than a namespace-wide Metadata `HashSet`. The old internal `TryBuildLiveRecordReferenceSet` helper remains but is not used by the coordinator. The bounded lookup still scans retained Metadata payloads once per candidate page; its repeated CPU cost remains a composed benchmark/optimization gate.
 
 ## 2026-11-16 — first Tombstone single-sweep implementation
 
@@ -2540,3 +2540,12 @@ Ubuntu/macOS 15/Windows, 3/3).
 - IPC tests cover spool sealing, exact identity matching, provider snapshot-pin veto and reference revalidation. The test suite passes on all three CI platforms.
 
 **Not yet release-complete:** no composed 1M candidate benchmark, peak managed heap / OS RSS proof, source-byte work counters or high-Run-count performance evidence. BIN-SYNC currently scans retained Metadata payloads once per candidate page; this is memory-bounded per page but may multiply CPU work. Overlay snapshot residency and direct Metadata writer-bypass fencing also remain open. All physical GC flags remain default-off; Ghost GC remains excluded.
+
+
+### 2026-11-16 follow-up — provider snapshot index is now streamed
+
+The eager provider snapshot RecordId array and namespace-wide deduplication HashSet have been replaced by a min-heap merge of sorted Run cluster cursors. Cursor memory is proportional to source Run count; duplicate RecordIds across Runs are emitted once. `RecordCount` is preserved through a bounded-memory count pass, so snapshot open now makes one extra full Run-slot traversal before page reads begin.
+
+Exact FLD HEAD `99e8175368dc3b9641c2e3133ac6d04b02ac2a18` passed cross-platform .NET CI on Ubuntu, Windows and macOS 15 (run [43835665775](https://github.com/smersh1307n2/FLD-DB), 3/3). The new test covers repeated RecordIds across four source Runs, ordered pages, retry caching and backward seek.
+
+This closes the provider snapshot's namespace-sized RecordId index allocation. It does not yet prove total composed peak memory: overlay snapshot construction, high Run-count behavior, retained Metadata payload rescans per candidate page, source-byte work counters, and 1M candidate heap/RSS measurements remain open. Keep all physical-GC flags default-off.
