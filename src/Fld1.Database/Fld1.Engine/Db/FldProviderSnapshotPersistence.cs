@@ -100,7 +100,6 @@ public sealed partial class FldDatabase
                 }
 
                 RunReader[] runReaders = readers.ToArray();
-                byte[][] recordIds = BuildProviderRecordIdIndex(runReaders);
                 byte[] manifestBytes = EncodeProviderSnapshotManifest(
                     generation, _namespaceId, sourceFeedWatermark, runIds, overlayHash);
                 WriteProviderSnapshotManifest(snapshotDirectory, manifestBytes);
@@ -110,7 +109,6 @@ public sealed partial class FldDatabase
                     sourceFeedWatermark,
                     runReaders,
                     Array.Empty<KeyValuePair<MemFieldKey, MemFieldValue>>(),
-                    recordIds,
                     OnProviderSnapshotDisposed);
                 _providerSnapshots.Add(generation, snapshot);
                 return snapshot;
@@ -198,7 +196,6 @@ public sealed partial class FldDatabase
                 manifest.SourceFeedWatermark,
                 runReaders,
                 Array.Empty<KeyValuePair<MemFieldKey, MemFieldValue>>(),
-                recordIds,
                 OnProviderSnapshotDisposed);
             _providerSnapshots.Add(generation, snapshot);
             return snapshot;
@@ -453,24 +450,6 @@ public sealed partial class FldDatabase
                 throw new InvalidDataException($"Pinned provider snapshot legacy Run {runId} failed validation.");
         }
         return true;
-    }
-
-    private static byte[][] BuildProviderRecordIdIndex(RunReader[] runs)
-    {
-        var recordIds = new List<byte[]>();
-        var seen = new HashSet<(ulong Low, ulong High)>();
-        Span<byte> recordId = stackalloc byte[16];
-        foreach (RunReader run in runs)
-        {
-            for (uint index = 0; index < run.NumClusters; index++)
-            {
-                if (!run.TryReadRecordIdAt(index, recordId))
-                    throw new InvalidDataException("Provider snapshot Run cluster index is invalid.");
-                AddRecordId(recordId, seen, recordIds);
-            }
-        }
-        recordIds.Sort(static (left, right) => left.AsSpan().SequenceCompareTo(right));
-        return recordIds.ToArray();
     }
 
     private string GetProviderSnapshotDirectory(Guid generation)
