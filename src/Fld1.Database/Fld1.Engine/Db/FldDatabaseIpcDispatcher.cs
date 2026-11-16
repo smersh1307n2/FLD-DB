@@ -565,8 +565,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 int reclaimed = _database.CompactTombstones(candidate =>
                     approved.IsApproved(candidate) &&
                     !references.HasChangeIdReference(candidate.ChangeId.Span) &&
-                    !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span),
-                    int.MaxValue);
+                    !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span));
                 return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(reclaimed);
             }
             finally
