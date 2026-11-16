@@ -75,6 +75,12 @@ public sealed class FldDatabaseIpcTombstoneGcTests
                 ToCandidate(reclaimableEntry)
             ];
 
+            Array.Sort(approved, static (left, right) =>
+            {
+                int compare = left.RecordId.Span.SequenceCompareTo(right.RecordId.Span);
+                return compare != 0 ? compare : left.FieldId.CompareTo(right.FieldId);
+            });
+
             // A separate live provider snapshot pins the old generation. The final
             // Host RPC must refuse the whole pass even though the client approved both.
             FldDatabaseIpcSnapshotHandle pinned = await client.OpenSnapshotAsync(Guid.NewGuid());
