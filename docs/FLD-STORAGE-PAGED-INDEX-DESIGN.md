@@ -1,6 +1,6 @@
 # FLD Storage Core — paged ordered index design
 
-Status: Stage B primitives implemented; production tree integration not started
+Status: Stage C immutable B+ tree builder/reader implemented; production tree integration not started
 Date: 2026-11-16
 Scope: Fld1.Storage physical key/value engine only. No BIN-SYNC protocol changes and no FLD field/tombstone policy changes.
 
@@ -129,14 +129,16 @@ Do not add TTL-based deletion. Do not infer that a generation is unpinned merely
 ### Stage B — page primitives
 - [x] Add page codec, CRC/identity validation, bounded page cache, generation pin registry and positional random-access file abstraction.
 - [x] Unit-test page identity/CRC validation, short reads, invalid offsets, cache eviction, pinned-page budget behavior, generation retirement and concurrent pin accounting.
-- [ ] Add page split/merge boundary tests with the B+ tree node codec in Stage C.
+- [x] Add B+ tree leaf/internal node codecs and split/fan-out coverage in Stage C.
 - No production routing through the new tree yet. Cache misses are currently serialized under the cache lock for duplicate-load safety; parallel miss loading is a later optimization only if profiling justifies it.
 
 ### Stage C — immutable B+ tree builder/reader
-- Build a v2 tree from a sorted input stream.
-- Implement point lookup and prefix cursor over immutable pages.
-- Test against a reference sorted dictionary using randomized datasets, duplicate replacement and tombstones.
-- Add benchmark cases for cold-ish open, warm point lookup, random point lookup, prefix scan, large values and page-cache pressure.
+- [x] Build immutable leaf and internal pages from a strictly sorted input stream.
+- [x] Implement point lookup and forward prefix cursor over linked leaves.
+- [x] Keep variable-length keys and values external to index pages using generation-local offset/length references.
+- [x] Randomized reference-model tests, tombstones, duplicate/unsorted-input rejection, multi-level splits, empty tree and 1 MiB key reference.
+- [ ] Add benchmark cases for cold-ish open, warm/random point lookup, prefix scan, large values and page-cache pressure.
+- No production routing through the tree yet.
 
 ### Stage D — WAL integration
 - Add copy-on-write batch application and atomic root publication.
