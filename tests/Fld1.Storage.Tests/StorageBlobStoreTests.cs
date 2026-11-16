@@ -81,7 +81,8 @@ public sealed class StorageBlobStoreTests : IDisposable
 
         string pagePath = Path.Combine(
             _directory, "blobs", Convert.ToHexString("test"u8), blobId.ToString("N"), "00000000.page");
-        File.AppendAllBytes(pagePath, new byte[] { 0xFF });
+        using (var append = new FileStream(pagePath, FileMode.Append, FileAccess.Write, FileShare.Read))
+            append.WriteByte(0xFF);
 
         using (reader)
         using (var output = new MemoryStream())
