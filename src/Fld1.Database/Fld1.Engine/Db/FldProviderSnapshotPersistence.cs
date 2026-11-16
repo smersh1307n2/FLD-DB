@@ -59,7 +59,7 @@ public sealed partial class FldDatabase
                 for (int i = 0; i < _runs.Count; i++)
                 {
                     runIds[i] = _runs[i].runId;
-                    byte[] bytes = EnsureRunCached(i);
+                    ReadOnlyMemory<byte> bytes = EnsureRunCached(i);
                     var reader = new RunReader(bytes);
                     if (!reader.TryValidate(out _) || reader.NamespaceId != _namespaceId)
                         throw new InvalidDataException("A source Run failed validation while opening a provider snapshot.");
