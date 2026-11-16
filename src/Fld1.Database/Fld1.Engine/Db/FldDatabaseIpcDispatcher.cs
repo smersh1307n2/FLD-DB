@@ -261,6 +261,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             EnsureGcLeaseOwner(context);
             if (_gcReferenceScans.Count != 0)
                 throw new InvalidOperationException("The Host GC lease already owns an active reference scan.");
+            // Seal committed WAL before capturing the final reference horizon. The
+            // resulting snapshot must describe the post-seal state, not report
+            // already-committed WAL records as unpublished drafts.
+            using IDisposable commitLease = _database.AcquireCommitGuard();
+            _ = _database.TrySealCommittedWalForTombstoneGc();
             FldReferenceSnapshot snapshot = _database.OpenReferenceSnapshot();
             Guid token = Guid.NewGuid();
             _gcReferenceScans.Add(token,
@@ -541,9 +546,6 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 // the first scan look like an external pin and veto every commit.
                 FldReferenceSnapshot references = referenceScan.Snapshot;
                 using IDisposable commitLease = _database.AcquireCommitGuard();
-                if (!_database.TrySealCommittedWalForTombstoneGc())
-                    return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
-
                 FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
                 if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
                     draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
