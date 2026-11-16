@@ -6,6 +6,13 @@
 
 Freeze new protocol features and prioritize the physical storage foundation. The protocol ownership model and two-DLL decision remain unchanged. This is a cross-repository work order; BIN-SYNC v3 Roadmap and Production Status contain the shared checkpoint and CI evidence.
 
+### 2026-11-16 — exact-head CI recovery and Storage index baseline
+
+- FLD-DB exact-head CI at `abd7dba119bccf6cdb6367bffd3bb05cda043312` passed on Ubuntu, Windows and macOS (run `43812129343`). A separate first attempt on the same SHA had a macOS xUnit/VSTest `PortableSymbolReader.Dispose()` teardown exception after all test suites passed; rerunning only that macOS job completed successfully (run `43812135330`, attempt 2). Treat the first failure as a runner teardown incident, not a product test failure; do not suppress runner failures or tests.
+- Added `StorageIndexBench` with 1k / 10k / 100k entries to measure fresh open + point lookup, first/cached sorted snapshot creation + lookup, and warm point lookup. The benchmark is intentionally a baseline of the existing dictionary + full `SortedList` architecture, not a bounded-memory claim. Dedicated workflow: `.github/workflows/storage-index-benchmark.yml`; invoke locally with `--storage-index-only`.
+- The benchmark and workflow have been committed to the active branch; exact-head .NET CI and benchmark workflow must both pass before accepting the harness. Record the measured output and artifact SHA here after the workflow completes. No production Storage index behavior has been changed yet.
+- Next implementation gate: design and test an immutable disk-paged ordered index with bounded page cache and snapshot-generation pinning. Do not simply replace `_values` with a cache over the same monolithic snapshot; recovery, concurrent snapshot lifetime, atomic checkpoint publication, old-format read compatibility, and bounded WAL replay must be handled as one coherent design. The baseline benchmark is the before-measurement for that change.
+
 ### Confirmed implementation gaps
 
 - Fld1.Storage.Engine.StorageDatabase currently retains the complete key/value set in _values: Dictionary<StorageKey, byte[]> and uses a monolithic snapshot/index path. It is not yet a disk-paged/out-of-core engine with a bounded block cache.
