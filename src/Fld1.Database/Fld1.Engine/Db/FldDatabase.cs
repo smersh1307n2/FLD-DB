@@ -1858,6 +1858,8 @@ public sealed partial class FldDatabase : IDisposable
         }
 
         Span<byte> recordIdBuffer = stackalloc byte[16];
+        Span<byte> overlayIdBuffer = stackalloc byte[16];
+        Span<byte> currentOverlayIdBuffer = stackalloc byte[16];
         while (runQueue.Count != 0 || overlayIndex < overlay.Count)
         {
             bool hasRun = runQueue.TryPeek(out _, out (ulong High, ulong Low) runPriority);
@@ -1865,9 +1867,8 @@ public sealed partial class FldDatabase : IDisposable
             (ulong High, ulong Low) overlayPriority = default;
             if (hasOverlay)
             {
-                Span<byte> overlayId = stackalloc byte[16];
-                overlay[overlayIndex].Key.WriteRecordId(overlayId);
-                overlayPriority = GetCompactionRecordPriority(overlayId);
+                overlay[overlayIndex].Key.WriteRecordId(overlayIdBuffer);
+                overlayPriority = GetCompactionRecordPriority(overlayIdBuffer);
             }
 
             (ulong High, ulong Low) target = !hasRun ? overlayPriority :
@@ -1879,9 +1880,8 @@ public sealed partial class FldDatabase : IDisposable
             var fieldIds = new SortedSet<ushort>();
             while (overlayIndex < overlay.Count)
             {
-                Span<byte> currentOverlayId = stackalloc byte[16];
-                overlay[overlayIndex].Key.WriteRecordId(currentOverlayId);
-                if (GetCompactionRecordPriority(currentOverlayId) != target)
+                overlay[overlayIndex].Key.WriteRecordId(currentOverlayIdBuffer);
+                if (GetCompactionRecordPriority(currentOverlayIdBuffer) != target)
                     break;
                 fieldIds.Add(overlay[overlayIndex].Key.FieldId);
                 overlayIndex++;
