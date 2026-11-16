@@ -301,7 +301,7 @@ public sealed partial class FldDatabase
                 SeqHi = state.BaseLastSealedCommitSeq
             }).ToList();
             var oldRuns = _runs.Select(run => (run.runId, run.path, run.mapped)).ToArray();
-            var replacementRuns = new List<(ulong runId, string path, byte[]? cached, long lastAccess, MappedRunFile? mapped)>(state.Runs.Length);
+            var replacementRuns = new List<(ulong runId, string path, MappedRunFile? mapped)>(state.Runs.Length);
             foreach (FullReplaceStageRun run in state.Runs)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
@@ -315,7 +315,7 @@ public sealed partial class FldDatabase
                 if (!runReader.TryValidate(out var runVerify) || runReader.NamespaceId != _namespaceId)
                     throw new InvalidDataException($"FULL_REPLACE staged Run failed pre-switch validation: {runVerify.Status} {runVerify.Detail}");
                 WriteRunAtomically(runPath, runBytes); // Keep the legacy FLD1 Run mirror until an explicit format cutover.
-                replacementRuns.Add((run.RunId, runPath, null, 0, null));
+                replacementRuns.Add((run.RunId, runPath, null));
             }
 
             var updatedRuns = manifest.Runs.Where(run => run.Ns != _namespaceId).ToList();
@@ -333,7 +333,6 @@ public sealed partial class FldDatabase
 
             RetireActiveRunMappingsUnderLock();
             _runs.Clear();
-            _runCacheBytes = 0;
             _runs.AddRange(replacementRuns);
             for (int runIndex = 0; runIndex < _runs.Count; runIndex++)
                 MapRun(runIndex);
