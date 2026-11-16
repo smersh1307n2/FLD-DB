@@ -282,11 +282,9 @@ internal sealed class StorageBTreeReader
         if(prefix.IsEmpty)throw new ArgumentException("Empty prefix.",nameof(prefix));
         if(_root==0)return new(this,0,0,prefix.ToArray());
         ulong id=FindLeaf(prefix.Span);var leaf=ReadLeafView(id,out var lease);
-        return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),leaf,lease);
+        try { return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),leaf,lease); }
+        catch { lease?.Dispose();throw; }
     }
-    internal StorageBTreeLeafPageView ReadLeafView(ulong id)
-        => ReadLeafView(id,out _);
-
     internal StorageBTreeLeafPageView ReadLeafView(ulong id,out StoragePageCacheLease? lease)
     {
         lease=_readPageLease?.Invoke(id);
