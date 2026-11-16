@@ -280,7 +280,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             return FldDatabaseIpcGcProtocol.EncodeScanResponse(
                 new FldDatabaseIpcGcReferenceScan(
                     token, snapshot.UnpublishedLocalDraftHorizon,
-                    snapshot.HasSnapshotPin || !tombstoneWalSealSucceeded,
+                    snapshot.HasSnapshotPin || (sealCommittedWal && !tombstoneWalSealSucceeded),
                     checked((ushort)_database.NamespaceId)));
         }
     }
