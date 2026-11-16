@@ -18,6 +18,12 @@ public class StorageIndexBench
     private StorageDatabase _database = null!;
     private byte[][] _keys = null!;
     private int _probeIndex;
+    private StorageTreeBuildEntry[] _treeEntries = null!;
+    private Dictionary<ulong, byte[]> _treeKeys = null!;
+    private Dictionary<ulong, byte[]> _treePages = null!;
+    private StorageBTreeReader _treeReader = null!;
+    private ulong _treeRoot;
+
 
     [Params(1_000, 10_000, 100_000)]
     public int EntryCount { get; set; }
@@ -54,6 +60,23 @@ public class StorageIndexBench
         _probeIndex = EntryCount / 2;
         if (!_database.TryGet(_keys[_probeIndex], out _))
             throw new InvalidDataException("Storage index benchmark fixture failed validation.");
+
+        _treeKeys = new Dictionary<ulong, byte[]>(EntryCount);
+        _treeEntries = new StorageTreeBuildEntry[EntryCount];
+        for (int i = 0; i < EntryCount; i++)
+        {
+            ulong offset = checked((ulong)i + 1);
+            _treeKeys.Add(offset, _keys[i]);
+            _treeEntries[i] = new StorageTreeBuildEntry(_keys[i], offset, offset, ValueLength, false);
+        }
+        _treePages = new Dictionary<ulong, byte[]>();
+        ulong nextPageId = 1;
+        _treeRoot = StorageBTreeBuilder.Build(1, _treeEntries, () => nextPageId++,
+            (pageId, page) => _treePages.Add(pageId, page));
+        _treeReader = new StorageBTreeReader(1, _treeRoot, pageId => _treePages[pageId],
+            key => _treeKeys[key.Offset]);
+        if (!_treeReader.TryGet(_keys[_probeIndex], out _))
+            throw new InvalidDataException("B+ tree benchmark fixture failed validation.");
     }
 
     private static void CopyDirectory(string source, string destination)
@@ -107,5 +130,32 @@ public class StorageIndexBench
         if (!_database.TryGet(_keys[_probeIndex], out byte[]? value))
             throw new InvalidDataException("Warm Storage lookup did not find the fixture key.");
         return value!.Length;
+    }
+
+    [Benchmark]
+    public int BTreeWarmPointLookup()
+    {
+        if (!_treeReader.TryGet(_keys[_probeIndex], out StorageTreeValueReference value))
+            throw new InvalidDataException("B+ tree lookup did not find the fixture key.");
+        return value.Length;
+    }
+
+    [Benchmark]
+    public int BTreePrefixScan()
+    {
+        int count = 0;
+        using var cursor = _treeReader.OpenPrefixCursor(new byte[] { 0, 0, 0, 0 });
+        while (cursor.TryReadNext(out _)) count++;
+        return count;
+    }
+
+    [Benchmark]
+    public int BTreeBulkBuild()
+    {
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong nextPageId = 1;
+        ulong root = StorageBTreeBuilder.Build(2, _treeEntries, () => nextPageId++,
+            (pageId, page) => pages.Add(pageId, page));
+        return checked(pages.Count + (int)root);
     }
 }
