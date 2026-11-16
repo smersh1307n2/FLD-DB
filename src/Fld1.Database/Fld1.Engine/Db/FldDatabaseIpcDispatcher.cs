@@ -254,18 +254,22 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private byte[] HandleOpenGcReferenceScan(
         StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
     {
-        if (!payload.IsEmpty)
-            throw new InvalidDataException("FLD GC reference-scan open payload must be empty.");
+        bool sealCommittedWal = payload.Length == 1 && payload.Span[0] == 1;
+        if (!payload.IsEmpty && !sealCommittedWal)
+            throw new InvalidDataException("FLD GC reference-scan open payload is invalid.");
         lock (_gcLeaseGate)
         {
             EnsureGcLeaseOwner(context);
             if (_gcReferenceScans.Count != 0)
                 throw new InvalidOperationException("The Host GC lease already owns an active reference scan.");
-            // Seal committed WAL before capturing the final reference horizon. The
-            // resulting snapshot must describe the post-seal state, not report
-            // already-committed WAL records as unpublished drafts.
-            using IDisposable commitLease = _database.AcquireCommitGuard();
-            _ = _database.TrySealCommittedWalForTombstoneGc();
+            if (sealCommittedWal)
+            {
+                // Tombstone sweep captures its final reference horizon only after
+                // committed WAL has been sealed. Other GC domains keep their
+                // existing scan semantics.
+                using IDisposable commitLease = _database.AcquireCommitGuard();
+                _ = _database.TrySealCommittedWalForTombstoneGc();
+            }
             FldReferenceSnapshot snapshot = _database.OpenReferenceSnapshot();
             Guid token = Guid.NewGuid();
             _gcReferenceScans.Add(token,
