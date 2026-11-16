@@ -1984,7 +1984,7 @@ public sealed partial class FldDatabase : IDisposable
             bool deleted = false;
             try
             {
-                if (oldRun.runId == runId || oldRun.mapped is not null || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
+                if (oldRun.runId == runId || pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
                     continue;
                 _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
                 if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
