@@ -261,7 +261,7 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
     private ulong _page;private int _index;private bool _entered,_finished,_disposed;private byte[]? _lastKey;
-    private StorageTreeLeafPage? _currentLeaf;
+    private StorageTreeLeafPage? _leafPage;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix){_reader=reader;_page=page;_index=index;_prefix=prefix;_finished=page==0;}
     public bool TryReadNext(out StorageTreeEntry entry)
     {
@@ -270,9 +270,9 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
         {
             if(!_entered)
             {
-                _currentLeaf=_reader.ReadLeaf(_page);_entered=true;
+                _leafPage=_reader.ReadLeaf(_page);_entered=true;
             }
-            var leaf=_currentLeaf!;
+            var leaf=_leafPage!;
             while(_index<leaf.Entries.Length)
             {
                 var e=leaf.Entries[_index++];byte[] key=_reader.ReadKey(e.Key);
@@ -281,9 +281,9 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
                 if(!e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
             }
             if(_finished||leaf.NextPageId==0){_finished=true;break;}
-            _page=leaf.NextPageId;_index=0;_entered=false;_currentLeaf=null;
+            _page=leaf.NextPageId;_index=0;_entered=false;_leafPage=null;
         }
         entry=default;return false;
     }
-    public void Dispose(){_disposed=true;_finished=true;_currentLeaf=null;}
+    public void Dispose(){_disposed=true;_finished=true;_leafPage=null;}
 }
