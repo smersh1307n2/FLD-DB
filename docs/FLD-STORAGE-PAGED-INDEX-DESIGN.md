@@ -192,3 +192,10 @@ The first complete 30-case run (workflow 43875781259, code HEAD daf9dffcbbbabb76
 The prefix cursor decoded and allocated the entire current leaf on every TryReadNext, i.e. once per returned entry rather than once per leaf. Point lookup also decoded an entire leaf-entry array for a single key. Both hot paths have now been changed: cursor caches its decoded leaf until advancing to the next leaf; point lookup performs binary search directly in the validated leaf payload without allocating the full entry array. Internal-node traversal now decodes each page only once and bounds traversal depth to 64 to fail closed on cycles/corrupt trees.
 
 These are baseline defect measurements, not acceptable target performance. Exact-head cross-platform CI and a fresh 30-case benchmark after the fix are mandatory. Production integration remains blocked.
+
+
+### 2026-11-16 reader validation hardening
+
+The reader now validates strict key ordering in every leaf before binary search or prefix traversal, and strict separator ordering plus unique child references in internal pages before routing. Validation results are retained in a bounded 4,096-page FIFO per reader; this avoids unbounded validation metadata while preventing repeated full-page ordering checks on hot pages. The cache is advisory only: eviction causes revalidation, never weaker validation. Added CRC-valid malformed leaf/internal-page tests so the checks are not merely relying on checksum failure.
+
+This hardening is still Stage C reader correctness work. It does not add a durable page cache lease path, generation pinning, or production integration. The benchmark's current cache-pressure adapter copies the page out of its cache lease; therefore it is not yet evidence for a zero-copy production page-reader. The next benchmark revision must separate that adapter overhead from the actual reader/cache design rather than treating it as a production measurement.
