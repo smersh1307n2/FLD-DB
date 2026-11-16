@@ -2325,18 +2325,28 @@ public sealed partial class FldDatabase : IDisposable
         var (runId, path, cached, _, mapped) = _runs[index];
         if (mapped is not null)
             return;
-        MappedRunFile mappedFile = MappedRunFile.Open(path);
-        var reader = new RunReader(mappedFile.ReadOnlyMemory);
-        if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+        try
         {
-            mappedFile.Dispose();
-            throw new InvalidDataException(
-                $"Run {runId} mirror is invalid after publication: {verify.Status} {verify.Detail}");
-        }
+            MappedRunFile mappedFile = MappedRunFile.Open(path);
+            var reader = new RunReader(mappedFile.ReadOnlyMemory);
+            if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+            {
+                mappedFile.Dispose();
+                throw new InvalidDataException(
+                    $"Run {runId} mirror is invalid after publication: {verify.Status} {verify.Detail}");
+            }
 
-        if (cached is not null)
-            _runCacheBytes -= cached.LongLength;
-        _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+            if (cached is not null)
+                _runCacheBytes -= cached.LongLength;
+            _runs[index] = (runId, path, null, ++_runCacheClock, mappedFile);
+        }
+        catch
+        {
+            // The manifest may already publish this immutable Run. Stop using the
+            // current instance; reopen will recover/validate from the Storage blob.
+            _faulted = true;
+            throw;
+        }
     }
 
     private void RetireActiveRunMappingsUnderLock()
