@@ -11,7 +11,7 @@ namespace Fld1.Engine.Bench;
 /// cache is intentionally not described as cold: only the process mappings are fresh.
 /// </summary>
 [MemoryDiagnoser]
-public sealed class RunMappingBench
+public class RunMappingBench
 {
     private const int RecordsPerRun = 128;
     private const int ValueLength = 64;
