@@ -175,6 +175,7 @@ public class TombstoneGcSweepBench
             GC.WaitForPendingFinalizers();
             GC.Collect();
             _process = System.Diagnostics.Process.GetCurrentProcess();
+            _process.Refresh();
             BaselineWorkingSetBytes = _process.WorkingSet64;
             PeakWorkingSetBytes = BaselineWorkingSetBytes;
             BaselineManagedHeapBytes = GC.GetTotalMemory(forceFullCollection: false);
@@ -205,6 +206,7 @@ public class TombstoneGcSweepBench
 
         private void Sample()
         {
+            _process.Refresh();
             long workingSet = _process.WorkingSet64;
             long managedHeap = GC.GetTotalMemory(forceFullCollection: false);
             if (workingSet > PeakWorkingSetBytes)
