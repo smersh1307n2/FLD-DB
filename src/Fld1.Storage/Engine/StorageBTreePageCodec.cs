@@ -76,7 +76,7 @@ internal static class StorageBTreePageCodec
 
     public static ulong SelectInternalChild(
         StoragePageView page, ReadOnlySpan<byte> searchKey,
-        Func<StorageTreeKeyReference, byte[]> readKey)
+        Func<StorageTreeKeyReference, ReadOnlyMemory<byte>> readKey)
     {
         ArgumentNullException.ThrowIfNull(readKey);
         if (page.Kind != StoragePageKind.Internal) throw new InvalidDataException("Expected B+ tree internal page.");
@@ -148,7 +148,7 @@ internal static class StorageBTreePageCodec
         => TryFindLeafEntry(DecodeLeafView(bytes,generation,id),target,readKey,out entry);
 
     public static bool TryFindLeafEntry(StorageBTreeLeafPageView leaf,
-        ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,byte[]> readKey,out StorageTreeLeafEntry entry)
+        ReadOnlySpan<byte> target,Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey,out StorageTreeLeafEntry entry)
     {
         ArgumentNullException.ThrowIfNull(readKey);
         int lo=0,hi=leaf.Count;
@@ -257,7 +257,7 @@ internal sealed class StorageBTreeReader
         _readKey=readKey??throw new ArgumentNullException(nameof(readKey));
     }
     public StorageBTreeReader(ulong generation,ulong root,Func<ulong,StoragePageCacheLease> readPageLease,
-        Func<StorageTreeKeyReference,byte[]> readKey)
+        Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey)
     {
         if(generation==0)throw new ArgumentOutOfRangeException(nameof(generation));
         _generation=generation;_root=root;_readPageLease=readPageLease??throw new ArgumentNullException(nameof(readPageLease));
