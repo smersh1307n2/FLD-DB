@@ -50,6 +50,8 @@ public sealed partial class FldDatabase : IDisposable
 {
     // One root-wide lock: manifest, namespace WALs, runs and outboxes share this database owner.
     private const ulong StoragePartitionId = 0;
+    // Bound retained immutable Run images; larger Runs remain readable but are not cached.
+    private const long RunCacheBudgetBytes = 64L * 1024 * 1024;
     private readonly string _dbDir;
     private readonly Fld1.Storage.Engine.StoragePartitionLease _storageLease;
     private readonly Fld1.Storage.Engine.StorageDatabase _runStorage;
@@ -78,7 +80,9 @@ public sealed partial class FldDatabase : IDisposable
     private readonly object _commitLock = new();
     private WalManager _wal;
     private OutboxLog _outbox;
-    private readonly List<(ulong runId, string path, byte[]? cached)> _runs = new();
+    private readonly List<(ulong runId, string path, byte[]? cached, long lastAccess)> _runs = new();
+    private long _runCacheBytes;
+    private long _runCacheClock;
     private ulong _nextRunId = 1;
     private ulong _clientRequestSeq;
     private readonly byte[] _clientInstanceId = new byte[16];
@@ -314,7 +318,7 @@ public sealed partial class FldDatabase : IDisposable
                     $"Manifest references missing Run {re.RunId} in both Storage blobs and legacy Run files.");
             }
 
-            _runs.Add((re.RunId, path, null));
+            _runs.Add((re.RunId, path, null, 0));
             if (re.SeqHi > sealedSeq) sealedSeq = re.SeqHi;
         }
         _lastSealedCommitSeq = Math.Max(sealedSeq, _outbox.MaterializedThroughCommitSeq);
@@ -1433,7 +1437,8 @@ public sealed partial class FldDatabase : IDisposable
             _manifestDirty = false;
             _pendingFlushedCommitSeq = seqHi;
 
-            _runs.Add((runId, path, runBytes));
+            _runs.Add((runId, path, null, 0));
+            CacheRun(_runs.Count - 1, runBytes);
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
             _dirty.Clear();
@@ -1961,8 +1966,10 @@ public sealed partial class FldDatabase : IDisposable
         _manifestDirty = false;
         _pendingFlushedCommitSeq = seqHi;
         _runs.Clear();
+            _runCacheBytes = 0;
         if (runId != 0)
-            _runs.Add((runId, path!, runBytes!));
+            _runs.Add((runId, path!, null, 0));
+            CacheRun(_runs.Count - 1, runBytes!);
         _overlay.Clear();
         _dirty.Clear();
         _lastSealedCommitSeq = seqHi;
@@ -2257,8 +2264,12 @@ public sealed partial class FldDatabase : IDisposable
 
     private byte[] EnsureRunCached(int index)
     {
-        var (runId, path, cached) = _runs[index];
-        if (cached is not null) return cached;
+        var (runId, path, cached, lastAccess) = _runs[index];
+        if (cached is not null)
+        {
+            _runs[index] = (runId, path, cached, ++_runCacheClock);
+            return cached;
+        }
 
         byte[] bytes;
         Guid blobId = RunBlobId(runId);
@@ -2281,8 +2292,54 @@ public sealed partial class FldDatabase : IDisposable
             throw new InvalidDataException(
                 $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
 
-        _runs[index] = (runId, path, bytes);
+        CacheRun(index, bytes);
         return bytes;
+    }
+
+    private void CacheRun(int index, byte[] bytes)
+    {
+        var (runId, path, previous, _) = _runs[index];
+        if (previous is not null)
+            _runCacheBytes -= previous.LongLength;
+
+        if (bytes.LongLength > RunCacheBudgetBytes)
+        {
+            _runs[index] = (runId, path, null, 0);
+            return;
+        }
+
+        while (_runCacheBytes + bytes.LongLength > RunCacheBudgetBytes)
+        {
+            int victimIndex = -1;
+            long oldestAccess = long.MaxValue;
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                if (i == index || _runs[i].cached is null)
+                    continue;
+                if (_runs[i].lastAccess < oldestAccess)
+                {
+                    oldestAccess = _runs[i].lastAccess;
+                    victimIndex = i;
+                }
+            }
+
+            if (victimIndex < 0)
+                break;
+
+            var victim = _runs[victimIndex];
+            _runCacheBytes -= victim.cached!.LongLength;
+            _runs[victimIndex] = (victim.runId, victim.path, null, 0);
+        }
+
+        if (_runCacheBytes + bytes.LongLength <= RunCacheBudgetBytes)
+        {
+            _runs[index] = (runId, path, bytes, ++_runCacheClock);
+            _runCacheBytes += bytes.LongLength;
+        }
+        else
+        {
+            _runs[index] = (runId, path, null, 0);
+        }
     }
 
     /// <summary>
