@@ -212,5 +212,5 @@ The public FLD `CompactTombstones(predicate, limit)` overload has been replaced 
 
 - Replaced the old test that reclaimed one candidate per repeated call with a regression asserting all three approved tombstones are reclaimed in one call and the predicate is evaluated once per candidate.
 - Removed the obsolete bounded-page Tombstone benchmark and removed the page-loop benchmark case. The remaining Tombstone sweep matrix measures one complete sweep and an isolated peak-memory probe at 1k–250k cardinalities. Historical repeated-page measurements remain recorded as baseline evidence.
-- Exact-head CI and the updated Tombstone sweep benchmark are running; do not treat this code block as green until those results complete.
+- Exact FLD HEAD `827f794064bb5e3db0810c2baf3e3d82eb5899fe` passed cross-platform .NET CI on Ubuntu, Windows and macOS 15 (run [43836634794](https://github.com/smersh1307n2/FLD-DB/actions/runs/43836634794), 3/3). The refreshed Tombstone sweep benchmark is still running (run `43836618247`); no new benchmark measurements are claimed yet.
 
