@@ -99,7 +99,7 @@ If future measurements show that holding the composed lease for one full sweep i
 - Remove or migrate every caller that loops `CompactTombstones(limit)` until no more candidates. There must be no compatibility shim that silently repeats full sweeps.
 - Receipt and ChangeId Metadata compactors retain their own independent bounded-page/cursor semantics. Do not change their limits or combine their retention domains with FLD tombstone compaction.
 - BIN-SYNC holds its Tombstone domain durable maintenance lease and Metadata writer admission through candidate scan, proof evaluation, approval transfer and final sweep. The provider acquires the Host-wide GC lease only for the final commit/compaction phase, after releasing the provider candidate snapshot; the dispatcher allows that lease owner to submit the sealed-spool commit operation while excluding other IPC sessions. Emergency Stop/cancellation before publication aborts the spool and prevents Manifest publication.
-- `TryBuildLiveRecordReferenceSet` currently materializes a Metadata-wide `HashSet<RecordId>`. This is a separate composed-memory cost and must be measured and either replaced with bounded/streamed exact reference lookup or explicitly bounded before claiming end-to-end bounded memory.
+- The coordinator now uses `TryFindLiveRecordReferences` against each bounded provider candidate page, retaining only page-matching RecordIds; it no longer calls `TryBuildLiveRecordReferenceSet` or materializes a namespace-wide Metadata `HashSet<RecordId>`. The legacy internal helper remains in `StorageMetadataStore`. The bounded lookup still scans all retained Metadata payloads once per candidate page, so its CPU cost can grow with page count and must be measured/optimized before release.
 - Keep all physical-GC feature switches false by default. Ghost GC remains excluded.
 
 ## 6. Required tests
@@ -189,3 +189,18 @@ Remaining limits are explicit:
 - Windows NTFS power-loss durability, direct Metadata writer-bypass fencing, staged canary and all operator release gates remain open.
 
 All physical-GC feature switches remain false by default. Ghost GC remains excluded.
+
+
+## 2026-11-16 follow-up — bounded provider snapshot RecordId cursor
+
+The provider snapshot previously defeated page-bounded candidate enumeration by eagerly building a namespace-wide `byte[][]` RecordId array and a `HashSet<(Low,High)>` during snapshot open. This has now been removed.
+
+- `FldProviderSnapshot` maintains one cursor per immutable Run and a min-heap keyed by canonical 16-byte RecordId order. It merges duplicate RecordIds across Runs and yields each distinct ID once.
+- Cursor state is O(number of source Runs), not O(namespace RecordId cardinality). The current record retains only its FieldId merge set; the full namespace RecordId list and deduplication set no longer exist.
+- `RecordCount` remains available to the IPC snapshot-open response. It is computed by a bounded-memory k-way count pass; the page cursor is then initialized for sequential reads. This adds one full Run-slot pass at snapshot open and must be included in timing benchmarks.
+- Backward page seeks rebuild the small Run cursor heap. Monotonic page reads do not restart the scan. Existing snapshot generation/run pins and page retry semantics remain unchanged.
+- Added `FldProviderSnapshotStreamingTests`: five RecordIds repeated across four source Runs, count verification, ordered page boundaries, retry caching and backward seek.
+
+Exact FLD HEAD `99e8175368dc3b9641c2e3133ac6d04b02ac2a18` passed .NET CI on Ubuntu, Windows and macOS 15 (run [43835665775](https://github.com/smersh1307n2/FLD-DB/actions/runs/43835665775), 3/3; Engine 124/124 on Ubuntu). The duplicate CI invocation for the same head also passed Ubuntu and macOS; its Windows job was still finalizing when this note was written.
+
+**Still open:** the count pass adds snapshot-open CPU; per-record field resolution still performs existing per-Run lookups; Metadata retained payloads are scanned once per candidate page; provider overlay snapshot construction remains to be measured; no 1M composed peak-heap/RSS proof or high-Run-count benchmark is claimed. All physical-GC switches remain default-off.
