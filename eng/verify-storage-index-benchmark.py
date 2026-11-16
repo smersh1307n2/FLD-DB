@@ -17,6 +17,7 @@ expected_methods = {
     "FreshOpenAndSnapshotReadOneEntry",
     "CachedSnapshotAndReadOneEntry",
     "WarmPointLookup",
+    "StoragePrefixScan",
     "BTreeWarmPointLookup",
     "BTreePrefixScan",
     "BTreeBulkBuild",
@@ -25,8 +26,8 @@ expected_methods = {
     "BTreeLargeValueReferenceLookup",
 }
 expected_counts = {"1000", "10000", "100000"}
-if len(rows) != 30:
-    raise SystemExit(f"expected 30 benchmark rows, found {len(rows)}")
+if len(rows) != 33:
+    raise SystemExit(f"expected 33 benchmark rows, found {len(rows)}")
 
 seen = set()
 for row in rows:
