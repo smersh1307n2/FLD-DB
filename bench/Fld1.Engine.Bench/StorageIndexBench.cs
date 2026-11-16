@@ -67,11 +67,21 @@ public class StorageIndexBench
     }
 
     [Benchmark]
-    public int CreateSnapshotAndReadOneEntry()
+    public int FreshOpenAndSnapshotReadOneEntry()
+    {
+        using var database = StorageDatabase.Open(_directory, 0, walRotateAfterBytes: 0);
+        using var snapshot = database.OpenSnapshot();
+        if (!snapshot.TryGet(_keys[_probeIndex], out byte[]? value))
+            throw new InvalidDataException("Fresh Storage snapshot did not find the fixture key.");
+        return value!.Length;
+    }
+
+    [Benchmark]
+    public int CachedSnapshotAndReadOneEntry()
     {
         using var snapshot = _database.OpenSnapshot();
         if (!snapshot.TryGet(_keys[_probeIndex], out byte[]? value))
-            throw new InvalidDataException("Storage snapshot did not find the fixture key.");
+            throw new InvalidDataException("Cached Storage snapshot did not find the fixture key.");
         return value!.Length;
     }
 
