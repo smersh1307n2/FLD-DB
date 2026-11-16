@@ -88,7 +88,7 @@ public sealed class FldTombstoneGcApprovalSpoolTests
         authorId[0] = 0x55;
         return new FldTombstoneGcCandidate(
             recordId, field, changeId, authorId,
-            hlcWall: 100 + record, hlcLogical: 1,
+            hlcWall: (ulong)(100 + record), hlcLogical: 1,
             originAuthorEpoch: 2, originSequence: 3,
             isRecordTombstone: false, isFieldTombstone: true);
     }
