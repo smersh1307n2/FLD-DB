@@ -1,6 +1,6 @@
 # FLD Tombstone GC: single-sweep bounded-memory compaction
 
-**Status:** Accepted implementation direction; implementation and validation pending  
+**Status:** Accepted implementation direction; first implementation block landed and exact-head cross-platform CI passed. Scale/composed-memory and release-gate validation remain pending.  
 **Date:** 2026-11-16  
 **Scope:** FLD Database physical compaction for protocol-authorized field and record tombstone reclamation  
 **Related:** `SYNC-STORAGE-COMPACTION-ROADMAP.md`, `FLD-STORAGE-CORE-ARCHITECTURE.md`, `FLD-STORAGE-PHYSICAL-FORMAT-ADR.md`, BIN-SYNC `BIN-SYNC-SPECIFICATION.txt`, `BIN-SYNC-V3.1-HOST-ORCHESTRATION.md`
@@ -162,3 +162,30 @@ The prior single-rewrite benchmark is a useful baseline, not an acceptance proof
 7. Measure and bound the Metadata live-record-reference set; add FLD-only and composed Host/Metadata benchmarks.
 8. Run exact-head CI and all benchmark gates; leave every physical-GC switch default-off.
 
+
+
+## 10. Implementation update — 2026-11-16
+
+The first implementation block is now present on `fix/crash-consistency-outbox` at exact HEAD
+`faed2685f961e70f10b7f258d67d4b0d68f6d7ac`. FLD .NET CI run
+[43833606630](https://github.com/smersh1307n2/FLD-DB/actions/runs/43833606630)
+passed on Ubuntu, macOS 15 and Windows (3/3).
+
+Implemented in this block:
+
+- `CompactTombstones` now performs one ordered record-cursor merge across overlay and source Runs, keeps per-record field merge state, and writes immutable output in bounded chunks (field-count / target-byte thresholds). The replacement generation is published through one Manifest update; old Runs are retired after publication under existing pin rules.
+- A regression test creates five source Runs containing fields for the same RecordId, compacts 5,000 fields into two output Runs with identical RecordId bounds, and verifies all fields after reopen.
+- Added a Host-owned, session-bound approval spool with strict RecordId/FieldId ordering and duplicate rejection, count + SHA-256 seal, a 2,000,000-entry cap, at most four active spools, and cleanup on abort, commit, disconnect, lease release and Host startup.
+- Added bounded append IPC batches and spool begin/append/seal/commit/abort operations. The old candidate-array IPC operation and client method were removed.
+- Host commit requires the lease owner and an active Host reference scan. The Tombstone-specific scan seals committed WAL before capturing the final reference snapshot; the commit reuses that same snapshot, revalidates exact ChangeId/RecordId references, and holds the Host lease fence plus database commit guard through compaction and Manifest publication.
+- The provider candidate snapshot is released before the Host-wide GC lease is acquired. Failed/cancelled scans abort the scratch spool; Host disconnect/restart cleanup is a final safety net.
+
+Remaining limits are explicit:
+
+- The 5,000-field test proves merge/chunk correctness, not 1M scale or peak-memory bounds.
+- The current merge still resolves each field through the existing resolver; source-byte and lookup-work counters plus high-Run-count benchmarks remain to be added.
+- BIN-SYNC's page-scoped Metadata reference lookup avoids the namespace-wide HashSet, but currently rescans retained Metadata payloads for each candidate page. Its composed CPU cost must be measured and improved if material.
+- Overlay snapshot residency and peak managed heap / OS RSS have not yet been measured end-to-end. Do not claim a completed bounded-memory proof.
+- Windows NTFS power-loss durability, direct Metadata writer-bypass fencing, staged canary and all operator release gates remain open.
+
+All physical-GC feature switches remain false by default. Ghost GC remains excluded.
