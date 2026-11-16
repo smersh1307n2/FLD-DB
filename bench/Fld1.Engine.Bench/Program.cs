@@ -31,10 +31,8 @@ if (args.Contains("--storage-index-only", StringComparer.Ordinal))
 
 if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
 {
-    // Each invocation compacts one bounded page from a freshly seeded on-disk namespace.
-    // Keep the iteration count modest because setup intentionally writes 50k records.
-    var gcConfig = DefaultConfig.Instance.AddJob(
-        Job.Default.WithWarmupCount(2).WithIterationCount(10));
+    // Each invocation performs one complete namespace sweep on a freshly seeded database.
+    // Keep the iteration count modest because setup intentionally writes up to 250k records.
     var sweepConfig = DefaultConfig.Instance.AddJob(
         Job.Default.WithWarmupCount(1).WithIterationCount(5));
     BenchmarkRunner.Run<TombstoneGcSweepBench>(sweepConfig);
