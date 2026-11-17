@@ -1394,7 +1394,7 @@ public sealed partial class FldDatabase : IDisposable
             if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
                 throw new InvalidDataException(
                     $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
-            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);.
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
 
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
