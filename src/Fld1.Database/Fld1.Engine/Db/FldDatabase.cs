@@ -2153,7 +2153,7 @@ public sealed partial class FldDatabase : IDisposable
         {
             builder.Add(recordId, fieldId, ReadOnlySpan<byte>.Empty,
                 resolved.Wall, resolved.Logical,
-                resolved.AuthorNodeId.Span, resolved.KeyEpoch, isTombstone: true,
+                resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: true,
                 changeId: resolved.ChangeId ?? Array.Empty<byte>(),
                 originAuthorEpoch: resolved.OriginAuthorEpoch,
                 originSequence: resolved.OriginSequence);
@@ -2162,7 +2162,7 @@ public sealed partial class FldDatabase : IDisposable
         {
             builder.Add(recordId, fieldId, resolved.Value,
                 resolved.Wall, resolved.Logical,
-                resolved.AuthorNodeId.Span, resolved.KeyEpoch, isTombstone: false,
+                resolved.AuthorNodeId ?? _localAuthor, resolved.KeyEpoch, isTombstone: false,
                 changeId: resolved.ChangeId ?? Array.Empty<byte>(),
                 originAuthorEpoch: resolved.OriginAuthorEpoch,
                 originSequence: resolved.OriginSequence);
@@ -2213,7 +2213,7 @@ public sealed partial class FldDatabase : IDisposable
     }
 
     /// <summary>Resolve without taking _commitLock (caller may hold it).</summary>
-    private bool TryResolveUnlocked(ReadOnlySpan<byte> recordId, ushort fieldId, out CompactionResolved resolved)
+    private bool TryResolveUnlocked(ReadOnlySpan<byte> recordId, ushort fieldId, out FieldResolver.Resolved resolved)
     {
         resolved = FieldResolver.Resolved.Miss;
         bool have = false;
