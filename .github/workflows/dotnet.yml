@@ -50,9 +50,79 @@ jobs:
         shell: bash
         run: dotnet build Fld.Db.slnx --configuration Release --no-restore 2>&1 | tee ci-logs/build.log
 
-      - name: Run tests
+      - name: Run targeted tests (routine CI) or full suite (milestone CI)
         shell: bash
-        run: dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
+            exit "${PIPESTATUS[0]}"
+          fi
+
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "No usable base SHA; fail safe to the complete test suite."
+            dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
+            exit "${PIPESTATUS[0]}"
+          fi
+
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA" "$GITHUB_SHA")
+          declare -A selected=()
+          full=0
+          for file in "${changed[@]}"; do
+            case "$file" in
+              src/Fld1.Database/Fld1.Core/*|src/Fld1.Database/Fld1.Database.csproj|Directory.*|*.props|*.targets|NuGet.config|global.json|*.slnx|eng/*|.github/workflows/*)
+                full=1 ;;
+              src/Fld1.Storage/*)
+                selected[Fld1.Storage.Tests]=1
+                selected[Fld1.Engine.Tests]=1 ;;
+              src/Fld1.Database/Fld1.Engine/*)
+                selected[Fld1.Engine.Tests]=1 ;;
+              src/Fld1.Database/Fld1.Manifest/*)
+                selected[Fld1.Manifest.Tests]=1
+                selected[Fld1.Engine.Tests]=1 ;;
+              src/Fld1.Database/Fld1.Run/*)
+                selected[Fld1.Run.Tests]=1
+                selected[Fld1.Engine.Tests]=1 ;;
+              src/Fld1.Database/Fld1.Wal/*)
+                selected[Fld1.Wal.Tests]=1
+                selected[Fld1.Engine.Tests]=1 ;;
+              src/Fld1.Database.Host/*|src/Fld1.Storage.Host/*)
+                full=1 ;;
+              tests/Fld1.Core.Tests/*) selected[Fld1.Core.Tests]=1 ;;
+              tests/Fld1.Storage.Tests/*) selected[Fld1.Storage.Tests]=1 ;;
+              tests/Fld1.Manifest.Tests/*) selected[Fld1.Manifest.Tests]=1 ;;
+              tests/Fld1.Run.Tests/*) selected[Fld1.Run.Tests]=1 ;;
+              tests/Fld1.Wal.Tests/*) selected[Fld1.Wal.Tests]=1 ;;
+              tests/Fld1.Engine.Tests/*) selected[Fld1.Engine.Tests]=1 ;;
+              tests/*|src/*) full=1 ;;
+              *)
+                # Docs and benchmark-only edits do not need functional tests.
+                ;;
+            esac
+          done
+
+          if (( full )); then
+            echo "Shared/unknown production surface changed; running the complete suite."
+            dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
+            exit "${PIPESTATUS[0]}"
+          fi
+
+          projects=()
+          for name in "${!selected[@]}"; do
+            projects+=("tests/$name/$name.csproj")
+          done
+          if (( ${#projects[@]} == 0 )); then
+            echo "No functional test project is affected by this change set."
+            exit 0
+          fi
+
+          printf 'Targeted test projects: %s\n' "${projects[*]}"
+          : > ci-logs/test.log
+          for project in "${projects[@]}"; do
+            dotnet test "$project" --configuration Release --no-build --no-restore --logger "console;verbosity=minimal" 2>&1 | tee -a ci-logs/test.log
+          done
 
       - name: Upload diagnostic logs
         if: always()
