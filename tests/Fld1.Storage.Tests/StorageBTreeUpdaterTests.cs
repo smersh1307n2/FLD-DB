@@ -206,6 +206,78 @@ public sealed class StorageBTreeUpdaterTests
         }
     }
 
+    [Fact]
+    public void COW_batch_updates_multiple_leaves_and_preserves_untouched_subtrees()
+    {
+        string directory = NewDirectory();
+        const ulong partition = 105;
+        const ulong generation = 2;
+        try
+        {
+            StorageBTreeManifestV2 oldManifest = BuildInitial(directory, partition, generation, 2000);
+            var mutations = new[]
+            {
+                new StorageTreeMutation("key-00010x"u8.ToArray(), "inserted-first-leaf"u8.ToArray(), false),
+                new StorageTreeMutation("key-00700"u8.ToArray(), "updated-second-leaf"u8.ToArray(), false),
+                new StorageTreeMutation("key-01500"u8.ToArray(), ReadOnlyMemory<byte>.Empty, true),
+                new StorageTreeMutation("key-01999z"u8.ToArray(), "inserted-last-leaf"u8.ToArray(), false)
+            };
+
+            StorageBTreeManifestV2 next;
+            using (var files = new StorageBTreeGenerationFiles(directory, partition, generation))
+            {
+                next = StorageBTreeUpdater.ApplyBatch(oldManifest, files, mutations);
+                Assert.Equal(oldManifest.CommitSeq + 1, next.CommitSeq);
+                Assert.NotEqual(oldManifest.RootPageId, next.RootPageId);
+
+                var reader = CreateReader(files, next);
+                Assert.True(reader.TryGet("key-00010x"u8, out StorageTreeValueReference firstInsert));
+                Assert.Equal("inserted-first-leaf",
+                    Encoding.UTF8.GetString(files.ReadData(firstInsert.Offset, firstInsert.Length, next.CommittedDataFileLength)));
+                Assert.True(reader.TryGet("key-00700"u8, out StorageTreeValueReference update));
+                Assert.Equal("updated-second-leaf",
+                    Encoding.UTF8.GetString(files.ReadData(update.Offset, update.Length, next.CommittedDataFileLength)));
+                Assert.False(reader.TryGet("key-01500"u8, out _));
+                Assert.True(reader.TryGet("key-01999z"u8, out StorageTreeValueReference lastInsert));
+                Assert.Equal("inserted-last-leaf",
+                    Encoding.UTF8.GetString(files.ReadData(lastInsert.Offset, lastInsert.Length, next.CommittedDataFileLength)));
+                Assert.True(reader.TryGet("key-01000"u8, out StorageTreeValueReference untouched));
+                Assert.Equal("value-01000",
+                    Encoding.UTF8.GetString(files.ReadData(untouched.Offset, untouched.Length, next.CommittedDataFileLength)));
+
+                using var cursor = reader.OpenPrefixCursor("key-"u8.ToArray());
+                int visible = 0;
+                string? previous = null;
+                while (cursor.TryReadNext(out StorageTreeEntry entry))
+                {
+                    string key = Encoding.UTF8.GetString(
+                        files.ReadData(entry.Key.Offset, entry.Key.Length, next.CommittedDataFileLength));
+                    if (previous is not null)
+                        Assert.True(StringComparer.Ordinal.Compare(previous, key) < 0);
+                    previous = key;
+                    visible++;
+                }
+                Assert.Equal(2000, visible);
+
+                // The previous root remains a valid snapshot at its original high-water marks.
+                var oldReader = CreateReader(files, oldManifest);
+                Assert.True(oldReader.TryGet("key-00700"u8, out StorageTreeValueReference oldValue));
+                Assert.Equal("value-00700",
+                    Encoding.UTF8.GetString(files.ReadData(oldValue.Offset, oldValue.Length, oldManifest.CommittedDataFileLength)));
+            }
+
+            using var reopened = new StorageBTreeGenerationFiles(directory, partition, generation);
+            var reopenedReader = CreateReader(reopened, next);
+            Assert.True(reopenedReader.TryGet("key-00700"u8, out StorageTreeValueReference reopenedValue));
+            Assert.Equal("updated-second-leaf",
+                Encoding.UTF8.GetString(reopened.ReadData(reopenedValue.Offset, reopenedValue.Length, next.CommittedDataFileLength)));
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
     private static StorageBTreeManifestV2 BuildInitial(string directory, ulong partition, ulong generation, int count)
     {
         using var files = new StorageBTreeGenerationFiles(directory, partition, generation);
