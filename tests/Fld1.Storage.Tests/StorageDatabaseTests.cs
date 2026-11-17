@@ -80,10 +80,13 @@ public sealed class StorageDatabaseTests : IDisposable
             Assert.Throws<InvalidOperationException>(() => db.TryGet("published-key"u8, out _));
         }
 
-        using var recovered = StorageDatabase.Open(directory, partition);
-        Assert.Equal(1UL, recovered.LastCommitSeq);
-        Assert.True(recovered.TryGet("published-key"u8, out var value));
-        Assert.Equal("published-value"u8.ToArray(), value);
+        using (var recovered = StorageDatabase.Open(directory, partition))
+        {
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet("published-key"u8, out var value));
+            Assert.Equal("published-value"u8.ToArray(), value);
+        }
+
         Assert.Equal(1UL, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value.CommitSeq);
     }
 
