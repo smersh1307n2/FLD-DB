@@ -2127,12 +2127,11 @@ public sealed partial class FldDatabase : IDisposable
             {
                 if (pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
                     continue;
-                deleted = _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
-                if (File.Exists(oldRun.path))
-                {
-                    File.Delete(oldRun.path);
-                    deleted = true;
-                }
+                _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
+                if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
+                // The manifest no longer references this Run. Physical blob deletion
+                // may be deferred while retired mappings keep their snapshot pins.
+                deleted = true;
             }
             catch
             {
