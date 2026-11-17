@@ -18,7 +18,6 @@ public sealed class StorageDatabase : IDisposable
     private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
     private readonly StorageGenerationPins _generationPins = new();
     private readonly Dictionary<ulong, StorageBTreeGenerationFiles> _generationFiles = new();
-    private SortedList<StorageKey, byte[]>? _snapshotIndex;
     private readonly WalManager _wal;
     private StorageBTreeGenerationFiles? _btreeFiles;
     private StorageBTreeManifestV2 _btreeManifest;
@@ -444,7 +443,6 @@ public sealed class StorageDatabase : IDisposable
                 _btreeManifest = next;
                 _btreeReader = CreateBTreeReader(next, files);
                 _lastCommitSeq = next.CommitSeq;
-                _snapshotIndex = null;
                 return next.CommitSeq;
             }
             catch
@@ -487,7 +485,6 @@ public sealed class StorageDatabase : IDisposable
         _btreeManifest = next;
         _btreeReader = CreateBTreeReader(next, files);
         _lastCommitSeq = commitSeq;
-        _snapshotIndex = null;
     }
 
     private static byte[] EncodeBatch(IReadOnlyCollection<StorageMutation> mutations)
@@ -679,26 +676,43 @@ public sealed class StorageWriteBatch : IDisposable
 /// <summary>Immutable, stable point-in-time view of a Storage partition.</summary>
 public sealed class StorageSnapshot : IDisposable
 {
-    private SortedList<StorageDatabase.StorageKey, byte[]>? _values;
+    private StorageBTreeReader? _reader;
+    private StorageBTreeGenerationFiles? _files;
+    private readonly StorageBTreeManifestV2 _manifest;
+    private StorageGenerationPin? _pin;
+    private Action<ulong>? _onPinReleased;
     public ulong CommitSeq { get; }
 
-    internal StorageSnapshot(SortedList<StorageDatabase.StorageKey, byte[]> values, ulong commitSeq)
+    internal StorageSnapshot(
+        StorageBTreeReader reader,
+        StorageBTreeGenerationFiles files,
+        in StorageBTreeManifestV2 manifest,
+        StorageGenerationPin pin,
+        ulong commitSeq,
+        Action<ulong> onPinReleased)
     {
-        _values = values;
+        _reader = reader ?? throw new ArgumentNullException(nameof(reader));
+        _files = files ?? throw new ArgumentNullException(nameof(files));
+        _manifest = manifest;
+        _pin = pin ?? throw new ArgumentNullException(nameof(pin));
         CommitSeq = commitSeq;
+        _onPinReleased = onPinReleased ?? throw new ArgumentNullException(nameof(onPinReleased));
     }
 
     public bool TryGet(ReadOnlySpan<byte> key, out byte[]? value)
     {
-        var values = GetValues();
-        if (values.TryGetValue(new StorageDatabase.StorageKey(key), out var stored))
+        if (key.IsEmpty) throw new ArgumentException("Storage key must not be empty.", nameof(key));
+        if (!GetReader().TryGet(key, out StorageTreeValueReference reference))
         {
-            value = stored.ToArray();
-            return true;
+            value = null;
+            return false;
         }
 
-        value = null;
-        return false;
+        value = GetFiles().ReadData(
+            reference.Offset,
+            reference.Length,
+            _manifest.CommittedDataFileLength);
+        return true;
     }
 
     public IReadOnlyList<StorageEntry> ScanPrefix(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> afterKey, int limit)
@@ -707,18 +721,26 @@ public sealed class StorageSnapshot : IDisposable
         return cursor.ReadPage(limit);
     }
 
-    /// <summary>Creates a forward-only, bounded-memory cursor over one sorted key prefix.</summary>
+    /// <summary>Creates a forward-only cursor over the immutable B+ tree generation pinned by this snapshot.</summary>
     public PrefixCursor OpenPrefixCursor(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> afterKey = default)
     {
         return new PrefixCursor(this, prefix.ToArray(), afterKey.ToArray());
     }
+
+    private StorageBTreeReader GetReader()
+        => _reader ?? throw new ObjectDisposedException(nameof(StorageSnapshot));
+
+    private StorageBTreeGenerationFiles GetFiles()
+        => _files ?? throw new ObjectDisposedException(nameof(StorageSnapshot));
 
     public sealed class PrefixCursor : IDisposable
     {
         private readonly StorageSnapshot _owner;
         private readonly byte[] _prefix;
         private readonly byte[] _afterKey;
-        private int _index;
+        private StorageBTreePrefixCursor? _cursor;
+        private byte[]? _currentKey;
+        private byte[]? _currentValue;
         private bool _finished;
         private bool _disposed;
 
@@ -727,37 +749,16 @@ public sealed class StorageSnapshot : IDisposable
             _owner = owner;
             _prefix = prefix;
             _afterKey = afterKey;
-            SortedList<StorageDatabase.StorageKey, byte[]> values = owner.GetValues();
-            ReadOnlySpan<byte> startKey = afterKey.Length != 0 &&
-                afterKey.AsSpan().SequenceCompareTo(prefix) > 0
-                    ? afterKey
-                    : prefix;
-            _index = LowerBound(values, startKey);
-        }
-
-        private static int LowerBound(
-            SortedList<StorageDatabase.StorageKey, byte[]> values, ReadOnlySpan<byte> key)
-        {
-            int low = 0;
-            int high = values.Count;
-            while (low < high)
-            {
-                int middle = low + ((high - low) >> 1);
-                if (values.Keys[middle].Span.SequenceCompareTo(key) < 0)
-                    low = middle + 1;
-                else
-                    high = middle;
-            }
-            return low;
+            StorageBTreeReader reader = owner.GetReader();
+            _cursor = prefix.Length == 0
+                ? reader.OpenAllCursor()
+                : reader.OpenPrefixCursor(prefix);
         }
 
         public IReadOnlyList<StorageEntry> ReadPage(int limit)
         {
             if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
-            SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
-            if (_finished) return Array.Empty<StorageEntry>();
-
-            var result = new List<StorageEntry>(Math.Min(limit, Math.Max(0, values.Count - _index)));
+            var result = new List<StorageEntry>(limit);
             VisitPage(limit, Add);
             return result;
 
@@ -778,9 +779,6 @@ public sealed class StorageSnapshot : IDisposable
             if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
             ArgumentNullException.ThrowIfNull(visitor);
             ObjectDisposedException.ThrowIf(_disposed, this);
-            SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
-            if (_finished) return 0;
-
             int visited = 0;
             while (visited < limit && TryReadNext(out StorageEntryView entry))
             {
@@ -791,34 +789,42 @@ public sealed class StorageSnapshot : IDisposable
             return visited;
         }
 
-        /// <summary>Read one borrowed entry without allocating a page or copying key/value bytes.</summary>
+        /// <summary>Read one borrowed entry without allocating a page or copying beyond the current key/value.</summary>
         public bool TryReadNext(out StorageEntryView entry)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            SortedList<StorageDatabase.StorageKey, byte[]> values = _owner.GetValues();
+            _ = _owner.GetReader(); // Fail if the owning snapshot has already been disposed.
             if (_finished)
             {
                 entry = default;
                 return false;
             }
 
-            while (_index < values.Count)
+            StorageBTreePrefixCursor cursor = _cursor
+                ?? throw new ObjectDisposedException(nameof(PrefixCursor));
+            StorageBTreeGenerationFiles files = _owner.GetFiles();
+            StorageBTreeManifestV2 manifest = _owner._manifest;
+            while (cursor.TryReadNext(out StorageTreeEntry treeEntry))
             {
-                StorageDatabase.StorageKey key = values.Keys[_index];
-                byte[] value = values.Values[_index];
-                _index++;
-                ReadOnlySpan<byte> keyBytes = key.Span;
-                int prefixOrder = CompareToPrefix(keyBytes, _prefix);
-                if (prefixOrder < 0) continue;
-                if (prefixOrder > 0)
+                byte[] key = files.ReadData(
+                    treeEntry.Key.Offset,
+                    treeEntry.Key.Length,
+                    manifest.CommittedDataFileLength);
+                if (_afterKey.Length != 0 && key.AsSpan().SequenceCompareTo(_afterKey) <= 0)
+                    continue;
+                if (_prefix.Length != 0 && !key.AsSpan().StartsWith(_prefix))
                 {
                     _finished = true;
                     break;
                 }
-                if (_afterKey.Length != 0 && keyBytes.SequenceCompareTo(_afterKey) <= 0)
-                    continue;
 
-                entry = new StorageEntryView(keyBytes, value);
+                byte[] value = files.ReadData(
+                    treeEntry.Value.Offset,
+                    treeEntry.Value.Length,
+                    manifest.CommittedDataFileLength);
+                _currentKey = key;
+                _currentValue = value;
+                entry = new StorageEntryView(_currentKey, _currentValue);
                 return true;
             }
 
@@ -829,23 +835,27 @@ public sealed class StorageSnapshot : IDisposable
 
         public void Dispose()
         {
+            if (_disposed) return;
             _disposed = true;
             _finished = true;
-        }
-
-        private static int CompareToPrefix(ReadOnlySpan<byte> key, ReadOnlySpan<byte> prefix)
-        {
-            int common = Math.Min(key.Length, prefix.Length);
-            int order = key[..common].SequenceCompareTo(prefix[..common]);
-            if (order != 0) return order;
-            return key.Length < prefix.Length ? -1 : 0;
+            _cursor?.Dispose();
+            _cursor = null;
+            _currentKey = null;
+            _currentValue = null;
         }
     }
 
-    private SortedList<StorageDatabase.StorageKey, byte[]> GetValues()
-        => _values ?? throw new ObjectDisposedException(nameof(StorageSnapshot));
-
-    public void Dispose() => _values = null;
+    public void Dispose()
+    {
+        StorageGenerationPin? pin = Interlocked.Exchange(ref _pin, null);
+        _reader = null;
+        _files = null;
+        Action<ulong>? callback = Interlocked.Exchange(ref _onPinReleased, null);
+        if (pin is null) return;
+        ulong generation = pin.Generation;
+        pin.Dispose();
+        callback?.Invoke(generation);
+    }
 }
 
 public sealed record StorageEntry(byte[] Key, byte[] Value);
