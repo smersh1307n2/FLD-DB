@@ -38,7 +38,6 @@ public sealed class StorageBTreeUpdaterTests
 
                 StorageBTreeRootPublisher.Publish(directory, nextManifest, files);
 
-                // The old immutable root is still readable after the new root is published.
                 Assert.True(oldReader.TryGet("key-00321"u8, out oldValue));
                 Assert.Equal("value-00321",
                     Encoding.UTF8.GetString(files.ReadData(oldValue.Offset, oldValue.Length, oldManifest.CommittedDataFileLength)));
