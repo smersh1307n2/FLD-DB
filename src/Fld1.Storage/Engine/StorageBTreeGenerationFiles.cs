@@ -9,6 +9,7 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
     private readonly object _gate = new();
     private readonly IStorageRandomAccessFile _pages;
     private readonly IStorageRandomAccessFile _data;
+    private readonly ulong _partitionId;
     private readonly ulong _generation;
     private bool _disposed;
 
@@ -18,6 +19,7 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
         if (partitionId == 0) throw new ArgumentOutOfRangeException(nameof(partitionId));
         if (generation == 0) throw new ArgumentOutOfRangeException(nameof(generation));
 
+        _partitionId = partitionId;
         _generation = generation;
         string snapshots = Path.Combine(databaseDirectory, "snapshots");
         StorageDirectorySync.CreateDirectoryDurable(snapshots);
@@ -50,6 +52,9 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
         // A crash may leave a partial trailing page. Keep the file open so recovery
         // can truncate it to the validated manifest high-water mark before appending.
     }
+
+    public ulong PartitionId => _partitionId;
+    public ulong Generation => _generation;
 
     public ulong PageFileLength
     {
@@ -132,13 +137,21 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
         }
     }
 
-    public void FlushToDisk()
+    public void FlushToDisk(
+        Action? beforeDataFlush = null,
+        Action? afterDataFlush = null,
+        Action? beforePageFlush = null,
+        Action? afterPageFlush = null)
     {
         lock (_gate)
         {
             EnsureUsable();
+            beforeDataFlush?.Invoke();
             _data.FlushToDisk();
+            afterDataFlush?.Invoke();
+            beforePageFlush?.Invoke();
             _pages.FlushToDisk();
+            afterPageFlush?.Invoke();
         }
     }
 

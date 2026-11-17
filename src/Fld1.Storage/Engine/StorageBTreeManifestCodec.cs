@@ -118,7 +118,8 @@ internal static class StorageBTreeManifestCodec
 
         ulong pageCount = manifest.CommittedPageFileLength / manifest.PageSize;
         if ((manifest.RootPageId == 0) != (pageCount == 0) ||
-            manifest.RootPageId > pageCount)
-            throw new InvalidDataException("Paged Storage manifest root is outside its committed page range.");
+            manifest.RootPageId > pageCount ||
+            (manifest.RootPageId == 0 && manifest.CommittedDataFileLength != 0))
+            throw new InvalidDataException("Paged Storage manifest root or empty-generation data range is invalid.");
     }
 }

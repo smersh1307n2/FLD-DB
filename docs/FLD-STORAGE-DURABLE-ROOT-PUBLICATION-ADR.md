@@ -119,9 +119,11 @@ For each boundary, run a child process that exits/crashes, reopen the database, 
 - Sealed-segment inspection during checkpoint also uses the streaming scanner. The compatibility WalManager.Open API still materializes records for existing internal callers/tests.
 - The Storage dictionary and v1 snapshot remain fully materialized; this stage removes the duplicate all-WAL-record collection only. It does not yet prove whole-database bounded-memory recovery.
 
-**Stage D.3 — root publication transaction**
+**Stage D.3 — root publication transaction — publication primitive implemented 2026-11-17**
 - Implement copy-on-write batch application and manifest root publication behind an internal/test-only path.
-- Add the full crash/reopen fault matrix before any public opt-in.
+- The standalone root publisher now flushes data before pages, validates the root page, writes a checksummed temporary v2 manifest, atomically replaces the v2 root and flushes the containing directory. It is not connected to StorageDatabase commits.
+- Deterministic fault points cover data/page flush, manifest file flush, atomic replace and directory flush. Tests cover old-root retention before replace, new-root visibility after replace, and fail-closed reopen on missing/corrupt generation data.
+- Copy-on-write batch application, WAL/CommitSeq coupling, child-process crash/reopen matrix and production routing remain blocked.
 
 **Stage E — snapshot pins and compaction**
 - Connect snapshot/cursor lifetime to generation pins.
@@ -171,3 +173,10 @@ The standalone manifest/file primitive block passed workflow 43984533449 on Ubun
 WAL recovery now has a streaming visitor that validates the same header, envelope CRC, record CRC, padding, sequence order, corruption and torn-tail rules as the materializing reader. It retains one decoded record payload at a time. WalManager performs a validation pass over all segments, records only per-segment sequence/count/end-offset summaries, then returns a recovery plan that re-scans and replays records synchronously. The second pass verifies that the segment summaries still match the validated pass. StorageDatabase.Open now applies snapshot state first and then replays through this plan; sealed-segment checkpoint inspection also avoids materializing a record list.
 
 The compatibility WalManager.Open and WalRecovery.Recover methods remain available internally and retain their materializing behavior. The production StorageDatabase path no longer uses them. This does not remove the v1 Dictionary or SortedList materialization and therefore is not a bounded-memory database-open claim. Next: D.3 copy-on-write batch application and durable root publication, with the full flush/replace/crash matrix.
+
+
+### Stage D.3.1 implementation record — 2026-11-17
+
+Added the standalone v2 root publisher and fail-closed root loader. Publication requires exact physical/committed file lengths, flushes data before pages, validates the root page, writes a write-through temporary manifest, atomically replaces the separate v2 root manifest, and flushes the snapshots directory where supported. Windows uses the existing NTFS write-through handle-rename primitive; direct directory fsync remains unavailable there and the existing Windows power-loss proof gate remains in force.
+
+Fault-injection tests establish the visible namespace outcomes around the replace boundary: before replace, the prior root remains authoritative; after replace, the new root is visible but the caller receives an exception and must treat completion as uncertain/reopen. These are deterministic process-level fault tests, not a substitute for child-process power-loss tests. The publisher is internal and is not called by StorageDatabase. WAL batch coupling and COW root generation are still pending.

@@ -14,5 +14,13 @@ internal enum StorageFaultPoint
     AfterSnapshotFileFlushBeforeRename,
     AfterSnapshotRenameBeforeManifest,
     AfterManifestFileFlushBeforeRename,
-    AfterManifestRenameBeforeWalTruncate
+    AfterManifestRenameBeforeWalTruncate,
+    BeforeBTreeDataFlush,
+    AfterBTreeDataFlush,
+    BeforeBTreePageFlush,
+    AfterBTreePageFlushBeforeManifest,
+    AfterBTreeManifestFileFlushBeforeReplace,
+    AfterBTreeManifestReplace,
+    BeforeBTreeManifestDirectoryFsync,
+    AfterBTreeManifestDirectoryFsync
 }

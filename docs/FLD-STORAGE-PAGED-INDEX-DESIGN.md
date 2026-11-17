@@ -276,3 +276,10 @@ The durability primitive tests and complete FLD-DB test matrix passed at the D.1
 StorageDatabase.Open now uses a two-pass WAL recovery plan. The validation pass checks segment continuity and every record without collecting the decoded records; it retains only small per-segment summaries. After the snapshot is loaded, replay scans the segments again and invokes the storage apply callback for one record at a time. The replay pass verifies record count, last CommitSeq and valid end offset against the validation pass. Torn tails are still truncated only in the final segment, and checkpoint sealed-segment inspection also uses the streaming visitor.
 
 The compatibility materializing WAL API remains for internal legacy callers. The active StorageDatabase open path no longer builds the all-record List, but it still loads the v1 Dictionary and snapshot. This is not yet a bounded-memory database-open implementation. D.3 must apply complete WAL batches to copy-on-write pages and durably publish roots before any v2 routing.
+
+
+### 2026-11-17 — Stage D.3.1 standalone root publisher
+
+Added a separate v2 root-manifest publication primitive. It refuses mismatched generation identities or manifest high-water marks, flushes append-only data before page files, validates the root page, writes the checksummed manifest to a write-through temporary file, atomically replaces the dedicated v2 root manifest, and flushes the containing directory on platforms supporting directory fsync. The v2 root filename is separate from the existing FLDM/v1 snapshot manifest.
+
+The loader fails closed for bad manifest CRC/identity, missing generation files, committed lengths beyond physical files, or a corrupt root page. Deterministic fault injection verifies that a failure before replace leaves the old root authoritative and that an exception after replace requires reopen because completion is uncertain. This is not yet COW batch application, WAL-coupled commit, a child-process crash matrix, or production Storage routing.
