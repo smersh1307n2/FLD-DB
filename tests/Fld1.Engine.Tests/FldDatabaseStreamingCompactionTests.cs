@@ -37,8 +37,11 @@ public sealed class FldDatabaseStreamingCompactionTests
                 }
 
                 Assert.NotEqual(0UL, database.Compact());
+                Assert.Empty(Directory.EnumerateFiles(
+                    Path.Combine(root, "runs"), "*.fld1"));
                 Assert.Equal(2, Directory.EnumerateFiles(
-                    Path.Combine(root, "runs"), "*.fld1").Count());
+                    Path.Combine(root, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8)),
+                    "content.blob", SearchOption.AllDirectories).Count());
 
                 foreach (var field in fields)
                 {
