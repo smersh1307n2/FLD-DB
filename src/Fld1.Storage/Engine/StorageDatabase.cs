@@ -209,7 +209,7 @@ public sealed class StorageDatabase : IDisposable
     }
 
     private StorageBTreeReader CreateBTreeReader(
-        in StorageBTreeManifestV2 manifest,
+        StorageBTreeManifestV2 manifest,
         StorageBTreeGenerationFiles files)
         => new(
             manifest.Generation,
@@ -758,7 +758,7 @@ public sealed class StorageSnapshot : IDisposable
         public IReadOnlyList<StorageEntry> ReadPage(int limit)
         {
             if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
-            var result = new List<StorageEntry>(limit);
+            var result = new List<StorageEntry>(Math.Min(limit, 128));
             VisitPage(limit, Add);
             return result;
 
