@@ -9,7 +9,7 @@ namespace Fld1.Run.Reader;
 /// object alive while any RunReader/ReadOnlyMemory slice obtained from it is in use.
 /// FldDatabase therefore retires replaced mappings and releases them only on Dispose.
 /// </summary>
-internal sealed unsafe class MappedRunFile : MemoryManager<byte>
+internal sealed unsafe class MappedRunFile : MemoryManager<byte>, IRunMemoryMapping
 {
     private readonly MemoryMappedFile _mapping;
     private readonly MemoryMappedViewAccessor _view;
