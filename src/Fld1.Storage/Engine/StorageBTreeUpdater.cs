@@ -41,6 +41,12 @@ internal static class StorageBTreeUpdater
                 throw new InvalidDataException("B+ tree mutation batch must be strictly sorted with no duplicate keys.");
         }
 
+        // A bounded per-batch page cache avoids allocating and decoding the same
+        // immutable internal/leaf pages for every sorted mutation in a delete batch.
+        // It is deliberately scoped to this ApplyBatch call: failed batches may reuse
+        // uncommitted page IDs after truncation, so no stale page can survive a retry.
+        var pageReadCache = new BatchPageReadCache();
+
         ulong nextCommitSeq = checked(current.CommitSeq + 1);
         ulong nextPageId = checked(current.CommittedPageFileLength / StoragePageCodec.PageSize + 1);
         ulong rootPageId = current.RootPageId;
@@ -53,14 +59,14 @@ internal static class StorageBTreeUpdater
                 var path = new List<StorageTreePathFrame>();
                 ulong leafId = rootPageId == 0
                     ? 0
-                    : FindLeaf(rootPageId, mutations[start].Key.Span, files, path);
+                    : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache);
 
                 int end = start + 1;
                 while (end < mutations.Count)
                 {
                     ulong candidate = rootPageId == 0
                         ? 0
-                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, new List<StorageTreePathFrame>());
+                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, new List<StorageTreePathFrame>(), pageReadCache);
                     if (candidate != leafId)
                         break;
                     end++;
@@ -69,12 +75,12 @@ internal static class StorageBTreeUpdater
                 StorageTreeLeafEntry[] existing = leafId == 0
                     ? Array.Empty<StorageTreeLeafEntry>()
                     : StorageBTreePageCodec.DecodeLeaf(
-                        files.ReadPage(leafId, files.PageFileLength), files.Generation, leafId).Entries;
+                        pageReadCache.Read(files, leafId, files.PageFileLength), files.Generation, leafId).Entries;
                 ValidateLeafEntries(existing, files);
 
                 List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files);
                 List<StorageTreeChild> replacements = WriteLeafLevel(merged, files, ref nextPageId);
-                rootPageId = RewritePath(path, leafId, replacements, files, ref nextPageId);
+                rootPageId = RewritePath(path, leafId, replacements, files, ref nextPageId, pageReadCache);
                 start = end;
             }
 
@@ -241,13 +247,14 @@ internal static class StorageBTreeUpdater
         ulong oldLeafId,
         List<StorageTreeChild> replacements,
         StorageBTreeGenerationFiles files,
-        ref ulong nextPageId)
+        ref ulong nextPageId,
+        BatchPageReadCache pageReadCache)
     {
         ulong oldChildId = oldLeafId;
         for (int i = path.Count - 1; i >= 0; i--)
         {
             StorageTreePathFrame frame = path[i];
-            byte[] parentBytes = files.ReadPage(frame.PageId, files.PageFileLength);
+            byte[] parentBytes = pageReadCache.Read(files, frame.PageId, files.PageFileLength);
             StorageTreeInternalPage parent =
                 StorageBTreePageCodec.DecodeInternal(parentBytes, files.Generation, frame.PageId);
             ValidateInternalNode(parent, files);
@@ -255,7 +262,7 @@ internal static class StorageBTreeUpdater
             if (StorageBTreePageCodec.GetInternalChild(parent, frame.ChildIndex) != oldChildId)
                 throw new InvalidDataException("B+ tree COW path no longer points at the expected child.");
 
-            List<StorageTreeChild> children = ExpandChildren(parent, files);
+            List<StorageTreeChild> children = ExpandChildren(parent, files, pageReadCache);
             children.RemoveAt(frame.ChildIndex);
             children.InsertRange(frame.ChildIndex, replacements);
             replacements = WriteInternalLevel(children, files, ref nextPageId);
@@ -312,11 +319,12 @@ internal static class StorageBTreeUpdater
 
     private static List<StorageTreeChild> ExpandChildren(
         StorageTreeInternalPage node,
-        StorageBTreeGenerationFiles files)
+        StorageBTreeGenerationFiles files,
+        BatchPageReadCache pageReadCache)
     {
         var children = new List<StorageTreeChild>(node.Separators.Length + 1)
         {
-            new StorageTreeChild(node.FirstChild, FindFirstKey(node.FirstChild, files))
+            new StorageTreeChild(node.FirstChild, FindFirstKey(node.FirstChild, files, pageReadCache))
         };
         children.AddRange(node.Separators);
         return children;
@@ -324,12 +332,13 @@ internal static class StorageBTreeUpdater
 
     private static StorageTreeKeyReference FindFirstKey(
         ulong pageId,
-        StorageBTreeGenerationFiles files)
+        StorageBTreeGenerationFiles files,
+        BatchPageReadCache pageReadCache)
     {
         ulong id = pageId;
         for (int depth = 0; depth < 64; depth++)
         {
-            byte[] bytes = files.ReadPage(id, files.PageFileLength);
+            byte[] bytes = pageReadCache.Read(files, id, files.PageFileLength);
             StoragePageView page = StoragePageCodec.Decode(bytes, files.Generation, id);
             if (page.Kind == StoragePageKind.Leaf)
             {
@@ -351,7 +360,8 @@ internal static class StorageBTreeUpdater
         ulong rootPageId,
         ReadOnlySpan<byte> key,
         StorageBTreeGenerationFiles files,
-        List<StorageTreePathFrame> path)
+        List<StorageTreePathFrame> path,
+        BatchPageReadCache pageReadCache)
     {
         ulong id = rootPageId;
         for (int depth = 0; depth < 64; depth++)
@@ -405,6 +415,37 @@ internal static class StorageBTreeUpdater
         StorageBTreeGenerationFiles files,
         StorageTreeKeyReference reference)
         => files.ReadData(reference.Offset, reference.Length, files.DataFileLength);
+
+    /// <summary>
+    /// FIFO cache for immutable pages touched during one COW batch. The cap bounds
+    /// temporary memory even when a large mutation batch spans many thousands of leaves.
+    /// </summary>
+    private sealed class BatchPageReadCache
+    {
+        private const int Capacity = 4096;
+        private readonly Dictionary<ulong, byte[]> _pages = new(Capacity);
+        private readonly Queue<ulong> _order = new();
+
+        public byte[] Read(
+            StorageBTreeGenerationFiles files,
+            ulong pageId,
+            ulong committedPageFileLength)
+        {
+            if (_pages.TryGetValue(pageId, out byte[]? cached))
+                return cached;
+
+            byte[] page = files.ReadPage(pageId, committedPageFileLength);
+            if (_pages.Count == Capacity)
+            {
+                ulong oldest = _order.Dequeue();
+                _pages.Remove(oldest);
+            }
+
+            _pages.Add(pageId, page);
+            _order.Enqueue(pageId);
+            return page;
+        }
+    }
 
     private static ulong Allocate(ref ulong nextPageId)
     {
