@@ -196,3 +196,8 @@ D.3.1/D.3.2 CI: workflow 43986557070 passed on Ubuntu, macOS 15 and Windows with
 ### Stage D.3.3 root monotonicity — 2026-11-17
 
 The root publisher now reads and validates the current v2 manifest before doing any flush or replacement. It rejects a new root whose CommitSeq or generation is lower than the currently published root. Equal CommitSeq with a higher generation remains valid for compaction; a higher CommitSeq in the same generation remains valid for a normal append/COW commit. A regression test proves stale commit and stale generation attempts leave the prior root unchanged.
+
+
+### Stage D.3.3 verification — 2026-11-17
+
+The root monotonicity guard and regression test passed workflow 43987797721 on Ubuntu, macOS 15 and Windows: 333 tests per platform, zero failures and zero skips. The 1M-entry B+ tree scale gate workflow 43987789892 also passed. The production Storage path remains on v1; D.3 is still an internal prototype.

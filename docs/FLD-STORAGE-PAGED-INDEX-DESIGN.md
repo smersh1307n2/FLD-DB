@@ -296,3 +296,6 @@ This validates immutable bulk generation build/publish/reopen. It is not increme
 
 
 The v2 root publisher now also rejects CommitSeq or generation regression relative to the currently published v2 root. Same-CommitSeq publication to a higher generation remains available for compaction, and increasing CommitSeq within the same generation remains available for subsequent commits.
+
+
+D.3.3 verification: workflow 43987797721 passed 333 tests on each of Ubuntu/macOS/Windows, with zero failures/skips; 1M-entry scale gate 43987789892 passed. These gates validate the internal v2 prototype and do not authorize production routing.
