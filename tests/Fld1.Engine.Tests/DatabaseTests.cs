@@ -19,6 +19,19 @@ public class DatabaseTests : IDisposable
         return id;
     }
 
+    private static Guid RunBlobId(ulong runId)
+    {
+        Span<byte> id = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(id, runId);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(id.Slice(8), 0x314E5552);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(id.Slice(12), 0x31444C46);
+        return new Guid(id);
+    }
+
+    private string RunBlobPath(ulong runId)
+        => Path.Combine(_dir, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8),
+            RunBlobId(runId).ToString("N"), "content.blob");
+
     [Fact]
     public void Put_get_from_overlay()
     {
@@ -51,7 +64,8 @@ public class DatabaseTests : IDisposable
         Assert.Equal(0, db.OverlayCount);
         Assert.True(db.TryGetBytes(rec, 5, out var v));
         Assert.Equal("sealed"u8.ToArray(), v);
-        Assert.True(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
+        Assert.False(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
+        Assert.True(File.Exists(RunBlobPath(runId)));
     }
 
     [Fact]
@@ -65,10 +79,13 @@ public class DatabaseTests : IDisposable
             db.Commit();
             runId = db.Checkpoint();
         }
+        Assert.False(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
+        Assert.True(File.Exists(RunBlobPath(runId)));
         using (var db2 = FldDatabase.Open(_dir, 0))
         {
             Assert.True(db2.TryGetBytes(rec, 1, out var v));
             Assert.Equal("persist"u8.ToArray(), v);
+            Assert.False(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
         }
     }
 
@@ -97,7 +114,7 @@ public class DatabaseTests : IDisposable
     }
 
     [Fact]
-    public void Reopen_rejects_valid_but_stale_mirror_and_recovers_authoritative_blob()
+    public void Reopen_uses_authoritative_blob_and_removes_stale_legacy_mirror()
     {
         var rec = Rec(0x32);
         ulong runId;
@@ -122,10 +139,9 @@ public class DatabaseTests : IDisposable
             Assert.Equal("authoritative"u8.ToArray(), value);
         }
 
-        Assert.False(File.ReadAllBytes(mirrorPath).AsSpan().SequenceEqual(staleMirror));
-        var repairedReader = new Fld1.Run.Reader.RunReader(File.ReadAllBytes(mirrorPath));
-        Assert.True(repairedReader.TryGet(rec, 8, out ReadOnlySpan<byte> repairedValue));
-        Assert.Equal("authoritative"u8.ToArray(), repairedValue.ToArray());
+        Assert.False(File.Exists(mirrorPath),
+            "The redundant legacy mirror must be removed after the authoritative Storage blob is verified.");
+        Assert.True(File.Exists(RunBlobPath(runId)));
     }
 
     [Fact]
