@@ -18,6 +18,7 @@ public sealed class StorageDatabase : IDisposable
     private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
     private readonly StorageGenerationPins _generationPins = new();
     private readonly Dictionary<ulong, StorageBTreeGenerationFiles> _generationFiles = new();
+    private readonly HashSet<ulong> _preserveGenerationFiles = new();
     private readonly WalManager _wal;
     private StorageBTreeGenerationFiles? _btreeFiles;
     private StorageBTreeManifestV2 _btreeManifest;
@@ -386,6 +387,9 @@ public sealed class StorageDatabase : IDisposable
                 throw new InvalidOperationException("Retired B+ tree generation has no open file owner.");
             _pageCache.EvictGeneration(generation);
             files.Dispose();
+            if (_preserveGenerationFiles.Remove(generation))
+                continue;
+
             string snapshots = Path.Combine(_directory, "snapshots");
             string prefix = $"p_{PartitionId}.{generation}";
             foreach (string extension in new[] { ".pages", ".data" })
@@ -562,6 +566,8 @@ public sealed class StorageDatabase : IDisposable
             _disposed = true;
             try
             {
+                if (_generationFiles.ContainsKey(_btreeManifest.Generation))
+                    _preserveGenerationFiles.Add(_btreeManifest.Generation);
                 foreach (ulong generation in _generationFiles.Keys.ToArray())
                     _ = _generationPins.Retire(generation);
                 ReclaimRetiredGenerations();
