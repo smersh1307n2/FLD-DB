@@ -116,10 +116,12 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             throw new InvalidDataException("Tombstone-GC approval spool entry length is invalid.");
 
         int offset = 0;
-        byte[] identity = bytes[..48].ToArray();
+        byte[] identity = new byte[48];
+        bytes[..16].CopyTo(identity);
         offset = 16;
         ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(bytes[offset..]);
         offset += 2;
+        bytes.Slice(offset, 32).CopyTo(identity.AsSpan(16));
         offset += 32;
         ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..]);
         offset += 8;
