@@ -12,7 +12,7 @@ public sealed class StorageBTreeGenerationBuilderTests
         string directory = Path.Combine(Path.GetTempPath(), "fld-btree-roundtrip-" + Guid.NewGuid().ToString("N"));
         const ulong partition = 91;
         const ulong generation = 3;
-        const int count = StorageBTreePageCodec.MaxLeafEntries + 47;
+        int count = StorageBTreePageCodec.MaxLeafEntries + 47;
         try
         {
             StorageBTreeManifestV2 manifest;
@@ -104,15 +104,36 @@ public sealed class StorageBTreeGenerationBuilderTests
     }
 
     [Fact]
-    public void Bulk_generation_requires_a_fresh_generation_and_strictly_sorted_keys()
+    public void Bulk_generation_requires_fresh_generation_files()
     {
-        string directory = Path.Combine(Path.GetTempPath(), "fld-btree-invalid-build-" + Guid.NewGuid().ToString("N"));
+        string directory = Path.Combine(Path.GetTempPath(), "fld-btree-used-build-" + Guid.NewGuid().ToString("N"));
         try
         {
             using var files = new StorageBTreeGenerationFiles(directory, 93, 1);
             _ = files.AppendData("already-used"u8);
             Assert.Throws<InvalidOperationException>(() =>
                 StorageBTreeGenerationBuilder.Build(files, 1, Array.Empty<StorageTreeBuildInput>()));
+        }
+        finally
+        {
+            try { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bulk_generation_rejects_unsorted_keys()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "fld-btree-unsorted-build-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var files = new StorageBTreeGenerationFiles(directory, 94, 1);
+            var input = new[]
+            {
+                new StorageTreeBuildInput("z"u8.ToArray(), ReadOnlyMemory<byte>.Empty, false),
+                new StorageTreeBuildInput("a"u8.ToArray(), ReadOnlyMemory<byte>.Empty, false)
+            };
+            Assert.Throws<InvalidDataException>(() =>
+                StorageBTreeGenerationBuilder.Build(files, 1, input));
         }
         finally
         {
