@@ -264,3 +264,8 @@ The first random pass includes first-touch page/leaf validation. The repeated pa
 The standalone B+ tree now has an internal v2 root-manifest codec and append-only generation page/data file abstraction. The manifest is fixed-width (80 bytes), checksummed with CRC32C, explicitly distinguishes the existing FLDM/v1 magic from FLD2/v2, and validates the root against the committed page-file high-water mark. Generation reads are bounded by committed lengths supplied by the manifest; physical tails are not readable through the API. Append page IDs are sequential and each encoded page's generation/page identity is verified before writing. Explicit tail truncation is available only after the caller validates WAL continuity/replay.
 
 This is Stage D.1 only. The primitives are not connected to StorageDatabase, WAL recovery, checkpoint, snapshot pins or compaction. The v1 dictionary/snapshot path remains the only production path. Next: Stage D.2 streaming WAL recovery, then D.3 atomic root publication with deterministic crash/reopen tests.
+
+
+### 2026-11-17 — Stage D.1 exact-head verification
+
+The durability primitive tests and complete FLD-DB test matrix passed at the D.1 implementation head: workflow 43984533449, Ubuntu/macOS/Windows, 322 tests per platform, zero failures and zero skips. The 1M-entry scale gate on the same code lineage passed in workflow 43984502223. The comparative performance matrix remains the separate Stage C.1 result in workflow 43913464032; D.1 does not change the B+ tree lookup/scan path.

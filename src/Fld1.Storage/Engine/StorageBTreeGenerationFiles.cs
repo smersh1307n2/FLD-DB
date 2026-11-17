@@ -27,7 +27,7 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
             FileMode.OpenOrCreate,
             FileAccess.ReadWrite,
             FileShare.Read);
-        IStorageRandomAccessFile data;
+        IStorageRandomAccessFile? data = null;
         try
         {
             data = new StorageRandomAccessFile(
@@ -41,10 +41,11 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
         }
         catch
         {
+            data?.Dispose();
             _pages.Dispose();
             throw;
         }
-        _data = data;
+        _data = data ?? throw new InvalidOperationException("B+ tree data file was not opened.");
 
         // A crash may leave a partial trailing page. Keep the file open so recovery
         // can truncate it to the validated manifest high-water mark before appending.

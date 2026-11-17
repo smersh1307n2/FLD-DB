@@ -108,6 +108,9 @@ internal static class StorageBTreeManifestCodec
             throw new InvalidDataException("Paged Storage manifest identity must be non-zero.");
         if (manifest.PageSize != StoragePageCodec.PageSize)
             throw new InvalidDataException("Paged Storage manifest page size is unsupported.");
+        if (manifest.CommittedPageFileLength > (ulong)long.MaxValue ||
+            manifest.CommittedDataFileLength > (ulong)long.MaxValue)
+            throw new InvalidDataException("Paged Storage manifest file length exceeds the supported positional-I/O range.");
         if (manifest.FormatFlags != 0)
             throw new InvalidDataException("Paged Storage manifest format flags are unsupported.");
         if (manifest.CommittedPageFileLength % manifest.PageSize != 0)

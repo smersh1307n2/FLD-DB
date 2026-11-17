@@ -29,6 +29,22 @@ public sealed class StorageBTreeDurabilityPrimitiveTests
     }
 
     [Fact]
+    public void Manifest_v2_accepts_an_empty_root_and_rejects_unaddressable_file_lengths()
+    {
+        var empty = new StorageBTreeManifestV2(
+            17, 5, 91, 0, 0, 0, StoragePageCodec.PageSize, 0);
+        Assert.Equal(empty, StorageBTreeManifestCodec.Decode(StorageBTreeManifestCodec.Encode(empty)));
+
+        var oversizedData = new StorageBTreeManifestV2(
+            1, 1, 0, 0, 0, (ulong)long.MaxValue + 1, StoragePageCodec.PageSize, 0);
+        Assert.Throws<InvalidDataException>(() => StorageBTreeManifestCodec.Encode(oversizedData));
+
+        var oversizedPages = new StorageBTreeManifestV2(
+            1, 1, 0, 1, (ulong)long.MaxValue + 1, 0, StoragePageCodec.PageSize, 0);
+        Assert.Throws<InvalidDataException>(() => StorageBTreeManifestCodec.Encode(oversizedPages));
+    }
+
+    [Fact]
     public void Manifest_v2_rejects_crc_reserved_bytes_and_unsupported_version()
     {
         byte[] encoded = StorageBTreeManifestCodec.Encode(ValidManifest());

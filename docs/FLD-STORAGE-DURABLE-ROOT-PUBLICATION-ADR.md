@@ -8,7 +8,7 @@ Scope: FLD Storage physical index only. This ADR does not change BIN-SYNC delive
 
 The current `StorageDatabase` remains the authoritative v1 implementation: a managed Dictionary, a lazily built SortedList snapshot index, a v1 snapshot file, and WAL replay. Stage B supplies page-cache, generation-pin and positional-I/O primitives. Stage C supplies a standalone immutable B+ tree builder/reader. Neither is wired into production Storage.
 
-The one-million-entry standalone scale gate passed (workflow 43906081415): 1,535 16 KiB pages, 259.4 ms bulk build, 126.1 ms full prefix scan, 124.6 MiB cumulative build allocations and 176.9 MiB process maximum RSS. The 10,000 point lookups took 326.5 ms; the harness currently allocates a byte array for every key-reference comparison. This is a known reader hot-path blocker, not an acceptable production target.
+The latest one-million-entry standalone scale gate passed at Stage C.1 HEAD (workflow 43913448959): 1,535 16 KiB pages, 171.9 ms build, 185.6 ms for the deterministic 10,000-lookup pass, 49.8 ms full scan, 48.3 MiB build allocations and 167.0 MiB process maximum RSS. This remains a standalone in-memory scale gate, not an on-disk durability or bounded-recovery proof.
 
 ## Decision
 
@@ -134,11 +134,19 @@ For each boundary, run a child process that exits/crashes, reopen the database, 
 This ADR does not authorize production B+ tree routing, v1 mirror deletion, WAL format changes, physical generation deletion, or BIN-SYNC GC activation. Those require the gates above and a separate reviewed implementation result.
 
 
-## Stage C.1 implementation status — 2026-11-16
+## Stage C.1 implementation status — 2026-11-17
 
-The borrowed-memory key reader, bounded per-reader hot reference cache, per-resident-page decoded view cache, bulk-builder no-copy path and leaf-boundary cursor validation are now implemented in the standalone prototype. The exact 1M-entry result is recorded in `FLD-STORAGE-PAGED-INDEX-DESIGN.md`; warm repeated 10k random lookups measured about 94 ns each, with a 45.9 ms warm scan over one million entries. This is promising but not a production acceptance result: the comparative 1k/10k/100k BenchmarkDotNet matrix at HEAD 8a78251 is pending, and a per-reader hot cache must become an aggregate database-level budget when snapshots are integrated.
+The borrowed-memory key reader, bounded per-reader hot reference cache, per-resident-page decoded view cache, bulk-builder no-copy path and leaf-boundary cursor validation are implemented in the standalone prototype. The exact-head comparative BenchmarkDotNet matrix passed (workflow 43913464032):
 
-Stage D remains blocked until the comparative matrix shows acceptable hot/random lookup and prefix-scan behavior. The durable manifest/WAL/crash protocol below remains design-only; no production Storage routing is authorized.
+| Cardinality | Storage warm point | B+ tree warm point | Storage prefix scan | B+ tree prefix scan |
+|---:|---:|---:|---:|---:|
+| 1k | 53.09 ns | 18.02 ns | 6.411 µs | 9.457 µs |
+| 10k | 46.06 ns | 17.97 ns | 65.695 µs | 62.806 µs |
+| 100k | 44.89 ns | 28.65 ns | 676.561 µs | 594.368 µs |
+
+The 1k prefix scan regresses; the 100k B+ tree prefix scan is about 12.1% faster. The B+ tree random lookup and cache-pressure paths measured 1.177 µs and 2.565 µs respectively. These are benchmark-fixture results, not production on-disk measurements. The per-reader hot cache must become an aggregate database-level budget when snapshots are integrated.
+
+The latest 1M scale gate (workflow 43913448959) passed: 1,000,000 entries, 1,535 pages, 171.9 ms build, 185.6 ms deterministic lookup pass, 49.8 ms scan, 48.3 MiB allocations and 167.0 MiB maximum RSS. Stage C.1 is complete as a standalone prototype only; Stage D is now active. Production routing remains unauthorized.
 
 
 ## Stage D.1 implementation record — 2026-11-17
@@ -148,3 +156,8 @@ The first durability implementation block is committed as standalone infrastruct
 Generation files use sequential page IDs and append-only data offsets. Reads require the caller to supply the manifest's committed high-water mark; physical file tails cannot become visible merely because bytes exist. TruncateToCommittedLengths is an explicit recovery operation and its contract requires WAL continuity/replay validation first.
 
 No production code calls these primitives yet. No v2 manifest is published, no WAL segment is reclaimed on their authority, and no v1 snapshot or mirror is removed. Windows/Linux/macOS CI is the acceptance gate for this block; passing unit tests does not establish power-loss durability on every filesystem.
+
+
+### Stage D.1 exact-head verification — 2026-11-17
+
+The standalone manifest/file primitive block passed workflow 43984533449 on Ubuntu, macOS 15 and Windows: 322 tests passed on each platform, with zero failures or skips. The independent 1M B+ tree scale gate on the same code lineage (workflow 43984502223) also passed. These results validate the isolated codec/file primitives and existing regression suites only; no production root publication, streaming WAL replay, snapshot pin integration or generation reclamation has been enabled.
