@@ -1,5 +1,6 @@
 namespace Fld1.Storage.Engine;
 
+/// <summary>Key memory must remain immutable until the bulk Build call returns.</summary>
 internal readonly record struct StorageTreeBuildInput(
     ReadOnlyMemory<byte> Key,
     ReadOnlyMemory<byte> Value,

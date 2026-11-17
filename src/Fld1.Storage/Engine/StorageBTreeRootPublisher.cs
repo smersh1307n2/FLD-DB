@@ -19,6 +19,15 @@ internal static class StorageBTreeRootPublisher
         ArgumentNullException.ThrowIfNull(files);
         if (files.PartitionId != manifest.PartitionId || files.Generation != manifest.Generation)
             throw new InvalidDataException("B+ tree generation file identity does not match the manifest.");
+
+        string snapshots = Path.Combine(databaseDirectory, "snapshots");
+        StorageDirectorySync.CreateDirectoryDurable(snapshots);
+        StorageBTreeManifestV2? current = ReadCurrentManifest(snapshots, manifest.PartitionId);
+        if (current.HasValue &&
+            (manifest.CommitSeq < current.Value.CommitSeq ||
+             manifest.Generation < current.Value.Generation))
+            throw new InvalidDataException("B+ tree root publication cannot regress CommitSeq or generation.");
+
         if (files.PageFileLength != manifest.CommittedPageFileLength ||
             files.DataFileLength != manifest.CommittedDataFileLength)
             throw new InvalidDataException("B+ tree manifest high-water marks must exactly match the generation files at publication.");
@@ -35,8 +44,6 @@ internal static class StorageBTreeRootPublisher
         if (manifest.RootPageId != 0)
             _ = files.ReadPage(manifest.RootPageId, manifest.CommittedPageFileLength);
 
-        string snapshots = Path.Combine(databaseDirectory, "snapshots");
-        StorageDirectorySync.CreateDirectoryDurable(snapshots);
         string finalPath = ManifestPath(snapshots, manifest.PartitionId);
         string temporaryPath = finalPath + ".tmp";
         TryDelete(temporaryPath);
@@ -88,6 +95,18 @@ internal static class StorageBTreeRootPublisher
             _ = files.ReadPage(manifest.RootPageId, manifest.CommittedPageFileLength);
 
         return manifest;
+    }
+
+    private static StorageBTreeManifestV2? ReadCurrentManifest(string snapshotsDirectory, ulong partitionId)
+    {
+        string path = ManifestPath(snapshotsDirectory, partitionId);
+        if (!File.Exists(path))
+            return null;
+
+        StorageBTreeManifestV2 current = StorageBTreeManifestCodec.Decode(File.ReadAllBytes(path));
+        if (current.PartitionId != partitionId)
+            throw new InvalidDataException("Existing B+ tree root manifest partition identity mismatch.");
+        return current;
     }
 
     private static string ManifestPath(string snapshotsDirectory, ulong partitionId)

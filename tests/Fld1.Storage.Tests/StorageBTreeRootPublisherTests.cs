@@ -72,6 +72,37 @@ public sealed class StorageBTreeRootPublisherTests
     }
 
     [Fact]
+    public void Publisher_rejects_commit_sequence_and_generation_regression()
+    {
+        string directory = NewDirectory();
+        const ulong partition = 84;
+        try
+        {
+            StorageBTreeManifestV2 current = CreateAndPublish(directory, partition, 2, 10, "current"u8);
+
+            var staleCommit = CreateGeneration(directory, partition, 3, 9, "stale"u8);
+            using (staleCommit.Files)
+            {
+                Assert.Throws<InvalidDataException>(() =>
+                    StorageBTreeRootPublisher.Publish(directory, staleCommit.Manifest, staleCommit.Files));
+            }
+
+            var staleGeneration = CreateGeneration(directory, partition, 1, 11, "stale"u8);
+            using (staleGeneration.Files)
+            {
+                Assert.Throws<InvalidDataException>(() =>
+                    StorageBTreeRootPublisher.Publish(directory, staleGeneration.Manifest, staleGeneration.Files));
+            }
+
+            Assert.Equal(current, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
     public void Try_load_fails_closed_when_manifest_generation_file_is_missing_or_root_page_is_corrupt()
     {
         string directory = NewDirectory();

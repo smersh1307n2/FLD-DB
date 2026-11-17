@@ -192,3 +192,7 @@ Generation page/data files are now created through a flushed temporary file foll
 The bulk generation builder is connected to the page builder, append-only data/page files and v2 root publisher behind internal APIs. The round-trip test builds more than one leaf, publishes and reloads the root, then validates point lookup, tombstone visibility and a prefix cursor across the leaf boundary. A separate empty-generation test verifies root page zero with zero committed file lengths. This is a generation build/reopen proof, not an incremental COW update or WAL-coupled transaction.
 
 D.3.1/D.3.2 CI: workflow 43986557070 passed on Ubuntu, macOS 15 and Windows with 328 tests per platform, zero failures/skips. The 1M scale gate workflow 43986551932 passed on the same code lineage.
+
+### Stage D.3.3 root monotonicity — 2026-11-17
+
+The root publisher now reads and validates the current v2 manifest before doing any flush or replacement. It rejects a new root whose CommitSeq or generation is lower than the currently published root. Equal CommitSeq with a higher generation remains valid for compaction; a higher CommitSeq in the same generation remains valid for a normal append/COW commit. A regression test proves stale commit and stale generation attempts leave the prior root unchanged.
