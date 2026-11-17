@@ -286,3 +286,10 @@ The loader fails closed for bad manifest CRC/identity, missing generation files,
 
 
 The generation-file constructor now publishes new .pages and .data namespace entries through a flushed temporary file plus AtomicCreateFile. This closes the Windows-specific gap where flushing file contents alone did not prove the new directory entry durable. The loader checks both files exist before opening and validating committed lengths/root page.
+
+
+### 2026-11-17 — Stage D.3.2 bulk generation round-trip
+
+Added an internal bulk-generation builder that writes sorted keys and values to the generation data file, emits immutable leaf/internal pages with sequential page IDs, and returns a v2 manifest for publication. The end-to-end test builds a multi-leaf tree, atomically publishes its root, reopens it through the root loader and verifies point lookup, tombstone filtering and prefix iteration across a leaf boundary. Empty-root generations are also covered.
+
+This validates immutable bulk generation build/publish/reopen. It is not incremental path-only COW: the builder requires empty generation files and rebuilds a complete generation. WAL CommitSeq integration, atomic batch application, crash-child-process testing, snapshot pinning/reclamation and production routing remain outstanding. The exact D.3.1 CI run 43986557070 passed 328 tests on each of Ubuntu/macOS/Windows; 1M scale gate 43986551932 passed.

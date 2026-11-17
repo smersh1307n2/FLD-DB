@@ -119,11 +119,11 @@ For each boundary, run a child process that exits/crashes, reopen the database, 
 - Sealed-segment inspection during checkpoint also uses the streaming scanner. The compatibility WalManager.Open API still materializes records for existing internal callers/tests.
 - The Storage dictionary and v1 snapshot remain fully materialized; this stage removes the duplicate all-WAL-record collection only. It does not yet prove whole-database bounded-memory recovery.
 
-**Stage D.3 — root publication transaction — publication primitive implemented 2026-11-17**
-- Implement copy-on-write batch application and manifest root publication behind an internal/test-only path.
-- The standalone root publisher now flushes data before pages, validates the root page, writes a checksummed temporary v2 manifest, atomically replaces the v2 root and flushes the containing directory. It is not connected to StorageDatabase commits.
+**Stage D.3 — root publication transaction — standalone publication/build path implemented 2026-11-17**
+- The standalone root publisher flushes data before pages, validates the root page, writes a checksummed temporary v2 manifest, atomically replaces the v2 root and flushes the containing directory. It is not connected to StorageDatabase commits.
 - Deterministic fault points cover data/page flush, manifest file flush, atomic replace and directory flush. Tests cover old-root retention before replace, new-root visibility after replace, and fail-closed reopen on missing/corrupt generation data.
-- Copy-on-write batch application, WAL/CommitSeq coupling, child-process crash/reopen matrix and production routing remain blocked.
+- A bulk-generation builder now writes sorted key/value/tombstone entries into append-only generation files, builds multi-leaf/internal pages, publishes the root and reopens the tree for point/prefix reads. Empty generations are supported.
+- This is bulk generation creation, not incremental path-only COW. WAL/CommitSeq coupling, child-process crash/reopen matrix, snapshot pin integration, generation reclamation and production routing remain blocked.
 
 **Stage E — snapshot pins and compaction**
 - Connect snapshot/cursor lifetime to generation pins.
@@ -185,3 +185,10 @@ Fault-injection tests establish the visible namespace outcomes around the replac
 ### Stage D.3.1 durability correction — generation-file namespace publication
 
 Generation page/data files are now created through a flushed temporary file followed by StorageDirectorySync.AtomicCreateFile, rather than direct OpenOrCreate. This is required because a manifest must never reference a page/data file whose directory entry has not been durably published. On Unix the helper fsyncs the parent directory; on Windows it uses the existing NTFS write-through handle rename. A stale per-file .tmp is removed before retry. The v2 root loader checks both generation files exist before opening them and fails closed if either is missing.
+
+
+### Stage D.3.2 bulk generation round-trip — 2026-11-17
+
+The bulk generation builder is connected to the page builder, append-only data/page files and v2 root publisher behind internal APIs. The round-trip test builds more than one leaf, publishes and reloads the root, then validates point lookup, tombstone visibility and a prefix cursor across the leaf boundary. A separate empty-generation test verifies root page zero with zero committed file lengths. This is a generation build/reopen proof, not an incremental COW update or WAL-coupled transaction.
+
+D.3.1/D.3.2 CI: workflow 43986557070 passed on Ubuntu, macOS 15 and Windows with 328 tests per platform, zero failures/skips. The 1M scale gate workflow 43986551932 passed on the same code lineage.
