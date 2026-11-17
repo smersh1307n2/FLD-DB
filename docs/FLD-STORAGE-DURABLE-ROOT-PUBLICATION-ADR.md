@@ -180,3 +180,8 @@ The compatibility WalManager.Open and WalRecovery.Recover methods remain availab
 Added the standalone v2 root publisher and fail-closed root loader. Publication requires exact physical/committed file lengths, flushes data before pages, validates the root page, writes a write-through temporary manifest, atomically replaces the separate v2 root manifest, and flushes the snapshots directory where supported. Windows uses the existing NTFS write-through handle-rename primitive; direct directory fsync remains unavailable there and the existing Windows power-loss proof gate remains in force.
 
 Fault-injection tests establish the visible namespace outcomes around the replace boundary: before replace, the prior root remains authoritative; after replace, the new root is visible but the caller receives an exception and must treat completion as uncertain/reopen. These are deterministic process-level fault tests, not a substitute for child-process power-loss tests. The publisher is internal and is not called by StorageDatabase. WAL batch coupling and COW root generation are still pending.
+
+
+### Stage D.3.1 durability correction — generation-file namespace publication
+
+Generation page/data files are now created through a flushed temporary file followed by StorageDirectorySync.AtomicCreateFile, rather than direct OpenOrCreate. This is required because a manifest must never reference a page/data file whose directory entry has not been durably published. On Unix the helper fsyncs the parent directory; on Windows it uses the existing NTFS write-through handle rename. A stale per-file .tmp is removed before retry. The v2 root loader checks both generation files exist before opening them and fails closed if either is missing.

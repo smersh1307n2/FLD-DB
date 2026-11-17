@@ -24,17 +24,21 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
         string snapshots = Path.Combine(databaseDirectory, "snapshots");
         StorageDirectorySync.CreateDirectoryDurable(snapshots);
         string prefix = $"p_{partitionId}.{generation}";
+        string pagesPath = Path.Combine(snapshots, prefix + ".pages");
+        string dataPath = Path.Combine(snapshots, prefix + ".data");
+        EnsureDurableFileExists(pagesPath);
         _pages = new StorageRandomAccessFile(
-            Path.Combine(snapshots, prefix + ".pages"),
-            FileMode.OpenOrCreate,
+            pagesPath,
+            FileMode.Open,
             FileAccess.ReadWrite,
             FileShare.Read);
         IStorageRandomAccessFile? data = null;
         try
         {
+            EnsureDurableFileExists(dataPath);
             data = new StorageRandomAccessFile(
-                Path.Combine(snapshots, prefix + ".data"),
-                FileMode.OpenOrCreate,
+                dataPath,
+                FileMode.Open,
                 FileAccess.ReadWrite,
                 FileShare.Read);
             // Persist newly created directory entries where the platform supports
@@ -176,6 +180,28 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
             _data.FlushToDisk();
             _pages.FlushToDisk();
         }
+    }
+
+    private static void EnsureDurableFileExists(string path)
+    {
+        if (File.Exists(path))
+            return;
+
+        string temporaryPath = path + ".tmp";
+        if (File.Exists(temporaryPath))
+            File.Delete(temporaryPath);
+
+        using (var stream = new FileStream(
+            temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            bufferSize: 4096, FileOptions.WriteThrough))
+        {
+            stream.Flush(flushToDisk: true);
+        }
+
+        // Unix fsyncs the parent directory; Windows uses the existing NTFS
+        // write-through handle-rename primitive. A manifest can never reference
+        // a generation file whose namespace entry has not passed this publication.
+        StorageDirectorySync.AtomicCreateFile(temporaryPath, path);
     }
 
     private void ValidateCommittedPageLength(ulong committedPageFileLength)

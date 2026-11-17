@@ -283,3 +283,6 @@ The compatibility materializing WAL API remains for internal legacy callers. The
 Added a separate v2 root-manifest publication primitive. It refuses mismatched generation identities or manifest high-water marks, flushes append-only data before page files, validates the root page, writes the checksummed manifest to a write-through temporary file, atomically replaces the dedicated v2 root manifest, and flushes the containing directory on platforms supporting directory fsync. The v2 root filename is separate from the existing FLDM/v1 snapshot manifest.
 
 The loader fails closed for bad manifest CRC/identity, missing generation files, committed lengths beyond physical files, or a corrupt root page. Deterministic fault injection verifies that a failure before replace leaves the old root authoritative and that an exception after replace requires reopen because completion is uncertain. This is not yet COW batch application, WAL-coupled commit, a child-process crash matrix, or production Storage routing.
+
+
+The generation-file constructor now publishes new .pages and .data namespace entries through a flushed temporary file plus AtomicCreateFile. This closes the Windows-specific gap where flushing file contents alone did not prove the new directory entry durable. The loader checks both files exist before opening and validating committed lengths/root page.
