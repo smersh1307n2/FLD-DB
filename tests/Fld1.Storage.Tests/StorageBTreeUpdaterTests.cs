@@ -301,17 +301,20 @@ public sealed class StorageBTreeUpdaterTests
             {
                 new StorageTreeMutation("key-00010x"u8.ToArray(), "value"u8.ToArray(), false)
             };
-            using var files = new StorageBTreeGenerationFiles(directory, partition, generation);
-            ulong pageLength = files.PageFileLength;
-            ulong dataLength = files.DataFileLength;
+            using (var files = new StorageBTreeGenerationFiles(directory, partition, generation))
+            {
+                ulong pageLength = files.PageFileLength;
+                ulong dataLength = files.DataFileLength;
 
-            Assert.Throws<InvalidDataException>(() =>
-                StorageBTreeUpdater.ApplyAndPublish(
-                    directory, current, files, mutations,
-                    appendAndFlushWal: () => current.CommitSeq + 2));
+                Assert.Throws<InvalidDataException>(() =>
+                    StorageBTreeUpdater.ApplyAndPublish(
+                        directory, current, files, mutations,
+                        appendAndFlushWal: () => current.CommitSeq + 2));
 
-            Assert.Equal(pageLength, files.PageFileLength);
-            Assert.Equal(dataLength, files.DataFileLength);
+                Assert.Equal(pageLength, files.PageFileLength);
+                Assert.Equal(dataLength, files.DataFileLength);
+            }
+
             Assert.Equal(current, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value);
         }
         finally
