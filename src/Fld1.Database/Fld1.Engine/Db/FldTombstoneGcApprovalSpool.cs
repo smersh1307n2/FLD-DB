@@ -17,7 +17,8 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
     private byte[]? _sealedDigest;
     private bool _disposed;
     private bool _sealed;
-    private byte[]? _lastRecordId;
+    private readonly byte[] _lastRecordId = new byte[16];
+    private bool _hasLastRecordId;
     private ushort _lastFieldId;
 
     public Guid Token { get; }
@@ -54,15 +55,16 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         for (int i = 0; i < candidates.Count; i++)
         {
             FldTombstoneGcCandidate candidate = candidates[i];
-            if (_lastRecordId is not null &&
+            if (_hasLastRecordId &&
                 CompareKey(_lastRecordId, _lastFieldId, candidate.RecordId.Span, candidate.FieldId) >= 0)
                 throw new InvalidDataException(
                     "Tombstone-GC approval spool identities must be strictly ordered and unique.");
 
             int offset = i * CandidateBytes;
             _writer!.Write(encoded.Slice(offset, CandidateBytes));
-            _lastRecordId = candidate.RecordId.ToArray();
+            candidate.RecordId.Span.CopyTo(_lastRecordId);
             _lastFieldId = candidate.FieldId;
+            _hasLastRecordId = true;
             Count++;
         }
     }
@@ -114,14 +116,11 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             throw new InvalidDataException("Tombstone-GC approval spool entry length is invalid.");
 
         int offset = 0;
-        byte[] recordId = bytes.Slice(offset, 16).ToArray();
-        offset += 16;
+        byte[] identity = bytes[..48].ToArray();
+        offset = 16;
         ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(bytes[offset..]);
         offset += 2;
-        byte[] changeId = bytes.Slice(offset, 16).ToArray();
-        offset += 16;
-        byte[] authorNodeId = bytes.Slice(offset, 16).ToArray();
-        offset += 16;
+        offset += 32;
         ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..]);
         offset += 8;
         uint logical = BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]);
@@ -135,7 +134,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             throw new InvalidDataException("Tombstone-GC approval spool entry identity is invalid.");
 
         return FldTombstoneGcCandidate.CreateOwned(
-            recordId, fieldId, changeId, authorNodeId, wall, logical,
+            identity, 16, 16, fieldId, wall, logical,
             authorEpoch, originSequence, kind == 1, kind == 2);
     }
 
