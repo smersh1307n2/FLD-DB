@@ -411,6 +411,7 @@ public sealed class StorageBTreeUpdaterTests
                 int count = 0;
                 while (cursor.TryReadNext(out _)) count++;
                 Assert.Equal(StorageBTreePageCodec.MaxLeafEntries + 1, count);
+                StorageBTreeRootPublisher.Publish(directory, next, files);
             }
 
             Assert.Equal(next, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value);
