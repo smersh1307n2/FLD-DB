@@ -201,3 +201,10 @@ The root publisher now reads and validates the current v2 manifest before doing 
 ### Stage D.3.3 verification — 2026-11-17
 
 The root monotonicity guard and regression test passed workflow 43987797721 on Ubuntu, macOS 15 and Windows: 333 tests per platform, zero failures and zero skips. The 1M-entry B+ tree scale gate workflow 43987789892 also passed. The production Storage path remains on v1; D.3 is still an internal prototype.
+
+
+### Stage D.4 implementation record — path-copy COW batch updates
+
+Added a sorted batch updater that groups mutations by the leaf selected from the current root, merges each leaf once, appends replacement leaf pages and copies only the affected ancestor path. Leaf splits and internal-level splits allocate new immutable pages; tombstones remain as entries. The prefix cursor now advances in tree order using an internal-page path stack, so COW leaves do not need mutable or stale next-leaf links. The updater returns a new manifest with CommitSeq incremented once for the entire batch; ApplyAndPublish flushes and atomically publishes that root. The caller is explicitly responsible for durably writing the matching WAL batch first.
+
+Tests cover leaf split, existing-value replacement, insert, existing/new tombstones, prefix traversal across the new leaf topology, old-root readability under its prior committed high-water marks, empty-root creation, pre-write ordering rejection, and recovery/retry after a failure before root replacement. Production StorageDatabase routing and direct WAL coupling remain pending.

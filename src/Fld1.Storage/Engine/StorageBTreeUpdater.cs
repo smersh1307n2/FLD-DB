@@ -216,7 +216,7 @@ internal static class StorageBTreeUpdater
 
             ulong pageId = Allocate(ref nextPageId);
             files.AppendPage(pageId,
-                StorageBTreePageCodec.EncodeLeaf(files.Generation, pageId, nextPageId: 0, pageEntries));
+                StorageBTreePageCodec.EncodeLeaf(files.Generation, pageId, 0, pageEntries));
             result.Add(new StorageTreeChild(pageId, pageEntries[0].Key));
             start += count;
         }

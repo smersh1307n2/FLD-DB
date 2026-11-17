@@ -299,3 +299,10 @@ The v2 root publisher now also rejects CommitSeq or generation regression relati
 
 
 D.3.3 verification: workflow 43987797721 passed 333 tests on each of Ubuntu/macOS/Windows, with zero failures/skips; 1M-entry scale gate 43987789892 passed. These gates validate the internal v2 prototype and do not authorize production routing.
+
+
+### 2026-11-17 — Stage D.4 path-copy COW updater
+
+The v2 prototype now supports sorted atomic mutation batches. Mutations are grouped by their target leaf; each affected leaf is merged once, rewritten to new append-only pages (split as needed), and its ancestor path is copied to a new root. Internal pages split into additional levels when required. Old pages and data remain untouched, and tombstones remain in the tree. New COW leaves set NextPageId to zero; prefix iteration now advances through an internal-page traversal stack, while retaining boundary-order validation across leaves. Legacy bulk-built leaf links are ignored for traversal because the internal tree is authoritative.
+
+ApplyBatch increments the manifest CommitSeq once per batch and rolls back uncommitted file tails on in-process update failure. ApplyAndPublish then flushes data/pages and publishes the new root. The caller must durably append the matching WAL batch first; StorageDatabase does not yet route commits through this updater. The full WAL/root crash matrix, child-process crash tests, snapshot pin/reclamation and production routing remain outstanding.

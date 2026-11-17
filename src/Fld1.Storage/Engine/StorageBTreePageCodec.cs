@@ -574,8 +574,8 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
             if(leaf.Count>0)_previousLeafLastKey=leaf.GetEntry(leaf.Count-1).Key;
             _leafLease?.Dispose();_leafLease=null;
             bool hasNext=_reader.TryAdvanceToNextLeaf(_path,out ulong nextPage);
-            if(leaf.NextPageId!=0 && (!hasNext || leaf.NextPageId!=nextPage))
-                throw new InvalidDataException("Leaf next-page link does not match B+ tree traversal order.");
+            // The internal tree is authoritative. COW leaf pages are immutable and
+            // may have stale legacy NextPageId hints on their unchanged neighbors.
             if(!hasNext){_finished=true;break;}
             _page=nextPage;_index=0;_entered=false;_leafPage=null;
         }
