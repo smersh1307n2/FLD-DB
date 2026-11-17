@@ -15,6 +15,7 @@ public sealed class StorageDatabase : IDisposable
     private const int MaxKeyLength = 1024 * 1024;
     private readonly object _gate = new();
     private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
+    private readonly StorageBTreeReaderCache _readerCache = new();
     private readonly StorageGenerationPins _generationPins = new();
     private readonly Dictionary<ulong, StorageBTreeGenerationFiles> _generationFiles = new();
     private readonly HashSet<ulong> _preserveGenerationFiles = new();
@@ -257,7 +258,8 @@ public sealed class StorageDatabase : IDisposable
             key => files.ReadData(
                 key.Offset,
                 key.Length,
-                manifest.CommittedDataFileLength));
+                manifest.CommittedDataFileLength),
+            _readerCache);
 
     private static StorageTreeBuildInput[] CreateBTreeBuildInputs(
         SortedDictionary<StorageKey, byte[]> values)
@@ -275,7 +277,8 @@ public sealed class StorageDatabase : IDisposable
             manifest.Generation,
             manifest.RootPageId,
             pageId => files.ReadPage(pageId, manifest.CommittedPageFileLength),
-            key => files.ReadData(key.Offset, key.Length, manifest.CommittedDataFileLength));
+            key => files.ReadData(key.Offset, key.Length, manifest.CommittedDataFileLength),
+            _readerCache);
 
         var entries = new List<StorageTreeBuildInput>();
         using StorageBTreePrefixCursor cursor = reader.OpenAllCursor(includeTombstones: true);
@@ -415,6 +418,7 @@ public sealed class StorageDatabase : IDisposable
             if (!_generationFiles.Remove(generation, out StorageBTreeGenerationFiles? files))
                 throw new InvalidOperationException("Retired B+ tree generation has no open file owner.");
             _pageCache.EvictGeneration(generation);
+            _readerCache.EvictGeneration(generation);
             files.Dispose();
             if (_preserveGenerationFiles.Remove(generation))
                 continue;
