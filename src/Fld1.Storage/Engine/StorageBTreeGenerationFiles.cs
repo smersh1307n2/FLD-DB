@@ -27,25 +27,27 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
             FileMode.OpenOrCreate,
             FileAccess.ReadWrite,
             FileShare.Read);
+        IStorageRandomAccessFile data;
         try
         {
-            _data = new StorageRandomAccessFile(
+            data = new StorageRandomAccessFile(
                 Path.Combine(snapshots, prefix + ".data"),
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.Read);
+            // Persist newly created directory entries where the platform supports
+            // directory fsync. Windows namespace durability remains separately gated.
+            StorageDirectorySync.Flush(snapshots);
         }
         catch
         {
             _pages.Dispose();
             throw;
         }
+        _data = data;
 
-        if (_pages.Length % StoragePageCodec.PageSize != 0)
-        {
-            Dispose();
-            throw new InvalidDataException("B+ tree page file has a partial trailing page; recovery must truncate to the manifest length.");
-        }
+        // A crash may leave a partial trailing page. Keep the file open so recovery
+        // can truncate it to the validated manifest high-water mark before appending.
     }
 
     public ulong PageFileLength
