@@ -214,6 +214,15 @@ public static class StorageIpcEndpoint
                 // a missing file remains visible to callers as FileNotFoundException.
                 Thread.Sleep(TimeSpan.FromMilliseconds(25));
             }
+            catch (UnauthorizedAccessException) when (
+                OperatingSystem.IsWindows() && attempt + 1 < maxAttempts)
+            {
+                // Windows can report transient antivirus/indexer access denial as
+                // UnauthorizedAccessException rather than IOException. Treat it as
+                // the same bounded discovery retry; persistent ACL failures still
+                // surface after the retry window.
+                Thread.Sleep(TimeSpan.FromMilliseconds(25));
+            }
         }
     }
 
