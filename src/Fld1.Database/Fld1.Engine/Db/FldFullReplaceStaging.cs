@@ -159,10 +159,6 @@ public sealed partial class FldDatabase
             ulong runId = AllocateFullReplaceRunId();
             string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
-            // Keep the legacy Run mirror until an explicit storage-format cutover.
-            // Publishing the mirror before the stage cursor means a crash cannot leave
-            // a durable stage reference whose compatibility file was never materialized.
-            WriteRunAtomically(runPath, runBytes);
 
             var stagedRun = new FullReplaceStageRun(
                 startIndex, entries.Count, runId, firstRecord.ToArray(), lastRecord.ToArray());
@@ -282,7 +278,6 @@ public sealed partial class FldDatabase
                 ulong markerRunId = AllocateFullReplaceRunId();
                 string markerPath = Path.Combine(_dbDir, "runs", $"{markerRunId}.fld1");
                 _runBlobStore.PutImmutableBlob(RunBlobId(markerRunId), emptyRun);
-                WriteRunAtomically(markerPath, emptyRun);
                 state = state with
                 {
                     Runs = [new FullReplaceStageRun(0, 0, markerRunId, new byte[16], new byte[16])]
@@ -301,20 +296,39 @@ public sealed partial class FldDatabase
                 SeqHi = state.BaseLastSealedCommitSeq
             }).ToList();
             var oldRuns = _runs.Select(run => (run.runId, run.path, run.mapped)).ToArray();
-            var replacementRuns = new List<(ulong runId, string path, MappedRunFile? mapped)>(state.Runs.Length);
+            var replacementRuns = new List<(ulong runId, string path, IRunMemoryMapping? mapped)>(state.Runs.Length);
             foreach (FullReplaceStageRun run in state.Runs)
             {
                 string runPath = Path.Combine(_dbDir, "runs", $"{run.RunId}.fld1");
                 if (!_runBlobStore.TryOpenRead(RunBlobId(run.RunId), out StorageBlobReader? blobReader) ||
                     blobReader is null)
                     throw new InvalidDataException($"FULL_REPLACE staged Run {run.RunId} blob is missing or incomplete.");
-                byte[] runBytes;
-                using (blobReader)
-                    runBytes = blobReader.ReadAllBytes();
-                var runReader = new RunReader(runBytes);
-                if (!runReader.TryValidate(out var runVerify) || runReader.NamespaceId != _namespaceId)
-                    throw new InvalidDataException($"FULL_REPLACE staged Run failed pre-switch validation: {runVerify.Status} {runVerify.Detail}");
-                WriteRunAtomically(runPath, runBytes); // Keep the legacy FLD1 Run mirror until an explicit format cutover.
+                if (!blobReader.IsSingleFile)
+                {
+                    blobReader.Dispose();
+                    if (!_runBlobStore.MigrateToSingleFile(RunBlobId(run.RunId)) ||
+                        !_runBlobStore.TryOpenRead(RunBlobId(run.RunId), out blobReader) ||
+                        blobReader is null)
+                        throw new IOException($"FULL_REPLACE staged Run {run.RunId} could not be migrated to the mapped Storage layout.");
+                }
+
+                StorageBlobMappedView mapped;
+                try { mapped = blobReader.OpenMappedView(); }
+                catch
+                {
+                    blobReader.Dispose();
+                    throw;
+                }
+                try
+                {
+                    var runReader = new RunReader(mapped.ReadOnlyMemory);
+                    if (!runReader.TryValidate(out var runVerify) || runReader.NamespaceId != _namespaceId)
+                        throw new InvalidDataException($"FULL_REPLACE staged Run failed pre-switch validation: {runVerify.Status} {runVerify.Detail}");
+                }
+                finally
+                {
+                    mapped.Close();
+                }
                 replacementRuns.Add((run.RunId, runPath, null));
             }
 
