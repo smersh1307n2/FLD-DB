@@ -350,23 +350,32 @@ internal sealed class StorageBTreeReader
     }
 
     private readonly record struct HotLookupEntry(byte[] Key,bool Found,StorageTreeValueReference Value);
-    public StorageBTreePrefixCursor OpenPrefixCursor(ReadOnlyMemory<byte> prefix)
+    public StorageBTreePrefixCursor OpenPrefixCursor(
+        ReadOnlyMemory<byte> prefix,
+        ReadOnlyMemory<byte> afterKey = default)
     {
         if(prefix.IsEmpty)throw new ArgumentException("Empty prefix.",nameof(prefix));
-        return OpenCursorCore(prefix);
+        return OpenCursorCore(prefix, includeTombstones: false, afterKey);
     }
 
-    public StorageBTreePrefixCursor OpenAllCursor(bool includeTombstones = false)
-        => OpenCursorCore(ReadOnlyMemory<byte>.Empty, includeTombstones);
+    public StorageBTreePrefixCursor OpenAllCursor(
+        bool includeTombstones = false,
+        ReadOnlyMemory<byte> afterKey = default)
+        => OpenCursorCore(ReadOnlyMemory<byte>.Empty, includeTombstones, afterKey);
 
     private StorageBTreePrefixCursor OpenCursorCore(
         ReadOnlyMemory<byte> prefix,
-        bool includeTombstones = false)
+        bool includeTombstones = false,
+        ReadOnlyMemory<byte> afterKey = default)
     {
+        ReadOnlyMemory<byte> startKey = afterKey.IsEmpty ||
+            afterKey.Span.SequenceCompareTo(prefix.Span) < 0
+                ? prefix
+                : afterKey;
         var path = new List<StorageTreePathFrame>();
         if(_root==0)return new(this,0,0,prefix.ToArray(),path,includeTombstones);
-        ulong id=FindLeaf(prefix.Span,path);var leaf=ReadLeafView(id,out var lease);
-        try { return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),path,includeTombstones,leaf,lease); }
+        ulong id=FindLeaf(startKey.Span,path);var leaf=ReadLeafView(id,out var lease);
+        try { return new(this,id,LowerBound(leaf,startKey.Span),prefix.ToArray(),path,includeTombstones,leaf,lease); }
         catch { lease?.Dispose();throw; }
     }
     internal StorageBTreeLeafPageView ReadLeafView(ulong id,out StoragePageCacheLease? lease)
