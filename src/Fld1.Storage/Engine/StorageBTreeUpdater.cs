@@ -427,7 +427,7 @@ internal static class StorageBTreeUpdater
     private sealed class BatchPageReadCache
     {
         private const int Capacity = 4096;
-        private readonly Dictionary<ulong, PageEntry> _pages = new(Capacity);
+        private readonly Dictionary<ulong, PageEntry> _pages = new();
         private readonly Queue<ulong> _order = new();
 
         public byte[] Read(
