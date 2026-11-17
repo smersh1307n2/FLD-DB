@@ -7,6 +7,35 @@ namespace Fld1.Storage.Tests;
 public sealed class StorageIpcEndpointTests
 {
     [Fact]
+    public async Task Endpoint_reader_retries_a_temporary_windows_sharing_violation()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        string root = Path.Combine(Path.GetTempPath(), "fld ipc endpoint sharing " + Guid.NewGuid().ToString("N"));
+        const ulong partition = 0x404;
+        StorageIpcEndpointInfo expected = StorageIpcEndpoint.Create(
+            root, partition, Guid.NewGuid(), Environment.ProcessId);
+
+        try
+        {
+            StorageIpcEndpoint.Publish(root, expected);
+            string path = StorageIpcEndpoint.GetEndpointFilePath(root, partition);
+            var blocker = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            Task<StorageIpcEndpointInfo> read = Task.Run(() => StorageIpcEndpoint.Read(root, partition));
+            await Task.Delay(150);
+            blocker.Dispose();
+
+            StorageIpcEndpointInfo actual = await read.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(expected, actual);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Pipe_name_is_canonical_and_partition_scoped()
     {
         string root = Path.Combine(Path.GetTempPath(), "fld ipc root " + Guid.NewGuid().ToString("N"));
