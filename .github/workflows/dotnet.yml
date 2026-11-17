@@ -73,3 +73,69 @@ jobs:
           name: fld-test-results-${{ matrix.os }}
           path: "**/TestResults/*.trx"
           if-no-files-found: ignore
+
+  update-binsync-storage-pin:
+    name: publish tested FLD Storage pin to BIN-SYNC
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/crash-consistency-outbox'
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BIN_SYNC_PUSH_TOKEN: ${{ secrets.BIN_SYNC_PUSH_TOKEN }}
+      FLD_STORAGE_SHA: ${{ github.sha }}
+    steps:
+      - name: Check cross-repository write credential
+        id: credential
+        shell: bash
+        run: |
+          if [[ -z "$BIN_SYNC_PUSH_TOKEN" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::BIN_SYNC_PUSH_TOKEN is not configured; BIN-SYNC submodule update was skipped."
+            {
+              echo "### BIN-SYNC submodule update skipped"
+              echo
+              echo "Add repository secret `BIN_SYNC_PUSH_TOKEN` to FLD-DB. It must be a fine-grained token with Contents: Read and write access to smersh1307n2/BIN-SYNC."
+              echo "The FLD-DB tests passed, but this run did not publish the new Storage pin."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout BIN-SYNC integration branch
+        if: steps.credential.outputs.configured == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: smersh1307n2/BIN-SYNC
+          ref: feature/fld-external-storage
+          token: ${{ secrets.BIN_SYNC_PUSH_TOKEN }}
+          path: bin-sync
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Advance pinned FLD Storage submodule
+        if: steps.credential.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C bin-sync/external/Fld1.Storage fetch origin "$FLD_STORAGE_SHA" --depth=1
+          git -C bin-sync/external/Fld1.Storage checkout --detach "$FLD_STORAGE_SHA"
+          git -C bin-sync add external/Fld1.Storage
+
+          if git -C bin-sync diff --cached --quiet; then
+            echo "BIN-SYNC already pins FLD Storage at $FLD_STORAGE_SHA."
+            echo "No BIN-SYNC commit was necessary." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git -C bin-sync config user.name "github-actions[bot]"
+          git -C bin-sync config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C bin-sync commit -m "Update FLD Storage pin to $FLD_STORAGE_SHA"
+          git -C bin-sync push origin HEAD:refs/heads/feature/fld-external-storage
+
+          {
+            echo "### FLD Storage pin published to BIN-SYNC"
+            echo
+            echo "- FLD-DB commit: `$FLD_STORAGE_SHA`"
+            echo "- BIN-SYNC branch: `feature/fld-external-storage`"
+            echo "- BIN-SYNC CI is triggered by the branch update; the pin is not considered validated until that CI passes."
+          } >> "$GITHUB_STEP_SUMMARY"
