@@ -558,7 +558,7 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
                 var loadedLeaf=_leafPage.Value;
                 if(_previousLeafLastKey.HasValue && loadedLeaf.Count>0
                     && _reader.CompareKeys(_previousLeafLastKey.Value,loadedLeaf.GetEntry(0).Key)>=0)
-                    throw new InvalidDataException("Leaf chain ordering error.");
+                    throw new InvalidDataException("B+ tree leaf traversal ordering error.");
                 _leafFullyMatches = _index < loadedLeaf.Count
                     && _reader.HasPrefix(loadedLeaf.GetEntry(_index).Key,_prefix)
                     && _reader.HasPrefix(loadedLeaf.GetEntry(loadedLeaf.Count-1).Key,_prefix);
@@ -573,6 +573,7 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
             }
             if(leaf.Count>0)_previousLeafLastKey=leaf.GetEntry(leaf.Count-1).Key;
             _leafLease?.Dispose();_leafLease=null;
+            if(_finished)break;
             bool hasNext=_reader.TryAdvanceToNextLeaf(_path,out ulong nextPage);
             // The internal tree is authoritative. COW leaf pages are immutable and
             // may have stale legacy NextPageId hints on their unchanged neighbors.

@@ -40,7 +40,7 @@ public sealed class StorageBTreeTests
     }
 
     [Fact]
-    public void Prefix_cursor_detects_leaf_cycle_by_strict_key_order()
+    public void Prefix_cursor_ignores_legacy_leaf_cycle_and_uses_tree_order()
     {
         byte[] k1={0,1},k2={0,2};var keys=new Dictionary<ulong,byte[]>{{1,k1},{2,k2}};
         var entries=new[]{new StorageTreeBuildEntry(k1,1,1,1,false),new StorageTreeBuildEntry(k2,2,2,1,false)};
@@ -52,7 +52,7 @@ public sealed class StorageBTreeTests
         var reader=new StorageBTreeReader(5,root,id=>pages[id],r=>keys[r.Offset]);
         using var cursor=reader.OpenPrefixCursor(new byte[]{0});
         Assert.True(cursor.TryReadNext(out _));Assert.True(cursor.TryReadNext(out _));
-        Assert.Throws<InvalidDataException>(()=>cursor.TryReadNext(out _));
+        Assert.False(cursor.TryReadNext(out _));
     }
 
 
@@ -130,7 +130,7 @@ public sealed class StorageBTreeTests
 
 
     [Fact]
-    public void Prefix_cursor_rejects_out_of_order_leaf_chain_boundary()
+    public void Prefix_cursor_rejects_out_of_order_internal_tree_leaf_boundary()
     {
         byte[][] keys =
         {
