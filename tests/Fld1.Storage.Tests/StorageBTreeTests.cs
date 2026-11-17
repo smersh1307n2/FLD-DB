@@ -4,6 +4,28 @@ namespace Fld1.Storage.Tests;
 public sealed class StorageBTreeTests
 {
     [Fact]
+    public void Reader_validation_cache_has_one_aggregate_budget_and_reclaims_retired_generations()
+    {
+        var shared = new StorageBTreeReaderCache();
+        for (ulong page = 1; page <= 2_048; page++)
+        {
+            shared.MarkValidated(41, page);
+            shared.MarkValidated(42, page);
+        }
+
+        Assert.Equal(4_096, shared.ValidatedPageCount);
+        shared.EvictGeneration(41);
+        Assert.Equal(2_048, shared.ValidatedPageCount);
+        Assert.False(shared.IsValidated(41, 1));
+        Assert.True(shared.IsValidated(42, 1));
+
+        for (ulong page = 2_049; page <= 6_144; page++)
+            shared.MarkValidated(42, page);
+
+        Assert.Equal(4_096, shared.ValidatedPageCount);
+    }
+
+    [Fact]
     public void Reader_hot_lookup_cache_has_one_aggregate_budget_across_snapshot_readers()
     {
         var shared = new StorageBTreeReaderCache();
