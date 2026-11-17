@@ -19,6 +19,7 @@ public sealed class StorageDatabase : IDisposable
     private readonly WalManager _wal;
     private StorageBTreeGenerationFiles? _btreeFiles;
     private StorageBTreeManifestV2 _btreeManifest;
+    private StorageBTreeReader? _btreeReader;
     private readonly string _directory;
     private readonly Action<StorageFaultPoint>? _faultInjector;
     private ulong _snapshotGeneration;
@@ -112,6 +113,7 @@ public sealed class StorageDatabase : IDisposable
                         root.Value.CommittedDataFileLength);
                     database._btreeFiles = files;
                     database.LoadBTreeValues();
+                    database._btreeReader = database.CreateBTreeReader(root.Value, files);
                 }
                 catch
                 {
@@ -146,6 +148,7 @@ public sealed class StorageDatabase : IDisposable
                     StorageBTreeRootPublisher.Publish(directory, initial, files);
                     database._btreeFiles = files;
                     database._btreeManifest = initial;
+                    database._btreeReader = database.CreateBTreeReader(initial, files);
                 }
                 catch
                 {
@@ -198,6 +201,18 @@ public sealed class StorageDatabase : IDisposable
                 throw new InvalidDataException("B+ tree root contains duplicate live keys.");
         }
     }
+
+    private static StorageBTreeReader CreateBTreeReader(
+        in StorageBTreeManifestV2 manifest,
+        StorageBTreeGenerationFiles files)
+        => new(
+            manifest.Generation,
+            manifest.RootPageId,
+            pageId => files.ReadPage(pageId, manifest.CommittedPageFileLength),
+            key => files.ReadData(
+                key.Offset,
+                key.Length,
+                manifest.CommittedDataFileLength));
 
     private StorageTreeBuildInput[] CreateBTreeBuildInputs()
     {
@@ -252,14 +267,21 @@ public sealed class StorageDatabase : IDisposable
         lock (_gate)
         {
             EnsureUsable();
-            if (_values.TryGetValue(new StorageKey(key), out var stored))
+            StorageBTreeReader reader = _btreeReader
+                ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
+            if (!reader.TryGet(key, out StorageTreeValueReference reference))
             {
-                value = stored.ToArray();
-                return true;
+                value = null;
+                return false;
             }
 
-            value = null;
-            return false;
+            StorageBTreeGenerationFiles files = _btreeFiles
+                ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+            value = files.ReadData(
+                reference.Offset,
+                reference.Length,
+                _btreeManifest.CommittedDataFileLength);
+            return true;
         }
     }
 
@@ -294,6 +316,7 @@ public sealed class StorageDatabase : IDisposable
                     ?? throw new InvalidOperationException("B+ tree generation files are not open.");
                 _btreeFiles = compactedFiles;
                 _btreeManifest = compacted;
+                _btreeReader = CreateBTreeReader(compacted, compactedFiles);
                 compactedFiles = null;
                 oldFiles.Dispose();
 
@@ -377,6 +400,7 @@ public sealed class StorageDatabase : IDisposable
                 }
 
                 _btreeManifest = next;
+                _btreeReader = CreateBTreeReader(next, files);
                 _lastCommitSeq = next.CommitSeq;
                 _snapshotIndex = null;
                 return next.CommitSeq;
@@ -419,6 +443,7 @@ public sealed class StorageDatabase : IDisposable
         }
 
         _btreeManifest = next;
+        _btreeReader = CreateBTreeReader(next, files);
         _lastCommitSeq = commitSeq;
         _snapshotIndex = null;
     }
