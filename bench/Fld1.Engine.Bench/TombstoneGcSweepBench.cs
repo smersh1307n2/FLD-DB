@@ -21,8 +21,13 @@ public class TombstoneGcSweepBench
     private readonly byte[] _value = new byte[64];
     private long _lastGcAllocatedBytes;
 
-    [Params(1_000, 10_000, 50_000, 100_000, 250_000)]
+    [ParamsSource(nameof(TombstoneCounts))]
     public int TombstoneCount { get; set; }
+
+    public IEnumerable<int> TombstoneCounts =>
+        Environment.GetEnvironmentVariable("FLD_TOMBSTONE_GC_250K_ONLY") == "1"
+            ? [250_000]
+            : [1_000, 10_000, 50_000, 100_000, 250_000];
 
     [IterationSetup]
     public void Setup()
