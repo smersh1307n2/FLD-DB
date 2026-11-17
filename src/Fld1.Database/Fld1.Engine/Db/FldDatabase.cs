@@ -2280,7 +2280,8 @@ public sealed partial class FldDatabase : IDisposable
 
     /// <summary>
     /// Allocation-free LWW resolution for compaction. The commit lock pins overlay
-    /// arrays and immutable run buffers for the full compaction lifetime.
+    /// arrays and immutable run buffers for the full compaction lifetime; callers must
+    /// consume the returned borrowed memories before leaving that locked compaction.
     /// </summary>
     private bool TryResolveForCompactionUnlocked(
         ReadOnlySpan<byte> recordId, ushort fieldId, out CompactionResolved resolved)
