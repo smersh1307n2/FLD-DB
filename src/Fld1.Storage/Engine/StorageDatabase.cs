@@ -807,8 +807,8 @@ public sealed class StorageSnapshot : IDisposable
             _prefix = prefix;
             _afterKey = afterKey;
             _cursor = prefix.Length == 0
-                ? reader.OpenAllCursor()
-                : reader.OpenPrefixCursor(prefix);
+                ? reader.OpenAllCursor(afterKey: afterKey)
+                : reader.OpenPrefixCursor(prefix, afterKey);
         }
 
         public IReadOnlyList<StorageEntry> ReadPage(int limit)
