@@ -84,9 +84,18 @@ public sealed class StorageBlobStoreTests : IDisposable
         SeedLegacyPagedBlob(database, blobId, expected, pageSize: 4096);
         var blobs = new StorageBlobStore(database, "test"u8, pageSize: 4096);
 
-        Assert.True(blobs.MigrateToSingleFile(blobId));
+        Assert.True(blobs.MigrateToSingleFile(blobId, out bool wasAlreadySingleFile));
+        Assert.False(wasAlreadySingleFile);
         string blobDirectory = BlobDirectory(blobId);
-        Assert.True(File.Exists(Path.Combine(blobDirectory, "content.blob")));
+        string contentPath = Path.Combine(blobDirectory, "content.blob");
+        Assert.True(File.Exists(contentPath));
+        Assert.Empty(Directory.GetFiles(blobDirectory, "*.page"));
+
+        // Simulate a crash after the metadata switched to the contiguous file but
+        // before old page cleanup completed. A retry verifies the file and converges.
+        File.WriteAllBytes(Path.Combine(blobDirectory, "00000000.page"), new byte[] { 1, 2, 3 });
+        Assert.True(blobs.MigrateToSingleFile(blobId, out wasAlreadySingleFile));
+        Assert.True(wasAlreadySingleFile);
         Assert.Empty(Directory.GetFiles(blobDirectory, "*.page"));
 
         Assert.True(blobs.TryOpenRead(blobId, out StorageBlobReader? reader));
