@@ -139,5 +139,5 @@ public sealed class StorageBTreeRootPublisherTests
         try { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); } catch { }
     }
 
-    private sealed class InjectedFaultException : Exception;
+    private sealed class InjectedFaultException : Exception { }
 }
