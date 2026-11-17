@@ -35,6 +35,15 @@ if (args.Contains("--storage-index-million-scale", StringComparer.Ordinal))
     return;
 }
 
+if (args.Contains("--tombstone-gc-250k-only", StringComparer.Ordinal))
+{
+    Environment.SetEnvironmentVariable("FLD_TOMBSTONE_GC_250K_ONLY", "1");
+    var probeConfig = DefaultConfig.Instance.AddJob(
+        Job.Default.WithWarmupCount(0).WithIterationCount(1));
+    BenchmarkRunner.Run<TombstoneGcSweepBench>(probeConfig);
+    return;
+}
+
 if (args.Contains("--tombstone-gc-only", StringComparer.Ordinal))
 {
     // Each invocation performs one complete namespace sweep on a freshly seeded database.

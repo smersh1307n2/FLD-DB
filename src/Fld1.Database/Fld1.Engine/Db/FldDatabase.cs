@@ -1686,6 +1686,40 @@ public sealed partial class FldDatabase : IDisposable
         }
     }
 
+    // Compaction holds _commitLock for the entire sweep. These memories borrow
+    // immutable Run buffers or stable overlay arrays until RunBuilder.Add copies them.
+    // This avoids FieldResolver.Resolved's per-field materialization of three arrays.
+    private readonly struct CompactionResolved
+    {
+        public readonly bool Found;
+        public readonly bool IsTombstone;
+        public readonly ushort KeyEpoch;
+        public readonly ulong Wall;
+        public readonly uint Logical;
+        public readonly ReadOnlyMemory<byte> AuthorNodeId;
+        public readonly ReadOnlyMemory<byte> Value;
+        public readonly ReadOnlyMemory<byte> ChangeId;
+        public readonly uint OriginAuthorEpoch;
+        public readonly ulong OriginSequence;
+
+        public CompactionResolved(
+            bool found, bool isTombstone, ushort keyEpoch, ulong wall, uint logical,
+            ReadOnlyMemory<byte> authorNodeId, ReadOnlyMemory<byte> value,
+            ReadOnlyMemory<byte> changeId, uint originAuthorEpoch, ulong originSequence)
+        {
+            Found = found;
+            IsTombstone = isTombstone;
+            KeyEpoch = keyEpoch;
+            Wall = wall;
+            Logical = logical;
+            AuthorNodeId = authorNodeId;
+            Value = value;
+            ChangeId = changeId;
+            OriginAuthorEpoch = originAuthorEpoch;
+            OriginSequence = originSequence;
+        }
+    }
+
     private struct CompactFieldIdSet
     {
         private ushort _first;
@@ -1804,6 +1838,22 @@ public sealed partial class FldDatabase : IDisposable
             resolved.OriginSequence, isRecordTombstone, isFieldTombstone);
     }
 
+    private static FldTombstoneGcCandidate CreateTombstoneGcCandidate(
+        ReadOnlySpan<byte> recordId, ushort fieldId, CompactionResolved resolved,
+        bool isRecordTombstone, bool isFieldTombstone)
+    {
+        ReadOnlySpan<byte> changeId = resolved.ChangeId.Span;
+        ReadOnlySpan<byte> authorNodeId = resolved.AuthorNodeId.Span;
+        byte[] identity = new byte[recordId.Length + changeId.Length + authorNodeId.Length];
+        recordId.CopyTo(identity);
+        changeId.CopyTo(identity.AsSpan(recordId.Length));
+        authorNodeId.CopyTo(identity.AsSpan(recordId.Length + changeId.Length));
+        return FldTombstoneGcCandidate.CreateOwned(
+            identity, changeId.Length, authorNodeId.Length, fieldId,
+            resolved.Wall, resolved.Logical, resolved.OriginAuthorEpoch,
+            resolved.OriginSequence, isRecordTombstone, isFieldTombstone);
+    }
+
     private sealed class CompactRunCursor
     {
         public required RunReader Reader { get; init; }
@@ -1882,15 +1932,20 @@ public sealed partial class FldDatabase : IDisposable
             outputMaxRecord = null;
         }
 
-        void AddOutputField(ReadOnlySpan<byte> recordId, ushort fieldId, FieldResolver.Resolved resolved)
+        void AddOutputField(ReadOnlySpan<byte> recordId, ushort fieldId, CompactionResolved resolved)
         {
-            long estimatedBytes = 128L + (resolved.IsTombstone ? 0 : resolved.Value?.Length ?? 0);
+            long estimatedBytes = 128L + (resolved.IsTombstone ? 0 : resolved.Value.Length);
             if (outputFieldCount != 0 &&
                 (outputFieldCount >= MaxOutputFields ||
                  outputEstimatedBytes + estimatedBytes > MaxOutputBytes))
                 FlushOutputRun();
 
-            AddResolvedField(builder, recordId, fieldId, resolved);
+            builder.Add(recordId, fieldId,
+                resolved.IsTombstone ? ReadOnlySpan<byte>.Empty : resolved.Value.Span,
+                resolved.Wall, resolved.Logical,
+                resolved.AuthorNodeId.IsEmpty ? _localAuthor : resolved.AuthorNodeId.Span,
+                resolved.KeyEpoch, resolved.IsTombstone, resolved.ChangeId.Span,
+                resolved.OriginAuthorEpoch, resolved.OriginSequence);
             outputFieldCount++;
             outputEstimatedBytes += estimatedBytes;
             if (outputMinRecord is null)
@@ -1934,7 +1989,10 @@ public sealed partial class FldDatabase : IDisposable
                    priority == target)
             {
                 CompactRunCursor cursor = runQueue.Dequeue();
-                cursor.Reader.ScanFieldIds(recordIdBuffer, fieldId => fieldIds.Add(fieldId));
+                // Enumerate directly to avoid a per-run capturing callback allocation.
+                var fieldEnumerator = cursor.Reader.GetFieldIds(recordIdBuffer);
+                while (fieldEnumerator.MoveNext())
+                    fieldIds.Add(fieldEnumerator.Current);
                 cursor.Index++;
                 if (cursor.Reader.TryReadRecordIdAt(cursor.Index, cursor.RecordId))
                     runQueue.Enqueue(cursor, GetCompactionRecordPriority(cursor.RecordId));
@@ -1945,15 +2003,15 @@ public sealed partial class FldDatabase : IDisposable
 
             bool hasRecordTombstone = false;
             bool reclaimRecordTombstone = false;
-            FieldResolver.Resolved recordTombstone = FieldResolver.Resolved.Miss;
+            CompactionResolved recordTombstone = default;
             if (tombstoneGc is not null &&
                 fieldIds.Contains(FldLifecycle.FieldId) &&
-                TryResolveUnlocked(recordIdBuffer, FldLifecycle.FieldId, out recordTombstone) &&
+                TryResolveForCompactionUnlocked(recordIdBuffer, FldLifecycle.FieldId, out recordTombstone) &&
                 recordTombstone.Found)
             {
-                if (recordTombstone.IsTombstone || recordTombstone.Value is null)
+                if (recordTombstone.IsTombstone || recordTombstone.Value.IsEmpty)
                     throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
-                if (recordTombstone.Value.AsSpan().SequenceEqual(FldLifecycle.DeadValue))
+                if (recordTombstone.Value.Span.SequenceEqual(FldLifecycle.DeadValue))
                 {
                     hasRecordTombstone = true;
                     reclaimRecordTombstone = tombstoneGc.TryReclaim(
@@ -1961,7 +2019,7 @@ public sealed partial class FldDatabase : IDisposable
                             recordIdBuffer, FldLifecycle.FieldId, recordTombstone,
                             isRecordTombstone: true, isFieldTombstone: false));
                 }
-                else if (!recordTombstone.Value.AsSpan().SequenceEqual(FldLifecycle.AliveValue))
+                else if (!recordTombstone.Value.Span.SequenceEqual(FldLifecycle.AliveValue))
                 {
                     throw new InvalidDataException("FLD lifecycle value is neither Alive nor Dead.");
                 }
@@ -1970,7 +2028,7 @@ public sealed partial class FldDatabase : IDisposable
             for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
             {
                 ushort fieldId = fieldIds[fieldIndex];
-                if (!TryResolveUnlocked(recordIdBuffer, fieldId, out FieldResolver.Resolved resolved) ||
+                if (!TryResolveForCompactionUnlocked(recordIdBuffer, fieldId, out CompactionResolved resolved) ||
                     !resolved.Found)
                     continue;
 
@@ -1988,9 +2046,10 @@ public sealed partial class FldDatabase : IDisposable
                         continue;
 
                     bool newerThanRecordDelete = FieldResolver.IsNewer(
-                        resolved.Wall, resolved.Logical, resolved.AuthorNodeId ?? _localAuthor,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId.IsEmpty ? _localAuthor : resolved.AuthorNodeId.Span,
                         recordTombstone.Wall, recordTombstone.Logical,
-                        recordTombstone.AuthorNodeId ?? _localAuthor);
+                        recordTombstone.AuthorNodeId.IsEmpty ? _localAuthor : recordTombstone.AuthorNodeId.Span);
                     if (!newerThanRecordDelete)
                         continue;
                 }
@@ -2218,6 +2277,75 @@ public sealed partial class FldDatabase : IDisposable
             bestAuthor.IsEmpty ? Array.Empty<byte>() : bestAuthor.ToArray(),
             bestValue.IsEmpty ? Array.Empty<byte>() : bestValue.ToArray(),
             bestChangeId.IsEmpty ? Array.Empty<byte>() : bestChangeId.ToArray(),
+            bestOriginAuthorEpoch, bestOriginSequence);
+        return true;
+    }
+
+    /// <summary>
+    /// Allocation-free LWW resolution for compaction. The commit lock pins overlay
+    /// arrays and immutable run buffers for the full compaction lifetime; callers must
+    /// consume the returned borrowed memories before leaving that locked compaction.
+    /// </summary>
+    private bool TryResolveForCompactionUnlocked(
+        ReadOnlySpan<byte> recordId, ushort fieldId, out CompactionResolved resolved)
+    {
+        resolved = default;
+        bool have = false;
+        ulong bestWall = 0;
+        uint bestLog = 0;
+        ReadOnlyMemory<byte> bestAuthor = ReadOnlyMemory<byte>.Empty;
+        ReadOnlyMemory<byte> bestValue = ReadOnlyMemory<byte>.Empty;
+        ReadOnlyMemory<byte> bestChangeId = ReadOnlyMemory<byte>.Empty;
+        uint bestOriginAuthorEpoch = 0;
+        ulong bestOriginSequence = 0;
+        bool bestTomb = false;
+        ushort bestEpoch = 0;
+
+        var key = new MemFieldKey(recordId, fieldId);
+        if (_overlay.TryGet(key, out var mem) && mem is not null)
+        {
+            have = true;
+            bestWall = mem.Wall;
+            bestLog = mem.Logical;
+            bestAuthor = mem.AuthorNodeId ?? Array.Empty<byte>();
+            bestValue = mem.Value ?? Array.Empty<byte>();
+            bestTomb = mem.IsTombstone;
+            bestEpoch = mem.KeyEpoch;
+            bestChangeId = mem.ChangeId ?? Array.Empty<byte>();
+            bestOriginAuthorEpoch = mem.OriginAuthorEpoch;
+            bestOriginSequence = mem.OriginSequence;
+        }
+
+        for (int i = 0; i < _runs.Count; i++)
+        {
+            var bytes = EnsureRunCached(i);
+            if (!new RunReader(bytes).TryGetField(recordId, fieldId, out var state) || !state.Found)
+                continue;
+
+            ReadOnlyMemory<byte> author = state.AuthorNodeId;
+            if (!have || FieldResolver.IsNewer(
+                    state.Wall, state.Logical, author.Span,
+                    bestWall, bestLog, bestAuthor.Span))
+            {
+                have = true;
+                bestWall = state.Wall;
+                bestLog = state.Logical;
+                bestAuthor = author;
+                bestValue = state.IsTombstone ? ReadOnlyMemory<byte>.Empty : state.Value;
+                bestTomb = state.IsTombstone;
+                bestEpoch = state.KeyEpoch;
+                bestChangeId = state.ChangeId;
+                bestOriginAuthorEpoch = state.OriginAuthorEpoch;
+                bestOriginSequence = state.OriginSequence;
+            }
+        }
+
+        if (!have)
+            return false;
+
+        resolved = new CompactionResolved(
+            true, bestTomb, bestEpoch, bestWall, bestLog,
+            bestAuthor, bestValue, bestChangeId,
             bestOriginAuthorEpoch, bestOriginSequence);
         return true;
     }

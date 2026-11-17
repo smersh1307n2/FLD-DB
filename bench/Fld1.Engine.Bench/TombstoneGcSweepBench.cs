@@ -21,8 +21,13 @@ public class TombstoneGcSweepBench
     private readonly byte[] _value = new byte[64];
     private long _lastGcAllocatedBytes;
 
-    [Params(1_000, 10_000, 50_000, 100_000, 250_000)]
+    [ParamsSource(nameof(TombstoneCounts))]
     public int TombstoneCount { get; set; }
+
+    public IEnumerable<int> TombstoneCounts =>
+        Environment.GetEnvironmentVariable("FLD_TOMBSTONE_GC_250K_ONLY") == "1"
+            ? [250_000]
+            : [1_000, 10_000, 50_000, 100_000, 250_000];
 
     [IterationSetup]
     public void Setup()
@@ -133,95 +138,8 @@ public class TombstoneGcSweepBench
     }
 
     public static int RunPeakProbeChild(string directory, int tombstoneCount)
-    {
-        using var database = FldDatabase.Open(directory, 0);
-        using var sampler = new PeakMemorySampler();
-        int reclaimed = database.CompactTombstones(static _ => true);
-        sampler.Stop();
-        Console.WriteLine(
-            $"TOMBSTONE_GC_PEAK_SAMPLE Count={tombstoneCount} IntervalMs=2 " +
-            $"BaselineWorkingSetBytes={sampler.BaselineWorkingSetBytes} " +
-            $"PeakWorkingSetBytes={sampler.PeakWorkingSetBytes} " +
-            $"WorkingSetDeltaBytes={sampler.PeakWorkingSetBytes - sampler.BaselineWorkingSetBytes} " +
-            $"BaselineManagedHeapBytes={sampler.BaselineManagedHeapBytes} " +
-            $"PeakManagedHeapBytes={sampler.PeakManagedHeapBytes} " +
-            $"ManagedHeapDeltaBytes={sampler.PeakManagedHeapBytes - sampler.BaselineManagedHeapBytes}");
-        if (reclaimed != tombstoneCount)
-            throw new InvalidOperationException(
-                $"Isolated peak-memory probe reclaimed {reclaimed}/{tombstoneCount} entries.");
-        return 0;
-    }
+        => TombstoneGcMemoryProbe.Run(directory, tombstoneCount);
 
-    /// <summary>
-    /// Diagnostic-only sampler. Its background thread perturbs the measured operation;
-    /// use its memory high-water marks, not its BenchmarkDotNet timing, as the result.
-    /// The 2 ms sampling interval can miss shorter-lived peaks.
-    /// </summary>
-    private sealed class PeakMemorySampler : IDisposable
-    {
-        private readonly System.Diagnostics.Process _process;
-        private readonly System.Threading.ManualResetEventSlim _stop = new(false);
-        private readonly System.Threading.Thread _thread;
-        private bool _stopped;
-
-        public long BaselineWorkingSetBytes { get; }
-        public long PeakWorkingSetBytes { get; private set; }
-        public long BaselineManagedHeapBytes { get; }
-        public long PeakManagedHeapBytes { get; private set; }
-
-        public PeakMemorySampler()
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-            _process = System.Diagnostics.Process.GetCurrentProcess();
-            _process.Refresh();
-            BaselineWorkingSetBytes = _process.WorkingSet64;
-            PeakWorkingSetBytes = BaselineWorkingSetBytes;
-            BaselineManagedHeapBytes = GC.GetTotalMemory(forceFullCollection: false);
-            PeakManagedHeapBytes = BaselineManagedHeapBytes;
-            _thread = new System.Threading.Thread(SampleLoop)
-            {
-                IsBackground = true,
-                Name = "FLD Tombstone-GC peak-memory sampler"
-            };
-            _thread.Start();
-        }
-
-        public void Stop()
-        {
-            if (_stopped)
-                return;
-            _stop.Set();
-            _thread.Join();
-            Sample();
-            _stopped = true;
-        }
-
-        private void SampleLoop()
-        {
-            while (!_stop.Wait(TimeSpan.FromMilliseconds(2)))
-                Sample();
-        }
-
-        private void Sample()
-        {
-            _process.Refresh();
-            long workingSet = _process.WorkingSet64;
-            long managedHeap = GC.GetTotalMemory(forceFullCollection: false);
-            if (workingSet > PeakWorkingSetBytes)
-                PeakWorkingSetBytes = workingSet;
-            if (managedHeap > PeakManagedHeapBytes)
-                PeakManagedHeapBytes = managedHeap;
-        }
-
-        public void Dispose()
-        {
-            Stop();
-            _stop.Dispose();
-            _process.Dispose();
-        }
-    }
     private static byte[] Id(byte value)
     {
         byte[] id = new byte[16];

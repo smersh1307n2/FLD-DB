@@ -46,6 +46,48 @@ public readonly struct RunFieldState
 }
 
 /// <summary>
+/// Allocation-free enumerator over the FieldIds stored in one run record.
+/// The underlying run buffer must remain alive and immutable while enumerating.
+/// </summary>
+public ref struct FieldIdEnumerator
+{
+    private readonly ReadOnlySpan<byte> _file;
+    private readonly int _descBase;
+    private readonly int _count;
+    private int _index;
+
+    internal FieldIdEnumerator(ReadOnlySpan<byte> file, int descBase, int count)
+    {
+        _file = file;
+        _descBase = descBase;
+        _count = count;
+        _index = -1;
+    }
+
+    public ushort Current
+    {
+        get
+        {
+            if ((uint)_index >= (uint)_count)
+                throw new InvalidOperationException("Enumerator is not positioned on a field.");
+            int desc = _descBase + _index * RunConstants.FieldDescSize;
+            return BinaryPrimitives.ReadUInt16LittleEndian(_file.Slice(desc, 2));
+        }
+    }
+
+    public bool MoveNext()
+    {
+        if (_index + 1 >= _count)
+        {
+            _index = _count;
+            return false;
+        }
+        _index++;
+        return true;
+    }
+}
+
+/// <summary>
 /// Zero-copy reader over an immutable FLD1 run buffer.
 /// </summary>
 public readonly struct RunReader
@@ -423,14 +465,15 @@ public readonly struct RunReader
     /// Enumerate every stored FieldId for a record, including tombstone descriptors.
     /// Used by compaction; user-visible scans continue to omit tombstones.
     /// </summary>
-    public void ScanFieldIds(ReadOnlySpan<byte> recordId, Action<ushort> onFieldId)
+    public FieldIdEnumerator GetFieldIds(ReadOnlySpan<byte> recordId)
     {
-        ArgumentNullException.ThrowIfNull(onFieldId);
-        if (recordId.Length != 16 || IsEmpty) return;
+        if (recordId.Length != 16 || IsEmpty)
+            return default;
 
         var file = _file.Span;
         int clusterIdx = FindCluster(file, recordId);
-        if (clusterIdx < 0) return;
+        if (clusterIdx < 0)
+            return default;
 
         ulong slotOff = RunHeader.ReadSlotOff(file);
         int slotPos = (int)slotOff + clusterIdx * RunConstants.CompactSlotSize;
@@ -438,13 +481,15 @@ public readonly struct RunReader
         int clusterOff = checked((int)dataOffset);
         ushort numFields = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(clusterOff + 16, 2));
         int descBase = clusterOff + RunConstants.ClusterHeaderSize;
+        return new FieldIdEnumerator(file, descBase, numFields);
+    }
 
-        for (int i = 0; i < numFields; i++)
-        {
-            int desc = descBase + i * RunConstants.FieldDescSize;
-            ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(desc, 2));
-            onFieldId(fieldId);
-        }
+    public void ScanFieldIds(ReadOnlySpan<byte> recordId, Action<ushort> onFieldId)
+    {
+        ArgumentNullException.ThrowIfNull(onFieldId);
+        var enumerator = GetFieldIds(recordId);
+        while (enumerator.MoveNext())
+            onFieldId(enumerator.Current);
     }
 
     /// <summary>
