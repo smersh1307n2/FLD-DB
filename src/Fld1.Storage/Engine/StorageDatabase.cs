@@ -14,7 +14,6 @@ public sealed class StorageDatabase : IDisposable
     private const int MaxBatchOperations = 100_000;
     private const int MaxKeyLength = 1024 * 1024;
     private readonly object _gate = new();
-    private readonly Dictionary<StorageKey, byte[]> _values = new();
     private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
     private readonly StorageGenerationPins _generationPins = new();
     private readonly Dictionary<ulong, StorageBTreeGenerationFiles> _generationFiles = new();
@@ -25,7 +24,7 @@ public sealed class StorageDatabase : IDisposable
     private StorageBTreeReader? _btreeReader;
     private readonly string _directory;
     private readonly Action<StorageFaultPoint>? _faultInjector;
-    private ulong _snapshotGeneration;
+    private int _liveCount;
     private ulong _snapshotCommitSeq;
     private bool _disposed;
     private bool _faulted;
@@ -35,7 +34,7 @@ public sealed class StorageDatabase : IDisposable
     /// <summary>Canonical directory containing this Storage partition.</summary>
     public string DirectoryPath => _directory;
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
-    public int Count { get { lock (_gate) { EnsureUsable(); return _values.Count; } } }
+    public int Count { get { lock (_gate) { EnsureUsable(); return _liveCount; } } }
 
     private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector)
     {
@@ -93,16 +92,12 @@ public sealed class StorageDatabase : IDisposable
             // Always validate the legacy checkpoint manifest while it exists. It is
             // still used for upgrade compatibility, but the v2 root is authoritative
             // once published.
-            var snapshot = StorageSnapshotFile.Load(directory, partitionId);
             StorageBTreeManifestV2? root = StorageBTreeRootPublisher.TryLoad(directory, partitionId);
+            var snapshot = root.HasValue ? null : StorageSnapshotFile.Load(directory, partitionId);
 
             if (root.HasValue)
             {
-                if (snapshot is not null && snapshot.CommitSeq > root.Value.CommitSeq)
-                    throw new InvalidDataException("Legacy snapshot is ahead of the durable B+ tree root.");
-
-                database._snapshotGeneration = snapshot?.Generation ?? 0;
-                database._snapshotCommitSeq = snapshot?.CommitSeq ?? 0;
+                database._snapshotCommitSeq = root.Value.CommitSeq;
                 database._btreeManifest = root.Value;
                 database._lastCommitSeq = root.Value.CommitSeq;
 
@@ -117,8 +112,8 @@ public sealed class StorageDatabase : IDisposable
                     database._btreeFiles = files;
                     database._generationPins.Register(root.Value.Generation);
                     database._generationFiles.Add(root.Value.Generation, files);
-                    database.LoadBTreeValues();
                     database._btreeReader = database.CreateBTreeReader(root.Value, files);
+                    database._liveCount = database.CountBTreeValues(root.Value, files);
                 }
                 catch
                 {
@@ -130,9 +125,7 @@ public sealed class StorageDatabase : IDisposable
             {
                 if (snapshot is not null)
                 {
-                    foreach (var pair in snapshot.Values)
-                        database._values.Add(pair.Key, pair.Value);
-                    database._snapshotGeneration = snapshot.Generation;
+                    database._liveCount = snapshot.Values.Count;
                     database._snapshotCommitSeq = snapshot.CommitSeq;
                     database._lastCommitSeq = snapshot.CommitSeq;
                 }
@@ -149,7 +142,9 @@ public sealed class StorageDatabase : IDisposable
                 {
                     files.TruncateToCommittedLengths(0, 0);
                     StorageBTreeManifestV2 initial = StorageBTreeGenerationBuilder.Build(
-                        files, database._lastCommitSeq, database.CreateBTreeBuildInputs());
+                        files, database._lastCommitSeq,
+                        CreateBTreeBuildInputs(snapshot?.Values
+                            ?? new SortedDictionary<StorageKey, byte[]>(StorageKeyComparer.Instance)));
                     StorageBTreeRootPublisher.Publish(directory, initial, files);
                     database._btreeFiles = files;
                     database._generationPins.Register(initial.Generation);
@@ -186,27 +181,16 @@ public sealed class StorageDatabase : IDisposable
         }
     }
 
-    private void LoadBTreeValues()
+    private int CountBTreeValues(
+        in StorageBTreeManifestV2 manifest,
+        StorageBTreeGenerationFiles files)
     {
-        StorageBTreeGenerationFiles files = _btreeFiles
-            ?? throw new InvalidOperationException("B+ tree generation files are not open.");
-        StorageBTreeManifestV2 manifest = _btreeManifest;
-        var reader = new StorageBTreeReader(
-            manifest.Generation,
-            manifest.RootPageId,
-            pageId => files.ReadPage(pageId, manifest.CommittedPageFileLength),
-            key => files.ReadData(key.Offset, key.Length, manifest.CommittedDataFileLength));
-
+        StorageBTreeReader reader = CreateBTreeReader(manifest, files);
         using StorageBTreePrefixCursor cursor = reader.OpenAllCursor();
-        while (cursor.TryReadNext(out StorageTreeEntry entry))
-        {
-            byte[] keyBytes = files.ReadData(
-                entry.Key.Offset, entry.Key.Length, manifest.CommittedDataFileLength);
-            byte[] valueBytes = files.ReadData(
-                entry.Value.Offset, entry.Value.Length, manifest.CommittedDataFileLength);
-            if (!_values.TryAdd(new StorageKey(keyBytes), valueBytes))
-                throw new InvalidDataException("B+ tree root contains duplicate live keys.");
-        }
+        int count = 0;
+        while (cursor.TryReadNext(out _))
+            count = checked(count + 1);
+        return count;
     }
 
     private StorageBTreeReader CreateBTreeReader(
@@ -223,14 +207,12 @@ public sealed class StorageDatabase : IDisposable
                 key.Length,
                 manifest.CommittedDataFileLength));
 
-    private StorageTreeBuildInput[] CreateBTreeBuildInputs()
-    {
-        var sorted = new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance);
-        return sorted.Select(pair => new StorageTreeBuildInput(
+    private static StorageTreeBuildInput[] CreateBTreeBuildInputs(
+        SortedDictionary<StorageKey, byte[]> values)
+        => values.Select(pair => new StorageTreeBuildInput(
             pair.Key.Span.ToArray(),
             pair.Value,
             IsTombstone: false)).ToArray();
-    }
 
     private StorageTreeBuildInput[] CreateBTreeBuildInputsFromCurrentTree()
     {
@@ -332,12 +314,7 @@ public sealed class StorageDatabase : IDisposable
                 _ = _generationPins.Retire(oldFiles.Generation);
                 ReclaimRetiredGenerations();
 
-                // Keep the legacy checkpoint as a migration/rollback mirror for now.
-                // It is no longer the recovery authority after the v2 root exists.
-                ulong snapshotGeneration = checked(_snapshotGeneration + 1);
-                StorageSnapshotFile.Store(_directory, PartitionId, snapshotGeneration, _lastCommitSeq,
-                    new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance), _faultInjector);
-                _snapshotGeneration = snapshotGeneration;
+                // The B+ tree root is the checkpoint; no duplicate snapshot is written.
                 _snapshotCommitSeq = _lastCommitSeq;
                 _wal.TruncateSealedSegments(_btreeManifest.CommitSeq);
             }
@@ -412,6 +389,16 @@ public sealed class StorageDatabase : IDisposable
             if (mutations.Count > MaxBatchOperations)
                 throw new ArgumentOutOfRangeException(nameof(mutations), "Storage batch operation limit exceeded.");
 
+            StorageBTreeReader currentReader = _btreeReader
+                ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
+            int nextLiveCount = _liveCount;
+            foreach (StorageMutation mutation in mutations)
+            {
+                bool existed = currentReader.TryGet(mutation.Key, out _);
+                if (mutation.IsDelete && existed) nextLiveCount--;
+                else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
+            }
+
             byte[] payload = EncodeBatch(mutations);
             try
             {
@@ -437,15 +424,9 @@ public sealed class StorageDatabase : IDisposable
                     },
                     faultInjector: _faultInjector);
 
-                foreach (var mutation in mutations)
-                {
-                    var key = new StorageKey(mutation.Key);
-                    if (mutation.IsDelete) _values.Remove(key);
-                    else _values[key] = mutation.Value.ToArray();
-                }
-
                 _btreeManifest = next;
                 _btreeReader = CreateBTreeReader(next, files);
+                _liveCount = nextLiveCount;
                 _lastCommitSeq = next.CommitSeq;
                 return next.CommitSeq;
             }
@@ -464,6 +445,16 @@ public sealed class StorageDatabase : IDisposable
         if (commitSeq != _lastCommitSeq + 1)
             throw new InvalidDataException($"Storage WAL CommitSeq {commitSeq} does not follow {_lastCommitSeq}.");
         var mutations = DecodeBatch(payload);
+        StorageBTreeReader currentReader = _btreeReader
+            ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
+        int nextLiveCount = _liveCount;
+        foreach (StorageMutation mutation in mutations)
+        {
+            bool existed = currentReader.TryGet(mutation.Key, out _);
+            if (mutation.IsDelete && existed) nextLiveCount--;
+            else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
+        }
+
         StorageBTreeGenerationFiles files = _btreeFiles
             ?? throw new InvalidOperationException("B+ tree generation files are not open.");
         StorageTreeMutation[] treeMutations = mutations
@@ -479,15 +470,9 @@ public sealed class StorageDatabase : IDisposable
             throw new InvalidDataException("Recovered WAL and B+ tree CommitSeq values diverged.");
         StorageBTreeRootPublisher.Publish(_directory, next, files, _faultInjector);
 
-        foreach (var mutation in mutations)
-        {
-            var key = new StorageKey(mutation.Key);
-            if (mutation.IsDelete) _values.Remove(key);
-            else _values[key] = mutation.Value;
-        }
-
         _btreeManifest = next;
         _btreeReader = CreateBTreeReader(next, files);
+        _liveCount = nextLiveCount;
         _lastCommitSeq = commitSeq;
     }
 
