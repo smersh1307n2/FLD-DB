@@ -1,7 +1,7 @@
 # FLD Storage Core — paged ordered index design
 
-Status: Stage C immutable B+ tree builder/reader implemented; production tree integration not started
-Date: 2026-11-16
+Status: B+ tree is the authoritative StorageDatabase index; WAL/root recovery, snapshots, generation reclamation and shared cache budgets are integrated. Exact-head cross-platform CI and benchmark are the remaining verification gates.
+Date: 2026-11-17
 Scope: Fld1.Storage physical key/value engine only. No BIN-SYNC protocol changes and no FLD field/tombstone policy changes.
 
 ## 1. Why the current engine must change
@@ -95,7 +95,7 @@ A snapshot captures (generation, rootPageId, commitSeq) and increments a generat
 - Disposing a snapshot releases its pin. Compaction may retire an old generation only after all snapshot/cursor pins and in-flight page reads have drained.
 - Database disposal prevents new operations but must not invalidate already-open snapshots; this matches the intended stable-snapshot contract and must be tested explicitly.
 
-Initial cache target: 64 MiB total page payload, with a small bounded metadata allowance. The limit is global to one StorageDatabase instance, not per generation. Cache eviction must never delete durable pages. Cache miss I/O is synchronous initially; async prefetch is a later optimization only if measured.
+Current page-cache budget: 16 MiB of resident page payload per StorageDatabase. Reader metadata has separate aggregate limits shared across all roots/snapshots: at most 16,384 hot key-reference entries (keys up to 256 bytes) and 4,096 validated-page identities. These are database-wide limits, not per reader or generation. Retiring a generation evicts its reader metadata and page-cache entries after pins drain. Cache eviction must never delete durable pages. Cache miss I/O is synchronous; async prefetch remains a later optimization only if measured.
 
 ## 6. Compaction and old-generation reclamation
 
@@ -196,7 +196,7 @@ These are baseline defect measurements, not acceptable target performance. Exact
 
 ### 2026-11-16 reader validation hardening
 
-The reader now validates strict key ordering in every leaf before binary search or prefix traversal, and strict separator ordering plus unique child references in internal pages before routing. Validation results are retained in a bounded 4,096-page FIFO per reader; this avoids unbounded validation metadata while preventing repeated full-page ordering checks on hot pages. The cache is advisory only: eviction causes revalidation, never weaker validation. Added CRC-valid malformed leaf/internal-page tests so the checks are not merely relying on checksum failure.
+The reader validates strict key ordering in every leaf before binary search or prefix traversal, and strict separator ordering plus unique child references in internal pages before routing. Initially validation results were retained in a bounded 4,096-page FIFO per reader; the production integration later replaced this with one shared 4,096-page FIFO budget per StorageDatabase. The cache is advisory only: eviction causes revalidation, never weaker validation. Added CRC-valid malformed leaf/internal-page tests so the checks are not merely relying on checksum failure.
 
 This hardening is still Stage C reader correctness work. It does not add a durable page cache lease path, generation pinning, or production integration. The reader now has a lease-aware page-source overload. Point lookups hold a page lease for the operation; prefix cursors retain the current leaf lease until advancing or disposal. The cache-pressure benchmark now exercises this path directly without copying page bytes out through ToArray(). This is still an in-memory cache/reader benchmark, not proof of durable snapshot-generation pinning or on-disk integration.
 
@@ -236,7 +236,7 @@ The standalone reader now uses borrowed `ReadOnlyMemory<byte>` for key compariso
 
 The page cache stores the CRC-validated `StoragePageView` on each resident cache entry. A page is fully checked on first decode; eviction discards that decoded view, so a subsequent cache miss reloads and validates the page again. A view remains borrowed from the cache lease and must not outlive it. Prefix cursors validate ordering within each leaf once, then validate the boundary only when moving to the next leaf instead of repeating a key comparison for every entry. The page-loader overload avoids allocating a new closure on each page acquisition.
 
-A per-reader hot reference cache is bounded to 16,384 entries and excludes keys longer than 256 bytes. It caches only key bytes plus value references/negative results; it does not duplicate value payloads, WAL records, outbox state, or durable metadata. This cache is volatile and is discarded with its immutable reader/root. A future multi-snapshot production integration must enforce a shared database-level aggregate budget rather than multiplying the per-reader limit without bound.
+Initially each reader had a hot reference cache bounded to 16,384 entries and excluded keys longer than 256 bytes. The production integration now uses one shared database-level aggregate budget of 16,384 entries across all readers/roots, excluding keys longer than 256 bytes. Entries include generation and immutable root identity so snapshots at different commit roots cannot reuse each other's values. The cache stores only key bytes plus value references/negative results; it does not duplicate value payloads, WAL records, outbox state, or durable metadata.
 
 ### 1M-entry result at FLD HEAD `8a78251c4b22d5274728a00fa199a3f8ec1173bd`
 
@@ -315,4 +315,21 @@ At commit 9fd8b047be667536d63c44db542f689396af4d96, all .NET CI jobs passed on U
 
 ### 2026-11-17 — StorageDatabase WAL/root integration
 
-StorageDatabase now publishes a COW B+ tree root after every durable WAL commit. Recovery validates the WAL first, loads the last published root, truncates only uncommitted generation tails, and replays later WAL records into new COW roots. Checkpoint bulk-builds a compacted generation at the same CommitSeq before WAL segment reclamation. The legacy snapshot remains a temporary migration mirror. Tombstones are included when compacting the tree; live-key reads/snapshots still use the in-memory dictionary cache. No generation reclamation or production page-backed read path is enabled yet.
+Historical note: this was the initial WAL/root integration state before the production read-path and generation-lifetime cutover. It is superseded by the 2026-11-17 production integration status below.
+
+
+### 2026-11-17 — Production B+ tree cutover and aggregate reader-cache budget
+
+This section is authoritative and supersedes earlier historical notes in this design document that say production routing is blocked, the dictionary remains authoritative, snapshots copy the full index, or caches are per-reader.
+
+- `StorageDatabase` now uses the B+ tree as its authoritative durable key/value index. The in-memory Dictionary mirror has been removed from the active path.
+- WAL remains the recovery authority. A commit durably appends and flushes its WAL batch before copy-on-write pages and the new root are published. Open validates the WAL chain, loads the published root, truncates only uncommitted tails after validation, and replays later complete batches.
+- Point reads use the current immutable B+ tree root. Snapshots capture a root/commit sequence and generation pin; point reads and prefix scans traverse that root without materializing a full sorted index. Prefix continuation seeks directly to its continuation key.
+- Snapshot cursors are owned by their snapshot and are disposed with it. Retired generation page/data files remain available while any snapshot pin is live; reclamation occurs after the last pin is released.
+- Checkpoint builds and publishes a compact immutable generation at the same CommitSeq before WAL segment truncation. The old generation is reclaimed only after its pins drain. Tombstones are retained during compaction; live Count excludes tombstones.
+- Legacy snapshot files are read only for one-time migration. Checkpoint no longer writes a duplicate legacy snapshot.
+- The page payload cache is 16 MiB per database. A new `StorageBTreeReaderCache` is shared by all readers created by that database, including readers retained by snapshots across commits. Its limits are 16,384 hot lookup entries and 4,096 validated-page identities total, not per reader. Hot lookup identity includes generation, immutable root and key hash; validation identity includes generation and page ID.
+- When a retired generation becomes reclaimable, both page payloads and reader metadata for that generation are evicted. FIFO queues are compacted during generation eviction so repeated retirement/reuse cannot accumulate stale queue nodes.
+- Tests now explicitly cover the aggregate hot-cache budget across readers, immutable-root isolation for the same key, aggregate validation-cache bounds and generation retirement. The source is vendored into BIN-SYNC with file-level hashes in `external/Fld1.Storage/UPSTREAM-MANIFEST.json`.
+
+Exact-head verification for FLD-DB commit `28a487ae498a172026b5a90bc9acaaed4d863e7b` and the corresponding BIN-SYNC vendor pin is running on Ubuntu, Windows and macOS, together with the storage-index scaling benchmark. Do not treat the new aggregate-cache implementation or its performance as fully verified until those workflows finish.
