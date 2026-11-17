@@ -375,7 +375,7 @@ public sealed class StorageBTreeUpdaterTests
             {
                 next = StorageBTreeUpdater.ApplyBatch(current, files, mutations);
                 Assert.NotEqual(current.RootPageId, next.RootPageId);
-                StorageBTreePageView rootPage = StoragePageCodec.Decode(
+                StoragePageView rootPage = StoragePageCodec.Decode(
                     files.ReadPage(next.RootPageId, next.CommittedPageFileLength),
                     generation, next.RootPageId);
                 StorageTreeInternalPage root = StorageBTreePageCodec.DecodeInternal(rootPage);
