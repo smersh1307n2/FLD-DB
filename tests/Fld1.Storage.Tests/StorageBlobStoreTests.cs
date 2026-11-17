@@ -68,7 +68,7 @@ public sealed class StorageBlobStoreTests : IDisposable
         Assert.Equal(expected, view.ReadOnlyMemory.ToArray());
         Assert.False(blobs.DeleteBlob(blobId));
 
-        view.Dispose();
+        view.Close();
         Assert.True(blobs.DeleteBlob(blobId));
     }
 
