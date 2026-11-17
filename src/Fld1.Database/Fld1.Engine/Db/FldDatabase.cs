@@ -2576,6 +2576,21 @@ public sealed partial class FldDatabase : IDisposable
         }
     }
 
+    private void MapRun(int index)
+    {
+        try
+        {
+            _ = EnsureRunCached(index);
+        }
+        catch
+        {
+            // The Manifest may already publish this immutable Run. Stop using the
+            // current instance; reopen will recover from the authoritative Storage blob.
+            _faulted = true;
+            throw;
+        }
+    }
+
     private void RetireActiveRunMappingsUnderLock()
     {
         foreach (var run in _runs)
