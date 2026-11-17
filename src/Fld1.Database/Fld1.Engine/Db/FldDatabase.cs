@@ -1989,7 +1989,9 @@ public sealed partial class FldDatabase : IDisposable
                    priority == target)
             {
                 CompactRunCursor cursor = runQueue.Dequeue();
-                cursor.Reader.ScanFieldIds(recordIdBuffer, fieldId => fieldIds.Add(fieldId));
+                var fieldEnumerator = cursor.Reader.GetFieldIds(recordIdBuffer);
+                while (fieldEnumerator.MoveNext())
+                    fieldIds.Add(fieldEnumerator.Current);
                 cursor.Index++;
                 if (cursor.Reader.TryReadRecordIdAt(cursor.Index, cursor.RecordId))
                     runQueue.Enqueue(cursor, GetCompactionRecordPriority(cursor.RecordId));
