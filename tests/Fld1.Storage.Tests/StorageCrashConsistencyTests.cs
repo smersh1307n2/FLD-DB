@@ -136,10 +136,12 @@ public sealed class StorageCrashConsistencyTests
             {
                 Assert.Equal(1UL, recovered.LastCommitSeq);
                 Put(recovered, 0x0A, 0xAA);
+                Assert.Equal(2, recovered.ActiveWalSegment);
             }
 
             Assert.False(File.Exists(orphanTemp));
-            Assert.True(File.Exists(nextSegment));
+            Assert.True(File.Exists(nextSegment),
+                $"Expected {nextSegment}; actual WAL files: {string.Join(", ", Directory.GetFiles(walDirectory).Select(Path.GetFileName))}");
 
             using var reopened = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 1);
             Assert.Equal(2UL, reopened.LastCommitSeq);
