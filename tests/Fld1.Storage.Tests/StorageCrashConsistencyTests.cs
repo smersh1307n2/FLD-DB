@@ -155,130 +155,87 @@ public sealed class StorageCrashConsistencyTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void Snapshot_checkpoint_recovers_across_manifest_publication_crash_window(bool newManifestWasPublished)
+    public void BTree_checkpoint_recovers_across_root_publication_crash_window(bool newRootWasPublished)
     {
         const ulong partitionId = 904;
-        string directory = Path.Combine(_root, newManifestWasPublished ? "after-manifest" : "before-manifest");
-        string walDirectory = Path.Combine(directory, "wal");
-        string snapshotsDirectory = Path.Combine(directory, "snapshots");
-        string manifestPath = Path.Combine(snapshotsDirectory, $"p_{partitionId}.manifest");
-        string firstSnapshotPath = Path.Combine(snapshotsDirectory, $"p_{partitionId}.1.snap");
-        string secondSnapshotPath = Path.Combine(snapshotsDirectory, $"p_{partitionId}.2.snap");
-        string walBeforeSecondCheckpoint = Path.Combine(_root, "wal-before-second-checkpoint-" + Guid.NewGuid().ToString("N"));
-        string walAfterSecondCheckpoint = Path.Combine(_root, "wal-after-second-checkpoint-" + Guid.NewGuid().ToString("N"));
+        string directory = Path.Combine(_root, newRootWasPublished ? "after-btree-root" : "before-btree-root");
+        bool armed = false;
+        StorageFaultPoint faultPoint = newRootWasPublished
+            ? StorageFaultPoint.AfterBTreeManifestReplace
+            : StorageFaultPoint.AfterBTreeManifestFileFlushBeforeReplace;
 
-        Directory.CreateDirectory(directory);
         try
         {
-            using (var database = StorageDatabase.Open(directory, partitionId))
+            StorageBTreeManifestV2 oldRoot;
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (armed && point == faultPoint)
+                    throw new IOException("Injected B+ tree checkpoint root publication failure.");
+            }, walRotateAfterBytes: 0))
             {
                 Put(database, 0x06, 0x66);
-                database.Checkpoint();
-            }
-
-            byte[] firstManifest = File.ReadAllBytes(manifestPath);
-            byte[] firstSnapshot = File.ReadAllBytes(firstSnapshotPath);
-
-            using (var database = StorageDatabase.Open(directory, partitionId))
-            {
                 Put(database, 0x07, 0x77);
-                CopyDirectory(walDirectory, walBeforeSecondCheckpoint);
-                database.Checkpoint();
-                CopyDirectory(walDirectory, walAfterSecondCheckpoint);
+                oldRoot = StorageBTreeRootPublisher.TryLoad(directory, partitionId)!.Value;
+                armed = true;
+                Assert.Throws<IOException>(() => database.Checkpoint());
+                Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x06 }, out _));
             }
 
-            // Reconstruct the WAL layout that exists after the new segment is
-            // published, but before sealed-segment reclamation completes.
-            Directory.Delete(walDirectory, recursive: true);
-            CopyDirectory(walBeforeSecondCheckpoint, walDirectory);
-            string newActiveSegment = Path.Combine(walAfterSecondCheckpoint, $"p_{partitionId}.2.log");
-            Assert.True(File.Exists(newActiveSegment));
-            File.Copy(newActiveSegment, Path.Combine(walDirectory, Path.GetFileName(newActiveSegment)));
+            StorageBTreeManifestV2 interruptedRoot = StorageBTreeRootPublisher.TryLoad(directory, partitionId)!.Value;
+            Assert.Equal(newRootWasPublished, interruptedRoot.Generation != oldRoot.Generation);
 
-            if (!newManifestWasPublished)
-            {
-                // Crash after the new immutable snapshot file was renamed into
-                // place but before its manifest became the authoritative root.
-                File.WriteAllBytes(manifestPath, firstManifest);
-                File.WriteAllBytes(firstSnapshotPath, firstSnapshot);
-                Assert.True(File.Exists(secondSnapshotPath)); // orphan generation is harmless
-                File.WriteAllBytes(secondSnapshotPath + ".tmp", new byte[] { 0xFA, 0xFB, 0xFC });
-                File.WriteAllBytes(manifestPath + ".tmp", new byte[] { 0xFD, 0xFE });
-            }
-            else
-            {
-                // Crash after manifest publication but before old WAL segments
-                // were reclaimed. The snapshot is authoritative; old WAL commits
-                // at or below its CommitSeq must be skipped during recovery.
-                Assert.True(File.Exists(secondSnapshotPath));
-            }
-
-            using (var recovered = StorageDatabase.Open(directory, partitionId))
+            using (var recovered = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 0))
             {
                 Assert.Equal(2UL, recovered.LastCommitSeq);
                 Assert.True(recovered.TryGet(new byte[] { 0x06 }, out var first));
                 Assert.Equal(new byte[] { 0x66 }, first);
                 Assert.True(recovered.TryGet(new byte[] { 0x07 }, out var second));
                 Assert.Equal(new byte[] { 0x77 }, second);
-
-                if (!newManifestWasPublished)
-                {
-                    // The old manifest remains authoritative. Recovery removes the
-                    // unreferenced generation so a subsequent checkpoint can reuse it.
-                    Assert.False(File.Exists(secondSnapshotPath));
-                    Assert.False(File.Exists(secondSnapshotPath + ".tmp"));
-                    Assert.False(File.Exists(manifestPath + ".tmp"));
-                    recovered.Checkpoint();
-                }
+                Put(recovered, 0x09, 0x99);
+                recovered.Checkpoint();
             }
 
-            using var reopened = StorageDatabase.Open(directory, partitionId);
-            Assert.Equal(2UL, reopened.LastCommitSeq);
+            using var reopened = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 0);
+            Assert.Equal(3UL, reopened.LastCommitSeq);
             Assert.True(reopened.TryGet(new byte[] { 0x06 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x07 }, out _));
+            Assert.True(reopened.TryGet(new byte[] { 0x09 }, out _));
+            Assert.Single(Directory.GetFiles(Path.Combine(directory, "snapshots"), $"p_{partitionId}.*.pages"));
         }
         finally
         {
             TryDeleteDirectory(directory);
-            TryDeleteDirectory(walBeforeSecondCheckpoint);
-            TryDeleteDirectory(walAfterSecondCheckpoint);
         }
     }
-
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void Snapshot_manifest_or_referenced_generation_corruption_fails_closed(bool corruptManifest)
+    public void BTree_root_manifest_or_referenced_generation_corruption_fails_closed(bool corruptManifest)
     {
         const ulong partitionId = 905;
-        string directory = Path.Combine(_root, corruptManifest ? "corrupt-manifest" : "missing-snapshot");
+        string directory = Path.Combine(_root, corruptManifest ? "corrupt-btree-root" : "missing-btree-generation");
         string snapshotsDirectory = Path.Combine(directory, "snapshots");
-        string manifestPath = Path.Combine(snapshotsDirectory, $"p_{partitionId}.manifest");
-        string snapshotPath = Path.Combine(snapshotsDirectory, $"p_{partitionId}.1.snap");
+        string rootPath = Path.Combine(snapshotsDirectory, $"p_{partitionId}.root-v2.manifest");
 
         try
         {
             using (var database = StorageDatabase.Open(directory, partitionId))
-            {
                 Put(database, 0x08, 0x88);
-                database.Checkpoint();
-            }
 
+            StorageBTreeManifestV2 root = StorageBTreeRootPublisher.TryLoad(directory, partitionId)!.Value;
             if (corruptManifest)
             {
-                byte[] manifest = File.ReadAllBytes(manifestPath);
+                byte[] manifest = File.ReadAllBytes(rootPath);
                 manifest[^1] ^= 0x80;
-                File.WriteAllBytes(manifestPath, manifest);
+                File.WriteAllBytes(rootPath, manifest);
             }
             else
             {
-                File.Delete(snapshotPath);
+                File.Delete(Path.Combine(snapshotsDirectory, $"p_{partitionId}.{root.Generation}.pages"));
             }
 
             Assert.Throws<InvalidDataException>(() => StorageDatabase.Open(directory, partitionId));
-            Assert.True(File.Exists(manifestPath));
-            Assert.Equal(corruptManifest, File.Exists(snapshotPath));
         }
         finally
         {
@@ -313,21 +270,22 @@ public sealed class StorageCrashConsistencyTests
         }
     }
     [Fact]
-    public void Checkpoint_failure_requires_reopen_and_recovers_from_wal()
+    public void Checkpoint_failure_after_BTree_root_publish_requires_reopen()
     {
         const ulong partitionId = 907;
         string directory = Path.Combine(_root, "checkpoint-publication-failure");
-        Directory.CreateDirectory(directory);
-        string snapshots = Path.Combine(directory, "snapshots");
+        bool armed = false;
 
         try
         {
-            using (var database = StorageDatabase.Open(directory, partitionId))
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (armed && point == StorageFaultPoint.AfterBTreeManifestReplace)
+                    throw new IOException("Injected failure after B+ tree root replacement.");
+            }))
             {
                 Put(database, 0x12, 0x34);
-                Directory.CreateDirectory(snapshots);
-                File.WriteAllBytes(Path.Combine(snapshots, $"p_{partitionId}.1.snap"),
-                    new byte[] { 0xFA, 0xFB });
+                armed = true;
                 Assert.Throws<IOException>(() => database.Checkpoint());
                 Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x12 }, out _));
             }
@@ -336,7 +294,6 @@ public sealed class StorageCrashConsistencyTests
             Assert.Equal(1UL, recovered.LastCommitSeq);
             Assert.True(recovered.TryGet(new byte[] { 0x12 }, out var value));
             Assert.Equal(new byte[] { 0x34 }, value);
-            Assert.False(File.Exists(Path.Combine(snapshots, $"p_{partitionId}.1.snap")));
         }
         finally
         {
@@ -522,11 +479,13 @@ public sealed class StorageCrashConsistencyTests
     }
 
     [Theory]
-    [InlineData((int)StorageFaultPoint.AfterSnapshotFileFlushBeforeRename)]
-    [InlineData((int)StorageFaultPoint.AfterSnapshotRenameBeforeManifest)]
-    [InlineData((int)StorageFaultPoint.AfterManifestFileFlushBeforeRename)]
-    [InlineData((int)StorageFaultPoint.AfterManifestRenameBeforeWalTruncate)]
-    public void Checkpoint_fault_points_recover_and_allow_a_new_checkpoint(int faultPointValue)
+    [InlineData((int)StorageFaultPoint.AfterBTreeDataFlush)]
+    [InlineData((int)StorageFaultPoint.AfterBTreePageFlushBeforeManifest)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeManifestFileFlushBeforeReplace)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeManifestReplace)]
+    [InlineData((int)StorageFaultPoint.BeforeBTreeManifestDirectoryFsync)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeManifestDirectoryFsync)]
+    public void BTree_checkpoint_fault_points_recover_and_allow_a_new_checkpoint(int faultPointValue)
     {
         StorageFaultPoint faultPoint = (StorageFaultPoint)faultPointValue;
         const ulong partitionId = 921;
@@ -537,7 +496,7 @@ public sealed class StorageCrashConsistencyTests
             using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
             {
                 if (point == faultPoint)
-                    throw new IOException("Injected snapshot publication boundary failure.");
+                    throw new IOException("Injected B+ tree checkpoint publication boundary failure.");
             }))
             {
                 Put(database, 0x31, 0x41);
