@@ -34,6 +34,7 @@ public sealed class StorageDatabase : IDisposable
     /// <summary>Canonical directory containing this Storage partition.</summary>
     public string DirectoryPath => _directory;
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
+    internal int ActiveWalSegment => _wal.ActiveSegment;
     public int Count { get { lock (_gate) { EnsureUsable(); return _liveCount; } } }
 
     private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector)
