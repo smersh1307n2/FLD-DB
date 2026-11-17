@@ -182,7 +182,9 @@ public static class StorageIpcEndpoint
 
     private static byte[] ReadEndpointBytes(string path)
     {
-        const int maxAttempts = 100;
+        // Endpoint discovery is a startup path; tolerate transient Windows antivirus/indexer
+        // handles for up to ten seconds before reporting a real I/O failure.
+        const int maxAttempts = 400;
         for (int attempt = 0; ; attempt++)
         {
             try

@@ -26,7 +26,7 @@ public sealed class StorageIpcEndpointTests
             await Task.Delay(150);
             blocker.Dispose();
 
-            StorageIpcEndpointInfo actual = await read.WaitAsync(TimeSpan.FromSeconds(5));
+            StorageIpcEndpointInfo actual = await read.WaitAsync(TimeSpan.FromSeconds(15));
             Assert.Equal(expected, actual);
         }
         finally
