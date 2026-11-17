@@ -380,6 +380,11 @@ public sealed class StorageBlobStore
                 string[] leftoverPages = Directory.EnumerateFiles(directory, "*.page").ToArray();
                 if (leftoverPages.Length != 0)
                 {
+                    // A reader opened before the catalog switch may still be using
+                    // the legacy page files. Keep them until its snapshot pin drains.
+                    if (_shared.Pins.TryGetValue(blobId, out int activePins) && activePins != 0)
+                        return true;
+
                     using var content = new FileStream(
                         contentPath, FileMode.Open, FileAccess.Read, FileShare.Read,
                         bufferSize: 64 * 1024, FileOptions.SequentialScan);
