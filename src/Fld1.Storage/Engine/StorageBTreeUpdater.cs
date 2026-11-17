@@ -62,11 +62,13 @@ internal static class StorageBTreeUpdater
                     : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache);
 
                 int end = start + 1;
+                var candidatePath = new List<StorageTreePathFrame>();
                 while (end < mutations.Count)
                 {
+                    candidatePath.Clear();
                     ulong candidate = rootPageId == 0
                         ? 0
-                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, new List<StorageTreePathFrame>(), pageReadCache);
+                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, candidatePath, pageReadCache);
                     if (candidate != leafId)
                         break;
                     end++;
@@ -254,10 +256,8 @@ internal static class StorageBTreeUpdater
         for (int i = path.Count - 1; i >= 0; i--)
         {
             StorageTreePathFrame frame = path[i];
-            byte[] parentBytes = pageReadCache.Read(files, frame.PageId, files.PageFileLength);
             StorageTreeInternalPage parent =
-                StorageBTreePageCodec.DecodeInternal(parentBytes, files.Generation, frame.PageId);
-            ValidateInternalNode(parent, files);
+                pageReadCache.ReadInternal(files, frame.PageId, files.PageFileLength);
 
             if (StorageBTreePageCodec.GetInternalChild(parent, frame.ChildIndex) != oldChildId)
                 throw new InvalidDataException("B+ tree COW path no longer points at the expected child.");
@@ -335,21 +335,26 @@ internal static class StorageBTreeUpdater
         StorageBTreeGenerationFiles files,
         BatchPageReadCache pageReadCache)
     {
+        if (pageReadCache.TryGetFirstKey(pageId, out StorageTreeKeyReference cached))
+            return cached;
+
         ulong id = pageId;
         for (int depth = 0; depth < 64; depth++)
         {
-            byte[] bytes = pageReadCache.Read(files, id, files.PageFileLength);
-            StoragePageView page = StoragePageCodec.Decode(bytes, files.Generation, id);
+            StoragePageView page = pageReadCache.Decode(files, id, files.PageFileLength);
             if (page.Kind == StoragePageKind.Leaf)
             {
+                byte[] bytes = pageReadCache.Read(files, id, files.PageFileLength);
                 StorageTreeLeafPage leaf = StorageBTreePageCodec.DecodeLeaf(bytes, files.Generation, id);
                 if (leaf.Entries.Length == 0)
                     throw new InvalidDataException("B+ tree contains an empty leaf.");
-                return leaf.Entries[0].Key;
+                StorageTreeKeyReference firstKey = leaf.Entries[0].Key;
+                pageReadCache.RememberFirstKey(pageId, firstKey);
+                return firstKey;
             }
 
-            StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
-            ValidateInternalNode(node, files);
+            StorageTreeInternalPage node =
+                pageReadCache.ReadInternal(files, id, files.PageFileLength);
             id = node.FirstChild;
         }
 
@@ -366,13 +371,12 @@ internal static class StorageBTreeUpdater
         ulong id = rootPageId;
         for (int depth = 0; depth < 64; depth++)
         {
-            byte[] bytes = pageReadCache.Read(files, id, files.PageFileLength);
-            StoragePageView page = StoragePageCodec.Decode(bytes, files.Generation, id);
+            StoragePageView page = pageReadCache.Decode(files, id, files.PageFileLength);
             if (page.Kind == StoragePageKind.Leaf)
                 return id;
 
-            StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
-            ValidateInternalNode(node, files);
+            StorageTreeInternalPage node =
+                pageReadCache.ReadInternal(files, id, files.PageFileLength);
             int childIndex = StorageBTreePageCodec.SelectInternalChildIndex(
                 page, key, reference => ReadKey(files, reference));
             path.Add(new StorageTreePathFrame(id, childIndex));
@@ -423,27 +427,86 @@ internal static class StorageBTreeUpdater
     private sealed class BatchPageReadCache
     {
         private const int Capacity = 4096;
-        private readonly Dictionary<ulong, byte[]> _pages = new(Capacity);
+        private readonly Dictionary<ulong, PageEntry> _pages = new(Capacity);
         private readonly Queue<ulong> _order = new();
 
         public byte[] Read(
             StorageBTreeGenerationFiles files,
             ulong pageId,
             ulong committedPageFileLength)
+            => GetEntry(files, pageId, committedPageFileLength).Bytes;
+
+        public StoragePageView Decode(
+            StorageBTreeGenerationFiles files,
+            ulong pageId,
+            ulong committedPageFileLength)
         {
-            if (_pages.TryGetValue(pageId, out byte[]? cached))
+            PageEntry entry = GetEntry(files, pageId, committedPageFileLength);
+            if (!entry.DecodedPage.HasValue)
+                entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId);
+            return entry.DecodedPage.Value;
+        }
+
+        public StorageTreeInternalPage ReadInternal(
+            StorageBTreeGenerationFiles files,
+            ulong pageId,
+            ulong committedPageFileLength)
+        {
+            PageEntry entry = GetEntry(files, pageId, committedPageFileLength);
+            if (entry.InternalPage is not null)
+                return entry.InternalPage;
+
+            StoragePageView page = entry.DecodedPage ??
+                (entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId)).Value;
+            StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
+            ValidateInternalNode(node, files);
+            entry.InternalPage = node;
+            return node;
+        }
+
+        public bool TryGetFirstKey(ulong pageId, out StorageTreeKeyReference firstKey)
+        {
+            if (_pages.TryGetValue(pageId, out PageEntry? entry) && entry.FirstKey.HasValue)
+            {
+                firstKey = entry.FirstKey.Value;
+                return true;
+            }
+            firstKey = default;
+            return false;
+        }
+
+        public void RememberFirstKey(ulong pageId, StorageTreeKeyReference firstKey)
+        {
+            if (_pages.TryGetValue(pageId, out PageEntry? entry))
+                entry.FirstKey = firstKey;
+        }
+
+        private PageEntry GetEntry(
+            StorageBTreeGenerationFiles files,
+            ulong pageId,
+            ulong committedPageFileLength)
+        {
+            if (_pages.TryGetValue(pageId, out PageEntry? cached))
                 return cached;
 
-            byte[] page = files.ReadPage(pageId, committedPageFileLength);
+            var entry = new PageEntry(files.ReadPage(pageId, committedPageFileLength));
             if (_pages.Count == Capacity)
             {
                 ulong oldest = _order.Dequeue();
                 _pages.Remove(oldest);
             }
 
-            _pages.Add(pageId, page);
+            _pages.Add(pageId, entry);
             _order.Enqueue(pageId);
-            return page;
+            return entry;
+        }
+
+        private sealed class PageEntry(byte[] bytes)
+        {
+            public byte[] Bytes { get; } = bytes;
+            public StoragePageView? DecodedPage { get; set; }
+            public StorageTreeInternalPage? InternalPage { get; set; }
+            public StorageTreeKeyReference? FirstKey { get; set; }
         }
     }
 
