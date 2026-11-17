@@ -172,8 +172,8 @@ public sealed class StorageDatabase : IDisposable
                 throw new InvalidDataException("Storage root and WAL commit sequence do not form a contiguous recovery chain.");
 
             // Every WAL record is now validated and represented by the published root.
-            // Sealed segments covered by that root can be reclaimed safely.
-            wal.TruncateSealedSegments(database._btreeManifest.CommitSeq);
+            // Keep covered WAL segments until an explicit checkpoint: their segment
+            // identities also preserve the monotonic rotation sequence across reopen.
             CleanupUnreferencedGenerations(directory, partitionId, database._btreeManifest.Generation);
             return database;
         }
