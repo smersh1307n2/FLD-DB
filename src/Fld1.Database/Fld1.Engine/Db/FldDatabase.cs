@@ -1689,41 +1689,84 @@ public sealed partial class FldDatabase : IDisposable
     private struct CompactFieldIdSet
     {
         private ushort _first;
-        private bool _hasFirst;
-        private List<ushort>? _additional;
+        private ushort _second;
+        private ushort _third;
+        private ushort _fourth;
+        private int _inlineCount;
+        private List<ushort>? _overflow;
 
-        public readonly int Count => (_hasFirst ? 1 : 0) + (_additional?.Count ?? 0);
+        public readonly int Count => _overflow?.Count ?? _inlineCount;
 
         public readonly ushort this[int index]
         {
             get
             {
-                if (!_hasFirst || index < 0 || index >= Count)
+                if (index < 0 || index >= Count)
                     throw new ArgumentOutOfRangeException(nameof(index));
-                return index == 0 ? _first : _additional![index - 1];
+                if (_overflow is not null)
+                    return _overflow[index];
+                return GetInline(index);
+            }
+        }
+
+        private readonly ushort GetInline(int index) => index switch
+        {
+            0 => _first,
+            1 => _second,
+            2 => _third,
+            3 => _fourth,
+            _ => throw new ArgumentOutOfRangeException(nameof(index))
+        };
+
+        private void SetInline(int index, ushort value)
+        {
+            switch (index)
+            {
+                case 0: _first = value; break;
+                case 1: _second = value; break;
+                case 2: _third = value; break;
+                case 3: _fourth = value; break;
+                default: throw new ArgumentOutOfRangeException(nameof(index));
             }
         }
 
         public readonly bool Contains(ushort fieldId)
         {
-            if (_hasFirst && _first == fieldId)
-                return true;
-            return _additional?.Contains(fieldId) == true;
+            if (_overflow is not null)
+                return _overflow.BinarySearch(fieldId) >= 0;
+            for (int i = 0; i < _inlineCount; i++)
+                if (GetInline(i) == fieldId)
+                    return true;
+            return false;
         }
 
         public void Add(ushort fieldId)
         {
-            if (!_hasFirst)
+            if (_overflow is not null)
             {
-                _first = fieldId;
-                _hasFirst = true;
+                int index = _overflow.BinarySearch(fieldId);
+                if (index < 0)
+                    _overflow.Insert(~index, fieldId);
                 return;
             }
 
-            if (Contains(fieldId))
+            int insertAt = 0;
+            while (insertAt < _inlineCount && GetInline(insertAt) < fieldId)
+                insertAt++;
+            if (insertAt < _inlineCount && GetInline(insertAt) == fieldId)
                 return;
 
-            (_additional ??= new List<ushort>(2)).Add(fieldId);
+            if (_inlineCount < 4)
+            {
+                for (int i = _inlineCount; i > insertAt; i--)
+                    SetInline(i, GetInline(i - 1));
+                SetInline(insertAt, fieldId);
+                _inlineCount++;
+                return;
+            }
+
+            _overflow = new List<ushort>(8) { _first, _second, _third, _fourth };
+            _overflow.Insert(insertAt, fieldId);
         }
     }
 
@@ -1852,7 +1895,9 @@ public sealed partial class FldDatabase : IDisposable
             outputEstimatedBytes += estimatedBytes;
             if (outputMinRecord is null)
                 outputMinRecord = recordId.ToArray();
-            outputMaxRecord = recordId.ToArray();
+            if (outputMaxRecord is null ||
+                !outputMaxRecord.AsSpan().SequenceEqual(recordId))
+                outputMaxRecord = recordId.ToArray();
         }
 
         Span<byte> recordIdBuffer = stackalloc byte[16];
@@ -1875,7 +1920,7 @@ public sealed partial class FldDatabase : IDisposable
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(recordIdBuffer, target.High);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(recordIdBuffer[8..], target.Low);
 
-            var fieldIds = new SortedSet<ushort>();
+            CompactFieldIdSet fieldIds = default;
             while (overlayIndex < overlay.Count)
             {
                 overlay[overlayIndex].Key.WriteRecordId(currentOverlayIdBuffer);
@@ -1922,8 +1967,9 @@ public sealed partial class FldDatabase : IDisposable
                 }
             }
 
-            foreach (ushort fieldId in fieldIds)
+            for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
             {
+                ushort fieldId = fieldIds[fieldIndex];
                 if (!TryResolveUnlocked(recordIdBuffer, fieldId, out FieldResolver.Resolved resolved) ||
                     !resolved.Found)
                     continue;
