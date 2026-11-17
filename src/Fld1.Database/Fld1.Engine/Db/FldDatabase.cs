@@ -2210,12 +2210,22 @@ public sealed partial class FldDatabase : IDisposable
         foreach (var run in _runs)
         {
             Guid blobId = RunBlobId(run.runId);
-            if (!_runBlobStore.ContainsBlob(blobId))
+            if (!_runBlobStore.MigrateToSingleFile(blobId, out bool wasAlreadySingleFile))
+            {
+                if (_runBlobStore.ContainsBlob(blobId))
+                    throw new IOException($"Run blob {run.runId} is still pinned during exclusive database open.");
                 continue; // Pre-blob legacy databases remain readable from their .fld1 files.
-            if (!_runBlobStore.MigrateToSingleFile(blobId))
-                throw new IOException($"Run blob {run.runId} is still pinned during exclusive database open.");
-            try { File.Delete(run.path); }
-            catch { /* retry removal on the next open; the Storage blob is authoritative */ }
+            }
+
+            // A page-based blob was fully digest-verified during migration, so its
+            // legacy mirror can be removed now. An already-contiguous blob is only
+            // length-checked here; keep its mirror until EnsureRunCached verifies the
+            // mapped digest and Run header before deleting that last fallback copy.
+            if (!wasAlreadySingleFile)
+            {
+                try { File.Delete(run.path); }
+                catch { /* retry removal on the next open; the Storage blob is authoritative */ }
+            }
         }
 
         // Run IDs are globally monotonic within the root, so the same live set protects
