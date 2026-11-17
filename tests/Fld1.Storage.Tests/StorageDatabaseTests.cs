@@ -227,16 +227,16 @@ public sealed class StorageDatabaseTests : IDisposable
             Assert.Equal("updated-0000"u8.ToArray(), changed);
             Assert.False(db.TryGet("key-0010"u8, out _));
             db.Checkpoint();
-            Assert.True(db.TryGet("key-0599"u8, out var last));
-            Assert.Equal("updated-0599"u8.ToArray(), last);
+            Assert.True(db.TryGet("key-0592"u8, out var last));
+            Assert.Equal("updated-0592"u8.ToArray(), last);
         }
 
         using var reopened = StorageDatabase.Open(directory, partition);
         Assert.True(reopened.TryGet("key-0000"u8, out var persisted));
         Assert.Equal("updated-0000"u8.ToArray(), persisted);
         Assert.False(reopened.TryGet("key-0010"u8, out _));
-        Assert.True(reopened.TryGet("key-0599"u8, out var final));
-        Assert.Equal("updated-0599"u8.ToArray(), final);
+        Assert.True(reopened.TryGet("key-0592"u8, out var final));
+        Assert.Equal("updated-0592"u8.ToArray(), final);
     }
 
     [Fact]
