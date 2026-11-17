@@ -4,6 +4,31 @@ namespace Fld1.Storage.Tests;
 public sealed class StorageBTreeTests
 {
     [Fact]
+    public void Reader_hot_lookup_cache_has_one_aggregate_budget_across_snapshot_readers()
+    {
+        var shared = new StorageBTreeReaderCache();
+        var first = new StorageBTreeReader(31, 0, _ => throw new InvalidOperationException(),
+            _ => throw new InvalidOperationException(), shared);
+        var second = new StorageBTreeReader(32, 0, _ => throw new InvalidOperationException(),
+            _ => throw new InvalidOperationException(), shared);
+
+        for (int i = 0; i < 8_192; i++)
+        {
+            byte[] key = BitConverter.GetBytes(i);
+            Assert.False(first.TryGet(key, out _));
+            Assert.False(second.TryGet(key, out _));
+        }
+
+        Assert.Equal(16_384, shared.HotLookupCount);
+        Assert.Equal(8_192, first.HotLookupCount);
+        Assert.Equal(8_192, second.HotLookupCount);
+        shared.EvictGeneration(31);
+        Assert.Equal(8_192, shared.HotLookupCount);
+        Assert.Equal(0, first.HotLookupCount);
+        Assert.Equal(8_192, second.HotLookupCount);
+    }
+
+    [Fact]
     public void Randomized_builder_reader_prefix_and_tombstones_match_reference()
     {
         var random=new Random(731991);var reference=new SortedDictionary<string,(int Value,bool Deleted)>(StringComparer.Ordinal);
