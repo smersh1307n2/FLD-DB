@@ -93,7 +93,15 @@ public sealed class StorageBlobStoreTests : IDisposable
 
         // Simulate a crash after the metadata switched to the contiguous file but
         // before old page cleanup completed. A retry verifies the file and converges.
-        File.WriteAllBytes(Path.Combine(blobDirectory, "00000000.page"), new byte[] { 1, 2, 3 });
+        string leftoverPage = Path.Combine(blobDirectory, "00000000.page");
+        File.WriteAllBytes(leftoverPage, new byte[] { 1, 2, 3 });
+        Assert.True(blobs.TryOpenRead(blobId, out StorageBlobReader? pinningReader));
+        Assert.True(blobs.MigrateToSingleFile(blobId, out wasAlreadySingleFile));
+        Assert.True(wasAlreadySingleFile);
+        Assert.True(File.Exists(leftoverPage),
+            "A page file must remain while an older snapshot reader still holds its pin.");
+        pinningReader!.Dispose();
+
         Assert.True(blobs.MigrateToSingleFile(blobId, out wasAlreadySingleFile));
         Assert.True(wasAlreadySingleFile);
         Assert.Empty(Directory.GetFiles(blobDirectory, "*.page"));
