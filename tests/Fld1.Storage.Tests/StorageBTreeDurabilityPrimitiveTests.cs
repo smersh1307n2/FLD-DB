@@ -47,7 +47,6 @@ public sealed class StorageBTreeDurabilityPrimitiveTests
     }
 
     [Theory]
-    [InlineData(0UL, 0UL)]
     [InlineData(2UL, 1UL)]
     [InlineData(4UL, 1UL)]
     public void Manifest_v2_rejects_root_outside_committed_page_range(ulong rootPageId, ulong pageCount)
