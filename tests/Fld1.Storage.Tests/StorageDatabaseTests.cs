@@ -321,9 +321,10 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
-    public void Missing_snapshot_referenced_by_manifest_fails_closed()
+    public void Missing_BTree_generation_file_referenced_by_root_fails_closed()
     {
-        using (var db = StorageDatabase.Open(_dir, 105))
+        const ulong partition = 105;
+        using (var db = StorageDatabase.Open(_dir, partition))
         {
             using var batch = db.BeginWriteBatch();
             batch.Put("key"u8, "value"u8);
@@ -331,12 +332,13 @@ public sealed class StorageDatabaseTests : IDisposable
             db.Checkpoint();
         }
 
-        File.Delete(Path.Combine(_dir, "snapshots", "p_105.1.snap"));
-        Assert.Throws<InvalidDataException>(() => StorageDatabase.Open(_dir, 105));
+        StorageBTreeManifestV2 root = StorageBTreeRootPublisher.TryLoad(_dir, partition)!.Value;
+        File.Delete(Path.Combine(_dir, "snapshots", $"p_{partition}.{root.Generation}.pages"));
+        Assert.Throws<InvalidDataException>(() => StorageDatabase.Open(_dir, partition));
     }
 
     [Fact]
-    public void Corrupt_snapshot_manifest_fails_closed()
+    public void BTree_checkpoint_does_not_write_duplicate_legacy_snapshot()
     {
         using (var db = StorageDatabase.Open(_dir, 106))
         {
@@ -346,11 +348,11 @@ public sealed class StorageDatabaseTests : IDisposable
             db.Checkpoint();
         }
 
-        string manifest = Path.Combine(_dir, "snapshots", "p_106.manifest");
-        byte[] bytes = File.ReadAllBytes(manifest);
-        bytes[16] ^= 0x40;
-        File.WriteAllBytes(manifest, bytes);
-        Assert.Throws<InvalidDataException>(() => StorageDatabase.Open(_dir, 106));
+        Assert.False(File.Exists(Path.Combine(_dir, "snapshots", "p_106.manifest")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "snapshots"), "p_106.*.snap"));
+        using var reopened = StorageDatabase.Open(_dir, 106);
+        Assert.True(reopened.TryGet("key"u8, out var value));
+        Assert.Equal("value"u8.ToArray(), value);
     }
 
     [Fact]
@@ -367,7 +369,8 @@ public sealed class StorageDatabaseTests : IDisposable
             }
         }
 
-        Assert.Single(Directory.GetFiles(Path.Combine(_dir, "snapshots"), "p_107.*.snap"));
+        Assert.Single(Directory.GetFiles(Path.Combine(_dir, "snapshots"), "p_107.*.pages"));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "snapshots"), "p_107.*.snap"));
         using var reopened = StorageDatabase.Open(_dir, 107, walRotateAfterBytes: 0);
         Assert.Equal(3UL, reopened.LastCommitSeq);
         Assert.True(reopened.TryGet("value"u8, out var value));
@@ -494,14 +497,17 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
-    public void Checkpoint_failure_requires_reopen_and_recovers_from_wal()
+    public void Checkpoint_failure_after_root_publish_requires_reopen_and_recovers()
     {
         const ulong partitionId = 113;
         string directory = Path.Combine(_dir, "checkpoint-publication-failure");
-        Directory.CreateDirectory(directory);
-        string snapshots = Path.Combine(directory, "snapshots");
+        bool armed = false;
 
-        using (var database = StorageDatabase.Open(directory, partitionId))
+        using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+        {
+            if (armed && point == StorageFaultPoint.AfterBTreeManifestReplace)
+                throw new IOException("Injected failure after checkpoint root publication.");
+        }))
         {
             using (var batch = database.BeginWriteBatch())
             {
@@ -509,9 +515,7 @@ public sealed class StorageDatabaseTests : IDisposable
                 batch.Commit();
             }
 
-            Directory.CreateDirectory(snapshots);
-            File.WriteAllBytes(Path.Combine(snapshots, $"p_{partitionId}.1.snap"),
-                new byte[] { 0xFA, 0xFB });
+            armed = true;
             Assert.Throws<IOException>(() => database.Checkpoint());
             Assert.Throws<InvalidOperationException>(() => database.TryGet("durable"u8, out _));
         }
@@ -520,7 +524,6 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Equal(1UL, recovered.LastCommitSeq);
         Assert.True(recovered.TryGet("durable"u8, out var value));
         Assert.Equal("wal-value"u8.ToArray(), value);
-        Assert.False(File.Exists(Path.Combine(snapshots, $"p_{partitionId}.1.snap")));
     }
 
 }
