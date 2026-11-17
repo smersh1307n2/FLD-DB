@@ -35,6 +35,9 @@ jobs:
       - name: Run bounded Tombstone-GC benchmark matrix
         run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --tombstone-gc-only
 
+      - name: Run isolated 250k tombstone-GC memory diagnostic
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --tombstone-gc-250k-only
+
       - name: Upload BenchmarkDotNet results
         if: always()
         uses: actions/upload-artifact@v4
