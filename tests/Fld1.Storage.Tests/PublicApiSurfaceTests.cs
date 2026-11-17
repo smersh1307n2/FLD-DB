@@ -15,6 +15,7 @@ public sealed class PublicApiSurfaceTests
 
         string[] expected =
         {
+            "Fld1.Storage.Engine.StorageBlobMappedView",
             "Fld1.Storage.Engine.StorageBlobReader",
             "Fld1.Storage.Engine.StorageBlobStore",
             "Fld1.Storage.Engine.StorageConflictException",
