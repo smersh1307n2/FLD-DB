@@ -1,15 +1,8 @@
 name: Storage index 1M scale gate
 
 on:
+  # One-million-entry scale gate is an explicit milestone check.
   workflow_dispatch:
-  push:
-    branches:
-      - fix/crash-consistency-outbox
-    paths:
-      - "src/Fld1.Storage/**"
-      - "bench/Fld1.Engine.Bench/StorageIndexMillionScale.cs"
-      - "bench/Fld1.Engine.Bench/Program.cs"
-      - "eng/verify-storage-index-million-scale.py"
 
 permissions:
   contents: read
