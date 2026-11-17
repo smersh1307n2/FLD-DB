@@ -70,6 +70,7 @@ internal static class StorageBTreeUpdater
                     ? Array.Empty<StorageTreeLeafEntry>()
                     : StorageBTreePageCodec.DecodeLeaf(
                         files.ReadPage(leafId, files.PageFileLength), files.Generation, leafId).Entries;
+                ValidateLeafEntries(existing, files);
 
                 List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files);
                 List<StorageTreeChild> replacements = WriteLeafLevel(merged, files, ref nextPageId);
@@ -374,6 +375,18 @@ internal static class StorageBTreeUpdater
             if (!children.Add(separator.PageId))
                 throw new InvalidDataException("B+ tree internal page contains a duplicate child reference.");
             previous = separator.FirstKey;
+        }
+    }
+
+    private static void ValidateLeafEntries(
+        StorageTreeLeafEntry[] entries,
+        StorageBTreeGenerationFiles files)
+    {
+        for (int i = 1; i < entries.Length; i++)
+        {
+            if (ReadKey(files, entries[i - 1].Key).Span.SequenceCompareTo(
+                    ReadKey(files, entries[i].Key).Span) >= 0)
+                throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
         }
     }
 

@@ -21,7 +21,7 @@ public sealed class StorageBTreeTests
         Assert.Equal(expected,actual);
     }
     [Fact]
-    public void Prefix_cursor_reads_each_leaf_once_and_uses_constant_cursor_state()
+    public void Prefix_cursor_reads_each_leaf_once_with_bounded_path_state()
     {
         var entries=new List<StorageTreeBuildEntry>();var keys=new Dictionary<ulong,byte[]>();ulong offset=1;
         for(int i=0;i<1400;i++)
@@ -151,7 +151,10 @@ public sealed class StorageBTreeTests
                 new StorageTreeLeafEntry(new(0, 2), new(2, 1, false)),
                 new StorageTreeLeafEntry(new(3, 2), new(3, 1, false))
             }),
-            [3] = StorageBTreePageCodec.EncodeInternal(21, 3, 1, Array.Empty<StorageTreeChild>())
+            [3] = StorageBTreePageCodec.EncodeInternal(21, 3, 1, new[]
+            {
+                new StorageTreeChild(2, new(0, 2))
+            })
         };
         var reader = new StorageBTreeReader(21, 3, id => pages[id],
             reference => new ReadOnlyMemory<byte>(keys[checked((int)reference.Offset)]));
