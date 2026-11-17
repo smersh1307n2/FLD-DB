@@ -97,10 +97,21 @@ public sealed class StorageBTreeDurabilityPrimitiveTests
                 Assert.Equal(committedDataLength, files.DataFileLength);
             }
 
+            string pagePath = Path.Combine(
+                directory, "snapshots", $"p_{partition}.{generation}.pages");
+            using (var partial = new FileStream(pagePath, FileMode.Append, FileAccess.Write, FileShare.None))
+            {
+                partial.Write(new byte[] { 0xFA, 0xFB, 0xFC });
+                partial.Flush(flushToDisk: true);
+            }
+
             using var reopened = new StorageBTreeGenerationFiles(directory, partition, generation);
+            Assert.Equal(committedPageLength + 3, reopened.PageFileLength);
+            reopened.TruncateToCommittedLengths(committedPageLength, committedDataLength);
             Assert.Equal(page1, reopened.ReadPage(1, committedPageLength));
             Assert.Equal("value"u8.ToArray(), reopened.ReadData(3, 5, committedDataLength));
-            Assert.Throws<InvalidOperationException>(() => reopened.AppendPage(3, page2));
+            reopened.AppendPage(2, page2);
+            Assert.Throws<InvalidOperationException>(() => reopened.AppendPage(4, page2));
         }
         finally
         {
