@@ -52,7 +52,8 @@ jobs:
       - name: Run targeted tests (routine CI) or full suite (milestone CI)
         shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
@@ -60,13 +61,25 @@ jobs:
             exit "${PIPESTATUS[0]}"
           fi
 
-          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$BASE_SHA"
+          else
+            base_sha="$PUSH_BEFORE"
+            if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
+              base_sha="$(git rev-parse "$GITHUB_SHA^" 2>/dev/null || true)"
+            fi
+          fi
+          if [[ -n "$base_sha" ]] && ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$base_sha" --depth=1 || true
+          fi
+          if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]] || ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
             echo "No usable base SHA; fail safe to the complete test suite."
             dotnet test Fld.Db.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=fld-tests.trx" 2>&1 | tee ci-logs/test.log
             exit "${PIPESTATUS[0]}"
           fi
 
-          mapfile -t changed < <(git diff --name-only "$BASE_SHA" "$GITHUB_SHA")
+          mapfile -t changed < <(echo "Changed-files base SHA: $base_sha"
+          git diff --name-only "$base_sha" "$GITHUB_SHA")
           declare -A selected=()
           full=0
           for file in "${changed[@]}"; do
