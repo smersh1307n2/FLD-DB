@@ -5,7 +5,6 @@ on:
     branches:
       - main
       - "fix/**"
-  pull_request:
   workflow_dispatch:
   schedule:
     # Full cross-platform durability validation (UTC)
@@ -15,8 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Keep push and pull_request checks independent. They target the same SHA
-  # on PR branches; sharing a group cancels one run and leaves red checks.
+  # A single push-triggered run validates each fix-branch commit and gates
+  # publication of the tested Storage gitlink into BIN-SYNC.
   group: fld-db-ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
