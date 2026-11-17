@@ -1,6 +1,6 @@
 # ADR: Durable B+ tree root publication and generation lifetime
 
-Status: Accepted design; implementation not started
+Status: Accepted design; Stage D.1 durability primitives implemented behind internal APIs, not wired into production Storage
 Date: 2026-11-16
 Scope: FLD Storage physical index only. This ADR does not change BIN-SYNC delivery semantics or FLD tombstone policy.
 
@@ -139,3 +139,12 @@ This ADR does not authorize production B+ tree routing, v1 mirror deletion, WAL 
 The borrowed-memory key reader, bounded per-reader hot reference cache, per-resident-page decoded view cache, bulk-builder no-copy path and leaf-boundary cursor validation are now implemented in the standalone prototype. The exact 1M-entry result is recorded in `FLD-STORAGE-PAGED-INDEX-DESIGN.md`; warm repeated 10k random lookups measured about 94 ns each, with a 45.9 ms warm scan over one million entries. This is promising but not a production acceptance result: the comparative 1k/10k/100k BenchmarkDotNet matrix at HEAD 8a78251 is pending, and a per-reader hot cache must become an aggregate database-level budget when snapshots are integrated.
 
 Stage D remains blocked until the comparative matrix shows acceptable hot/random lookup and prefix-scan behavior. The durable manifest/WAL/crash protocol below remains design-only; no production Storage routing is authorized.
+
+
+## Stage D.1 implementation record — 2026-11-17
+
+The first durability implementation block is committed as standalone infrastructure only. The manifest layout is 80 bytes: FLD2 magic, version/header size, partition/generation/CommitSeq/root page, committed page/data lengths, page size, zero-only flags/reserved bytes, and CRC32C. FLDM remains recognized as the legacy v1 manifest and is never decoded using the v2 layout.
+
+Generation files use sequential page IDs and append-only data offsets. Reads require the caller to supply the manifest's committed high-water mark; physical file tails cannot become visible merely because bytes exist. TruncateToCommittedLengths is an explicit recovery operation and its contract requires WAL continuity/replay validation first.
+
+No production code calls these primitives yet. No v2 manifest is published, no WAL segment is reclaimed on their authority, and no v1 snapshot or mirror is removed. Windows/Linux/macOS CI is the acceptance gate for this block; passing unit tests does not establish power-loss durability on every filesystem.

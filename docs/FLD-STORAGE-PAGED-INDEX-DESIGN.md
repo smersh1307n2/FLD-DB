@@ -257,3 +257,10 @@ Workflow [43910951962](https://github.com/smersh1307n2/FLD-DB/actions/runs/43910
 | Process maximum RSS (`/usr/bin/time -v`) | 164.4 MiB |
 
 The first random pass includes first-touch page/leaf validation. The repeated pass measures the bounded hot-reference path. This is an in-memory scale fixture, not an on-disk durability test or a comparison against the current `StorageDatabase`. The comparative 1k/10k/100k BenchmarkDotNet matrix at this exact HEAD is still running; production routing remains blocked until its results are reviewed.
+
+
+### 2026-11-17 — Stage D.1 durability primitives
+
+The standalone B+ tree now has an internal v2 root-manifest codec and append-only generation page/data file abstraction. The manifest is fixed-width (80 bytes), checksummed with CRC32C, explicitly distinguishes the existing FLDM/v1 magic from FLD2/v2, and validates the root against the committed page-file high-water mark. Generation reads are bounded by committed lengths supplied by the manifest; physical tails are not readable through the API. Append page IDs are sequential and each encoded page's generation/page identity is verified before writing. Explicit tail truncation is available only after the caller validates WAL continuity/replay.
+
+This is Stage D.1 only. The primitives are not connected to StorageDatabase, WAL recovery, checkpoint, snapshot pins or compaction. The v1 dictionary/snapshot path remains the only production path. Next: Stage D.2 streaming WAL recovery, then D.3 atomic root publication with deterministic crash/reopen tests.

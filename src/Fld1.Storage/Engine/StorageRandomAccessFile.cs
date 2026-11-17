@@ -8,6 +8,7 @@ internal interface IStorageRandomAccessFile : IDisposable
     long Length { get; }
     void ReadExactly(long offset, Span<byte> destination);
     void WriteExactly(long offset, ReadOnlySpan<byte> source);
+    void SetLength(long length);
     void FlushToDisk();
 }
 
@@ -59,6 +60,13 @@ internal sealed class StorageRandomAccessFile : IStorageRandomAccessFile
         ThrowIfDisposed();
         ValidateRange(offset, source.Length);
         RandomAccess.Write(_handle, source, offset);
+    }
+
+    public void SetLength(long length)
+    {
+        ThrowIfDisposed();
+        if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+        RandomAccess.SetLength(_handle, length);
     }
 
     public void FlushToDisk()
