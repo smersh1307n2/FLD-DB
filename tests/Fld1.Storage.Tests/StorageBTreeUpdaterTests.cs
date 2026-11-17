@@ -390,7 +390,7 @@ public sealed class StorageBTreeUpdaterTests
                     StoragePageCodec.Decode(
                         files.ReadPage(rightId, next.CommittedPageFileLength),
                         generation, rightId));
-                Assert.Equal(childCapacity + 1, left.Separators.Length + right.Separators.Length + 2);
+                Assert.Equal(StorageBTreePageCodec.MaxInternalChildren + 1, left.Separators.Length + right.Separators.Length + 2);
 
                 var reader = CreateReader(files, next);
                 Assert.True(reader.TryGet("000000-0653"u8, out _));
