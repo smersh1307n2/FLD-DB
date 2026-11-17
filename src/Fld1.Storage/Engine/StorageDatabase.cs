@@ -35,7 +35,7 @@ public sealed class StorageDatabase : IDisposable
     public string DirectoryPath => _directory;
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
     internal int ActiveWalSegment => _wal.ActiveSegment;
-    public int Count { get { lock (_gate) { EnsureUsable(); return _liveCount; } } }
+    public int Count { get { lock (_gate) { EnsureUsable(); if (_liveCount < 0) _liveCount = CountBTreeValues(); return _liveCount; } } }
 
     private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector)
     {
@@ -114,7 +114,7 @@ public sealed class StorageDatabase : IDisposable
                     database._generationPins.Register(root.Value.Generation);
                     database._generationFiles.Add(root.Value.Generation, files);
                     database._btreeReader = database.CreateBTreeReader(root.Value, files);
-                    database._liveCount = database.CountBTreeValues(root.Value, files);
+                    database._liveCount = -1;
                 }
                 catch
                 {
@@ -234,11 +234,10 @@ public sealed class StorageDatabase : IDisposable
         if (changed) StorageDirectorySync.Flush(snapshots);
     }
 
-    private int CountBTreeValues(
-        in StorageBTreeManifestV2 manifest,
-        StorageBTreeGenerationFiles files)
+    private int CountBTreeValues()
     {
-        StorageBTreeReader reader = CreateBTreeReader(manifest, files);
+        StorageBTreeReader reader = _btreeReader
+            ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
         using StorageBTreePrefixCursor cursor = reader.OpenAllCursor();
         int count = 0;
         while (cursor.TryReadNext(out _))
@@ -444,7 +443,7 @@ public sealed class StorageDatabase : IDisposable
 
             StorageBTreeReader currentReader = _btreeReader
                 ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
-            int nextLiveCount = _liveCount;
+            int nextLiveCount = _liveCount < 0 ? CountBTreeValues() : _liveCount;
             foreach (StorageMutation mutation in mutations)
             {
                 bool existed = currentReader.TryGet(mutation.Key, out _);
