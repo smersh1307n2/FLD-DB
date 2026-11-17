@@ -724,6 +724,8 @@ public sealed class StorageSnapshot : IDisposable
     private readonly StorageBTreeManifestV2 _manifest;
     private StorageGenerationPin? _pin;
     private Action<ulong>? _onPinReleased;
+    private readonly object _cursorGate = new();
+    private readonly HashSet<PrefixCursor> _cursors = new();
     public ulong CommitSeq { get; }
 
     internal StorageSnapshot(
@@ -767,7 +769,19 @@ public sealed class StorageSnapshot : IDisposable
     /// <summary>Creates a forward-only cursor over the immutable B+ tree generation pinned by this snapshot.</summary>
     public PrefixCursor OpenPrefixCursor(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> afterKey = default)
     {
-        return new PrefixCursor(this, prefix.ToArray(), afterKey.ToArray());
+        lock (_cursorGate)
+        {
+            StorageBTreeReader reader = GetReader();
+            var cursor = new PrefixCursor(this, reader, prefix.ToArray(), afterKey.ToArray());
+            _cursors.Add(cursor);
+            return cursor;
+        }
+    }
+
+    private void UnregisterCursor(PrefixCursor cursor)
+    {
+        lock (_cursorGate)
+            _cursors.Remove(cursor);
     }
 
     private StorageBTreeReader GetReader()
@@ -787,12 +801,11 @@ public sealed class StorageSnapshot : IDisposable
         private bool _finished;
         private bool _disposed;
 
-        internal PrefixCursor(StorageSnapshot owner, byte[] prefix, byte[] afterKey)
+        internal PrefixCursor(StorageSnapshot owner, StorageBTreeReader reader, byte[] prefix, byte[] afterKey)
         {
             _owner = owner;
             _prefix = prefix;
             _afterKey = afterKey;
-            StorageBTreeReader reader = owner.GetReader();
             _cursor = prefix.Length == 0
                 ? reader.OpenAllCursor()
                 : reader.OpenPrefixCursor(prefix);
@@ -879,6 +892,15 @@ public sealed class StorageSnapshot : IDisposable
         public void Dispose()
         {
             if (_disposed) return;
+            DisposeCore();
+            _owner.UnregisterCursor(this);
+        }
+
+        internal void DisposeFromOwner() => DisposeCore();
+
+        private void DisposeCore()
+        {
+            if (_disposed) return;
             _disposed = true;
             _finished = true;
             _cursor?.Dispose();
@@ -890,9 +912,18 @@ public sealed class StorageSnapshot : IDisposable
 
     public void Dispose()
     {
+        PrefixCursor[] cursors;
+        lock (_cursorGate)
+        {
+            cursors = _cursors.ToArray();
+            _cursors.Clear();
+            _reader = null;
+            _files = null;
+        }
+        foreach (PrefixCursor cursor in cursors)
+            cursor.DisposeFromOwner();
+
         StorageGenerationPin? pin = Interlocked.Exchange(ref _pin, null);
-        _reader = null;
-        _files = null;
         Action<ulong>? callback = Interlocked.Exchange(ref _onPinReleased, null);
         if (pin is null) return;
         ulong generation = pin.Generation;
