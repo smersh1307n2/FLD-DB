@@ -16,6 +16,8 @@ public sealed class StorageDatabase : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<StorageKey, byte[]> _values = new();
     private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
+    private readonly StorageGenerationPins _generationPins = new();
+    private readonly Dictionary<ulong, StorageBTreeGenerationFiles> _generationFiles = new();
     private SortedList<StorageKey, byte[]>? _snapshotIndex;
     private readonly WalManager _wal;
     private StorageBTreeGenerationFiles? _btreeFiles;
@@ -113,6 +115,8 @@ public sealed class StorageDatabase : IDisposable
                         root.Value.CommittedPageFileLength,
                         root.Value.CommittedDataFileLength);
                     database._btreeFiles = files;
+                    database._generationPins.Register(root.Value.Generation);
+                    database._generationFiles.Add(root.Value.Generation, files);
                     database.LoadBTreeValues();
                     database._btreeReader = database.CreateBTreeReader(root.Value, files);
                 }
@@ -148,6 +152,8 @@ public sealed class StorageDatabase : IDisposable
                         files, database._lastCommitSeq, database.CreateBTreeBuildInputs());
                     StorageBTreeRootPublisher.Publish(directory, initial, files);
                     database._btreeFiles = files;
+                    database._generationPins.Register(initial.Generation);
+                    database._generationFiles.Add(initial.Generation, files);
                     database._btreeManifest = initial;
                     database._btreeReader = database.CreateBTreeReader(initial, files);
                 }
@@ -317,12 +323,14 @@ public sealed class StorageDatabase : IDisposable
 
                 StorageBTreeGenerationFiles oldFiles = _btreeFiles
                     ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+                _generationPins.Register(compacted.Generation);
+                _generationFiles.Add(compacted.Generation, compactedFiles);
                 _btreeFiles = compactedFiles;
                 _btreeManifest = compacted;
                 _btreeReader = CreateBTreeReader(compacted, compactedFiles);
-                _pageCache.EvictGeneration(oldFiles.Generation);
                 compactedFiles = null;
-                oldFiles.Dispose();
+                _ = _generationPins.Retire(oldFiles.Generation);
+                ReclaimRetiredGenerations();
 
                 // Keep the legacy checkpoint as a migration/rollback mirror for now.
                 // It is no longer the recovery authority after the v2 root exists.
@@ -350,13 +358,43 @@ public sealed class StorageDatabase : IDisposable
         lock (_gate)
         {
             EnsureUsable();
-            // Cache the immutable sorted index for this commit epoch. Repeated
-            // snapshots share it in O(1); a successful commit invalidates the cache.
-            // Stored value arrays are immutable after publication, so old snapshots
-            // safely retain their prior index while later commits replace live values.
-            _snapshotIndex ??= new SortedList<StorageKey, byte[]>(
-                _values, StorageKeyComparer.Instance);
-            return new StorageSnapshot(_snapshotIndex, _lastCommitSeq);
+            StorageBTreeReader reader = _btreeReader
+                ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
+            StorageBTreeGenerationFiles files = _btreeFiles
+                ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+            StorageGenerationPin pin = _generationPins.Acquire(_btreeManifest.Generation);
+            return new StorageSnapshot(
+                reader,
+                files,
+                _btreeManifest,
+                pin,
+                _lastCommitSeq,
+                OnSnapshotPinReleased);
+        }
+    }
+
+    private void OnSnapshotPinReleased(ulong generation)
+    {
+        lock (_gate)
+            ReclaimRetiredGenerations();
+    }
+
+    private void ReclaimRetiredGenerations()
+    {
+        while (_generationPins.TryTakeReclaimable(out ulong generation))
+        {
+            if (!_generationFiles.Remove(generation, out StorageBTreeGenerationFiles? files))
+                throw new InvalidOperationException("Retired B+ tree generation has no open file owner.");
+            _pageCache.EvictGeneration(generation);
+            files.Dispose();
+            string snapshots = Path.Combine(_directory, "snapshots");
+            string prefix = $"p_{PartitionId}.{generation}";
+            foreach (string extension in new[] { ".pages", ".data" })
+            {
+                string path = Path.Combine(snapshots, prefix + extension);
+                if (File.Exists(path)) File.Delete(path);
+            }
+            StorageDirectorySync.Flush(snapshots);
         }
     }
 
@@ -525,7 +563,14 @@ public sealed class StorageDatabase : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            try { _btreeFiles?.Dispose(); }
+            try
+            {
+                foreach (ulong generation in _generationFiles.Keys.ToArray())
+                    _ = _generationPins.Retire(generation);
+                ReclaimRetiredGenerations();
+                _btreeFiles = null;
+                _btreeReader = null;
+            }
             finally { _wal.Dispose(); }
         }
     }
