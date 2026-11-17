@@ -145,6 +145,37 @@ public class DatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Reopen_keeps_legacy_mirror_when_contiguous_blob_digest_is_invalid()
+    {
+        var rec = Rec(0x38);
+        ulong runId;
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(rec, 1, "authoritative"u8);
+            db.Commit();
+            runId = db.Checkpoint();
+        }
+
+        byte[] author = new byte[16];
+        author[15] = 0x38;
+        byte[] legacyRun = new Fld1.Run.Builder.RunBuilder(0)
+            .Add(rec, 1, "authoritative"u8, wall: 1, logical: 0, author)
+            .Build();
+        string mirrorPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
+        File.WriteAllBytes(mirrorPath, legacyRun);
+
+        string blobPath = RunBlobPath(runId);
+        byte[] corruptBlob = File.ReadAllBytes(blobPath);
+        corruptBlob[^1] ^= 0x01;
+        File.WriteAllBytes(blobPath, corruptBlob);
+
+        using var reopened = FldDatabase.Open(_dir, 0);
+        Assert.Throws<InvalidDataException>(() => reopened.TryGetBytes(rec, 1, out _));
+        Assert.True(File.Exists(mirrorPath),
+            "A legacy mirror must not be deleted before the contiguous blob digest and Run header are verified.");
+    }
+
+    [Fact]
     public void Reopen_keeps_legacy_run_fallback_when_storage_blob_is_absent()
     {
         var rec = Rec(0x37);
