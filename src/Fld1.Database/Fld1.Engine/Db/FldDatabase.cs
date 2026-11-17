@@ -1989,6 +1989,7 @@ public sealed partial class FldDatabase : IDisposable
                    priority == target)
             {
                 CompactRunCursor cursor = runQueue.Dequeue();
+                // Enumerate directly to avoid a per-run capturing callback allocation.
                 var fieldEnumerator = cursor.Reader.GetFieldIds(recordIdBuffer);
                 while (fieldEnumerator.MoveNext())
                     fieldIds.Add(fieldEnumerator.Current);
