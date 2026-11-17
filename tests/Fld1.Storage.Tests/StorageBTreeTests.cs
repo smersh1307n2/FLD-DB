@@ -7,10 +7,10 @@ public sealed class StorageBTreeTests
     public void Reader_hot_lookup_cache_has_one_aggregate_budget_across_snapshot_readers()
     {
         var shared = new StorageBTreeReaderCache();
-        var first = new StorageBTreeReader(31, 0, _ => throw new InvalidOperationException(),
-            _ => throw new InvalidOperationException(), shared);
-        var second = new StorageBTreeReader(32, 0, _ => throw new InvalidOperationException(),
-            _ => throw new InvalidOperationException(), shared);
+        var first = new StorageBTreeReader(31, 0, _ => Array.Empty<byte>(),
+            _ => ReadOnlyMemory<byte>.Empty, shared);
+        var second = new StorageBTreeReader(32, 0, _ => Array.Empty<byte>(),
+            _ => ReadOnlyMemory<byte>.Empty, shared);
 
         for (int i = 0; i < 8_192; i++)
         {
