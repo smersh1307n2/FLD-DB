@@ -197,14 +197,15 @@ public sealed class StorageDatabaseTests : IDisposable
     {
         const ulong partition = 118;
         string directory = Path.Combine(_dir, "btree-snapshot-generation-pin");
-        using var db = StorageDatabase.Open(directory, partition);
-        using (var seed = db.BeginWriteBatch())
+        using (var seedDatabase = StorageDatabase.Open(directory, partition))
         {
+            using var seed = seedDatabase.BeginWriteBatch();
             seed.Put("stable"u8, "before"u8);
             seed.Commit();
         }
 
         StorageBTreeManifestV2 oldRoot = StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value;
+        using var db = StorageDatabase.Open(directory, partition);
         var snapshot = db.OpenSnapshot();
         using (var update = db.BeginWriteBatch())
         {
