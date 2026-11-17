@@ -131,9 +131,19 @@ public sealed class StorageIpcHostProcessTests
 
             if (File.Exists(StorageIpcEndpoint.GetEndpointFilePath(root, partition)))
             {
-                StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, partition);
-                if (previousOwnerId is null || endpoint.OwnerId != previousOwnerId.Value)
-                    return endpoint;
+                try
+                {
+                    StorageIpcEndpointInfo endpoint = StorageIpcEndpoint.Read(root, partition);
+                    if (previousOwnerId is null || endpoint.OwnerId != previousOwnerId.Value)
+                        return endpoint;
+                }
+                catch (FileNotFoundException)
+                {
+                    // The Host may exit and remove its owner-scoped endpoint
+                    // between File.Exists and Read. Retry so the next iteration
+                    // reports the child's exit code and captured stdout/stderr
+                    // instead of leaking a discovery-file race from the test.
+                }
             }
 
             await Task.Delay(100);
