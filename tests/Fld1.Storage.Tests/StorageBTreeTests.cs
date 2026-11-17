@@ -4,6 +4,26 @@ namespace Fld1.Storage.Tests;
 public sealed class StorageBTreeTests
 {
     [Fact]
+    public void Shared_reader_hot_cache_isolated_by_immutable_root()
+    {
+        byte[] key = { 0x2A };
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong nextPage = 1;
+        ulong root = StorageBTreeBuilder.Build(51,
+            new[] { new StorageTreeBuildEntry(key, 1, 2, 4, false) },
+            () => nextPage++, (id, page) => pages.Add(id, page));
+        var shared = new StorageBTreeReaderCache();
+        var empty = new StorageBTreeReader(51, 0, _ => Array.Empty<byte>(),
+            _ => new ReadOnlyMemory<byte>(key), shared);
+        var populated = new StorageBTreeReader(51, root, id => pages[id],
+            _ => new ReadOnlyMemory<byte>(key), shared);
+
+        Assert.False(empty.TryGet(key, out _));
+        Assert.True(populated.TryGet(key, out StorageTreeValueReference value));
+        Assert.Equal(4, value.Length);
+    }
+
+    [Fact]
     public void Reader_validation_cache_has_one_aggregate_budget_and_reclaims_retired_generations()
     {
         var shared = new StorageBTreeReaderCache();
