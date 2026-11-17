@@ -4,13 +4,10 @@ namespace Fld1.Engine.Db;
 /// Exact current FLD tombstone identity offered to a caller-owned retention proof.
 /// The callback must return true only when every replica has installed the required
 /// replacement generation and no pending source/relay reference can resurrect it.
+/// Stores the three binary identities in one owned buffer to avoid three separate
+/// short-lived arrays for every tombstone examined by a full namespace sweep.
 /// </summary>
 public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandidate>
-/// <summary>
-/// Stores the three binary identities in one owned buffer. Keeping separate arrays
-/// for RecordId, ChangeId and AuthorNodeId multiplied short-lived allocations for
-/// every tombstone examined by a full namespace sweep.
-/// </summary>
 {
     private readonly byte[] _identity;
     private readonly int _changeIdLength;
