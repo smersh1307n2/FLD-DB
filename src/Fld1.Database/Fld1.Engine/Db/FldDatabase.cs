@@ -1748,17 +1748,18 @@ public sealed partial class FldDatabase : IDisposable
     private static FldTombstoneGcCandidate CreateTombstoneGcCandidate(
         ReadOnlySpan<byte> recordId, ushort fieldId, FieldResolver.Resolved resolved,
         bool isRecordTombstone, bool isFieldTombstone)
-        => FldTombstoneGcCandidate.CreateOwned(
-            recordId.ToArray(),
-            fieldId,
-            resolved.ChangeId?.ToArray() ?? Array.Empty<byte>(),
-            resolved.AuthorNodeId?.ToArray() ?? Array.Empty<byte>(),
-            resolved.Wall,
-            resolved.Logical,
-            resolved.OriginAuthorEpoch,
-            resolved.OriginSequence,
-            isRecordTombstone,
-            isFieldTombstone);
+    {
+        byte[] changeId = resolved.ChangeId ?? Array.Empty<byte>();
+        byte[] authorNodeId = resolved.AuthorNodeId ?? Array.Empty<byte>();
+        byte[] identity = new byte[recordId.Length + changeId.Length + authorNodeId.Length];
+        recordId.CopyTo(identity);
+        changeId.CopyTo(identity, recordId.Length);
+        authorNodeId.CopyTo(identity, recordId.Length + changeId.Length);
+        return FldTombstoneGcCandidate.CreateOwned(
+            identity, changeId.Length, authorNodeId.Length, fieldId,
+            resolved.Wall, resolved.Logical, resolved.OriginAuthorEpoch,
+            resolved.OriginSequence, isRecordTombstone, isFieldTombstone);
+    }
 
     private sealed class CompactRunCursor
     {
