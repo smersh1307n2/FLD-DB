@@ -123,7 +123,7 @@ For each boundary, run a child process that exits/crashes, reopen the database, 
 - The standalone root publisher flushes data before pages, validates the root page, writes a checksummed temporary v2 manifest, atomically replaces the v2 root and flushes the containing directory. It is not connected to StorageDatabase commits.
 - Deterministic fault points cover data/page flush, manifest file flush, atomic replace and directory flush. Tests cover old-root retention before replace, new-root visibility after replace, and fail-closed reopen on missing/corrupt generation data.
 - A bulk-generation builder now writes sorted key/value/tombstone entries into append-only generation files, builds multi-leaf/internal pages, publishes the root and reopens the tree for point/prefix reads. Empty generations are supported.
-- This is bulk generation creation, not incremental path-only COW. WAL/CommitSeq coupling, child-process crash/reopen matrix, snapshot pin integration, generation reclamation and production routing remain blocked.
+- Incremental sorted-batch path-copy COW is now implemented in the internal prototype. Direct WAL/CommitSeq transaction coupling, child-process crash/reopen matrix, snapshot pin integration, generation reclamation and production routing remain blocked.
 
 **Stage E — snapshot pins and compaction**
 - Connect snapshot/cursor lifetime to generation pins.
@@ -208,3 +208,10 @@ The root monotonicity guard and regression test passed workflow 43987797721 on U
 Added a sorted batch updater that groups mutations by the leaf selected from the current root, merges each leaf once, appends replacement leaf pages and copies only the affected ancestor path. Leaf splits and internal-level splits allocate new immutable pages; tombstones remain as entries. The prefix cursor now advances in tree order using an internal-page path stack, so COW leaves do not need mutable or stale next-leaf links. The updater returns a new manifest with CommitSeq incremented once for the entire batch; ApplyAndPublish flushes and atomically publishes that root. The caller is explicitly responsible for durably writing the matching WAL batch first.
 
 Tests cover leaf split, existing-value replacement, insert, existing/new tombstones, prefix traversal across the new leaf topology, old-root readability under its prior committed high-water marks, empty-root creation, pre-write ordering rejection, and recovery/retry after a failure before root replacement. Production StorageDatabase routing and direct WAL coupling remain pending.
+
+
+### Stage D.4 verification update — 2026-11-17
+
+The path-copy COW updater and tree-order prefix cursor are present on the PR branch. It groups sorted mutations by target leaf, rewrites each affected leaf and its ancestor path, handles leaf/internal page splits, retains tombstones, and publishes a single incremented CommitSeq root. The updater remains an internal prototype: the caller must append the matching WAL batch durably before publishing; StorageDatabase does not yet route normal writes through it.
+
+Latest verification at commit 9fd8b047be667536d63c44db542f689396af4d96: .NET CI passed on Ubuntu, macOS 15 and Windows (337 tests per platform, zero failures/skips); the 1M-entry scale gate and storage-index benchmark workflows passed. These results do not satisfy the pending WAL/root crash matrix or authorize production routing.

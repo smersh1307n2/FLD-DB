@@ -306,3 +306,8 @@ D.3.3 verification: workflow 43987797721 passed 333 tests on each of Ubuntu/macO
 The v2 prototype now supports sorted atomic mutation batches. Mutations are grouped by their target leaf; each affected leaf is merged once, rewritten to new append-only pages (split as needed), and its ancestor path is copied to a new root. Internal pages split into additional levels when required. Old pages and data remain untouched, and tombstones remain in the tree. New COW leaves set NextPageId to zero; prefix iteration now advances through an internal-page traversal stack, while retaining boundary-order validation across leaves. Legacy bulk-built leaf links are ignored for traversal because the internal tree is authoritative.
 
 ApplyBatch increments the manifest CommitSeq once per batch and rolls back uncommitted file tails on in-process update failure. ApplyAndPublish then flushes data/pages and publishes the new root. The caller must durably append the matching WAL batch first; StorageDatabase does not yet route commits through this updater. The full WAL/root crash matrix, child-process crash tests, snapshot pin/reclamation and production routing remain outstanding.
+
+
+### Stage D.4 current verification — 2026-11-17
+
+At commit 9fd8b047be667536d63c44db542f689396af4d96, all .NET CI jobs passed on Ubuntu/macOS/Windows with 337 tests per platform and no failures/skips. The 1M-entry scale gate and storage-index benchmark workflows also passed. The COW updater is still internal and not connected to StorageDatabase/WAL transactions.
