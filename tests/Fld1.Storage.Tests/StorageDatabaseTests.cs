@@ -214,7 +214,8 @@ public sealed class StorageDatabaseTests : IDisposable
         }
 
         db.Checkpoint();
-        StorageBTreeManifestV2 newRoot = StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value;
+        StorageBTreeManifestV2 newRoot = StorageBTreeManifestCodec.Decode(
+            File.ReadAllBytes(Path.Combine(directory, "snapshots", $"p_{partition}.root-v2.manifest")));
         Assert.NotEqual(oldRoot.Generation, newRoot.Generation);
         Assert.True(snapshot.TryGet("stable"u8, out var oldValue));
         Assert.Equal("before"u8.ToArray(), oldValue);
