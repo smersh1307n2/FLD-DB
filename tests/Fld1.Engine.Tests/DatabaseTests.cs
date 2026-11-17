@@ -145,6 +145,40 @@ public class DatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Reopen_keeps_legacy_run_fallback_when_storage_blob_is_absent()
+    {
+        var rec = Rec(0x37);
+        ulong runId;
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(rec, 1, "legacy"u8);
+            db.Commit();
+            runId = db.Checkpoint();
+        }
+
+        using (var storage = Fld1.Storage.Engine.StorageDatabase.Open(
+            Path.Combine(_dir, "storage-core"), partitionId: 0))
+        {
+            var blobs = new Fld1.Storage.Engine.StorageBlobStore(storage, "FLDRUNB1"u8);
+            Assert.True(blobs.DeleteBlob(RunBlobId(runId)));
+        }
+
+        byte[] author = new byte[16];
+        author[15] = 0x37;
+        byte[] legacyRun = new Fld1.Run.Builder.RunBuilder(0)
+            .Add(rec, 1, "legacy"u8, wall: 1, logical: 0, author)
+            .Build();
+        string legacyPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
+        File.WriteAllBytes(legacyPath, legacyRun);
+
+        using var reopened = FldDatabase.Open(_dir, 0);
+        Assert.True(reopened.TryGetBytes(rec, 1, out byte[]? value));
+        Assert.Equal("legacy"u8.ToArray(), value);
+        Assert.True(File.Exists(legacyPath),
+            "A pre-Storage legacy Run must remain available when no authoritative blob exists.");
+    }
+
+    [Fact]
     public void Overlay_wins_over_run()
     {
         var rec = Rec(5);
