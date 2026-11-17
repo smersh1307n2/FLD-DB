@@ -392,7 +392,20 @@ public sealed class StorageBTreeUpdaterTests
                         generation, rightId));
                 Assert.Equal(StorageBTreePageCodec.MaxInternalChildren + 1, left.Separators.Length + right.Separators.Length + 2);
 
+                var secondLeafId = left.Separators[0].PageId;
+                StorageTreeLeafPage secondLeaf = StorageBTreePageCodec.DecodeLeaf(
+                    files.ReadPage(secondLeafId, next.CommittedPageFileLength),
+                    generation, secondLeafId);
+                Assert.Equal(StorageBTreePageCodec.MaxLeafEntries + 1 - secondLeaf.Entries.Length,
+                    StorageBTreePageCodec.MaxLeafEntries + 1 - secondLeaf.Entries.Length);
+                Assert.Equal("000000-0653",
+                    Encoding.UTF8.GetString(files.ReadData(
+                        secondLeaf.Entries[^1].Key.Offset,
+                        secondLeaf.Entries[^1].Key.Length,
+                        next.CommittedDataFileLength)));
+
                 var reader = CreateReader(files, next);
+                Assert.True(reader.TryGet("000000-0328"u8, out _));
                 Assert.True(reader.TryGet("000000-0653"u8, out _));
                 Assert.True(reader.TryGet("081800"u8, out _));
                 using var cursor = reader.OpenPrefixCursor("000000"u8.ToArray());
