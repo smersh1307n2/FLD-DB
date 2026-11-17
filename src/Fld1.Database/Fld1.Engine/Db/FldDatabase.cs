@@ -3559,7 +3559,7 @@ public sealed partial class FldDatabase : IDisposable
             DisposeProviderSnapshotsUnderLock();
             foreach (var run in _runs)
                 run.mapped?.Close();
-            foreach (MappedRunFile mapped in _retiredRunMappings)
+            foreach (IRunMemoryMapping mapped in _retiredRunMappings)
                 mapped.Close();
             _retiredRunMappings.Clear();
             _disposed = true;
