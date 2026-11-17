@@ -5,7 +5,7 @@ namespace Fld1.Engine.Bench;
 
 /// <summary>
 /// Isolated memory probe. Separates OS process high-water mark, sampled heap occupancy,
-/// and memory retained after a forced full collection. These are different metrics.
+/// compaction-thread allocations, sampler-thread allocations, and memory retained after a forced collection.
 /// </summary>
 internal static class TombstoneGcMemoryProbe
 {
@@ -24,7 +24,6 @@ internal static class TombstoneGcMemoryProbe
         long baselineProcessPeakWorkingSet = process.PeakWorkingSet64;
         long baselineManagedRetained = GC.GetTotalMemory(forceFullCollection: true);
         GCMemoryInfo baselineGcInfo = GC.GetGCMemoryInfo();
-        long baselineAllocated = GC.GetTotalAllocatedBytes(precise: true);
         int[] baselineCollections =
         [
             GC.CollectionCount(0),
@@ -32,14 +31,25 @@ internal static class TombstoneGcMemoryProbe
             GC.CollectionCount(2)
         ];
 
+        // Create the sampler before the process-allocation baseline. Its thread waits
+        // until Start(), so thread startup and synchronization setup are excluded.
         using var sampler = new Sampler(process);
+        long baselineProcessAllocated = GC.GetTotalAllocatedBytes(precise: true);
+        sampler.Start();
+
+        // CompactTombstones is synchronous. This per-thread counter isolates allocations
+        // made by the thread executing compaction from the sampler's own allocations.
+        long compactionThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         int reclaimed = database.CompactTombstones(static _ => true);
+        long compactionThreadAllocated =
+            GC.GetAllocatedBytesForCurrentThread() - compactionThreadAllocatedBefore;
         sampler.Stop();
 
         process.Refresh();
         long finalWorkingSet = process.WorkingSet64;
         long processPeakWorkingSet = process.PeakWorkingSet64;
-        long allocatedDuringSweep = GC.GetTotalAllocatedBytes(precise: true) - baselineAllocated;
+        long processAllocatedDuringMeasurement =
+            GC.GetTotalAllocatedBytes(precise: true) - baselineProcessAllocated;
         int[] collectionsDuringSweep =
         [
             GC.CollectionCount(0) - baselineCollections[0],
@@ -67,7 +77,9 @@ internal static class TombstoneGcMemoryProbe
             $"BaselineManagedRetainedBytes={baselineManagedRetained} " +
             $"PostSweepManagedRetainedBytes={postSweepManagedRetained} " +
             $"ManagedRetainedDeltaBytes={postSweepManagedRetained - baselineManagedRetained} " +
-            $"AllocatedBytesDuringSweep={allocatedDuringSweep} " +
+            $"CompactionThreadAllocatedBytes={compactionThreadAllocated} " +
+            $"SamplerThreadAllocatedBytes={sampler.AllocatedBytes} " +
+            $"ProcessAllocatedBytesDuringMeasurement={processAllocatedDuringMeasurement} " +
             $"Gen0Collections={collectionsDuringSweep[0]} Gen1Collections={collectionsDuringSweep[1]} Gen2Collections={collectionsDuringSweep[2]} " +
             $"BaselineHeapSizeBytes={baselineGcInfo.HeapSizeBytes} PostSweepHeapSizeBytes={postSweepGcInfo.HeapSizeBytes} " +
             $"BaselineFragmentedBytes={baselineGcInfo.FragmentedBytes} PostSweepFragmentedBytes={postSweepGcInfo.FragmentedBytes} " +
@@ -82,41 +94,59 @@ internal static class TombstoneGcMemoryProbe
     private sealed class Sampler : IDisposable
     {
         private readonly Process _process;
+        private readonly ManualResetEventSlim _start = new(false);
         private readonly ManualResetEventSlim _stop = new(false);
+        private readonly ManualResetEventSlim _ready = new(false);
         private readonly Thread _thread;
+        private bool _started;
         private bool _stopped;
 
         public long PeakWorkingSetBytes { get; private set; }
         public long PeakManagedHeapOccupancyBytes { get; private set; }
+        public long AllocatedBytes { get; private set; }
 
         public Sampler(Process process)
         {
             _process = process;
-            _process.Refresh();
-            PeakWorkingSetBytes = _process.WorkingSet64;
-            PeakManagedHeapOccupancyBytes = GC.GetTotalMemory(forceFullCollection: false);
             _thread = new Thread(SampleLoop)
             {
                 IsBackground = true,
                 Name = "FLD tombstone GC memory sampler"
             };
             _thread.Start();
+            _ready.Wait();
+        }
+
+        public void Start()
+        {
+            if (_started)
+                return;
+            _process.Refresh();
+            PeakWorkingSetBytes = _process.WorkingSet64;
+            PeakManagedHeapOccupancyBytes = GC.GetTotalMemory(forceFullCollection: false);
+            _started = true;
+            _start.Set();
         }
 
         public void Stop()
         {
             if (_stopped)
                 return;
+            if (!_started)
+                Start();
             _stop.Set();
             _thread.Join();
-            Sample();
             _stopped = true;
         }
 
         private void SampleLoop()
         {
+            _ready.Set();
+            _start.Wait();
+            long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
             while (!_stop.Wait(TimeSpan.FromMilliseconds(1)))
                 Sample();
+            AllocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
         }
 
         private void Sample()
@@ -133,7 +163,9 @@ internal static class TombstoneGcMemoryProbe
         public void Dispose()
         {
             Stop();
+            _start.Dispose();
             _stop.Dispose();
+            _ready.Dispose();
         }
     }
 }
