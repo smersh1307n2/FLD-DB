@@ -1942,7 +1942,8 @@ public sealed partial class FldDatabase : IDisposable
 
             builder.Add(recordId, fieldId,
                 resolved.IsTombstone ? ReadOnlySpan<byte>.Empty : resolved.Value.Span,
-                resolved.Wall, resolved.Logical, resolved.AuthorNodeId.Span,
+                resolved.Wall, resolved.Logical,
+                resolved.AuthorNodeId.IsEmpty ? _localAuthor : resolved.AuthorNodeId.Span,
                 resolved.KeyEpoch, resolved.IsTombstone, resolved.ChangeId.Span,
                 resolved.OriginAuthorEpoch, resolved.OriginSequence);
             outputFieldCount++;
@@ -2042,9 +2043,10 @@ public sealed partial class FldDatabase : IDisposable
                         continue;
 
                     bool newerThanRecordDelete = FieldResolver.IsNewer(
-                        resolved.Wall, resolved.Logical, resolved.AuthorNodeId.Span,
+                        resolved.Wall, resolved.Logical,
+                        resolved.AuthorNodeId.IsEmpty ? _localAuthor : resolved.AuthorNodeId.Span,
                         recordTombstone.Wall, recordTombstone.Logical,
-                        recordTombstone.AuthorNodeId.Span);
+                        recordTombstone.AuthorNodeId.IsEmpty ? _localAuthor : recordTombstone.AuthorNodeId.Span);
                     if (!newerThanRecordDelete)
                         continue;
                 }
