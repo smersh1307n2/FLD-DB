@@ -133,24 +133,7 @@ public class TombstoneGcSweepBench
     }
 
     public static int RunPeakProbeChild(string directory, int tombstoneCount)
-    {
-        using var database = FldDatabase.Open(directory, 0);
-        using var sampler = new PeakMemorySampler();
-        int reclaimed = database.CompactTombstones(static _ => true);
-        sampler.Stop();
-        Console.WriteLine(
-            $"TOMBSTONE_GC_PEAK_SAMPLE Count={tombstoneCount} IntervalMs=2 " +
-            $"BaselineWorkingSetBytes={sampler.BaselineWorkingSetBytes} " +
-            $"PeakWorkingSetBytes={sampler.PeakWorkingSetBytes} " +
-            $"WorkingSetDeltaBytes={sampler.PeakWorkingSetBytes - sampler.BaselineWorkingSetBytes} " +
-            $"BaselineManagedHeapBytes={sampler.BaselineManagedHeapBytes} " +
-            $"PeakManagedHeapBytes={sampler.PeakManagedHeapBytes} " +
-            $"ManagedHeapDeltaBytes={sampler.PeakManagedHeapBytes - sampler.BaselineManagedHeapBytes}");
-        if (reclaimed != tombstoneCount)
-            throw new InvalidOperationException(
-                $"Isolated peak-memory probe reclaimed {reclaimed}/{tombstoneCount} entries.");
-        return 0;
-    }
+        => TombstoneGcMemoryProbe.Run(directory, tombstoneCount);
 
     /// <summary>
     /// Diagnostic-only sampler. Its background thread perturbs the measured operation;
