@@ -135,7 +135,7 @@ public static class StorageIpcEndpoint
 
         try
         {
-            byte[] bytes = File.ReadAllBytes(path);
+            byte[] bytes = ReadEndpointBytes(path);
             StorageIpcEndpointInfo? endpoint =
                 JsonSerializer.Deserialize<StorageIpcEndpointInfo>(bytes);
             if (endpoint is null)
@@ -162,7 +162,7 @@ public static class StorageIpcEndpoint
         StorageIpcEndpointInfo? endpoint;
         try
         {
-            endpoint = JsonSerializer.Deserialize<StorageIpcEndpointInfo>(File.ReadAllBytes(path));
+            endpoint = JsonSerializer.Deserialize<StorageIpcEndpointInfo>(ReadEndpointBytes(path));
         }
         catch (JsonException)
         {
@@ -174,6 +174,41 @@ public static class StorageIpcEndpoint
 
         File.Delete(path);
         return true;
+    }
+
+    private static byte[] ReadEndpointBytes(string path)
+    {
+        const int maxAttempts = 100;
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                // Endpoint records are atomically replaced, never edited in place.
+                // Share delete/write so discovery reads do not block owner replacement.
+                using var stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 4096,
+                    FileOptions.SequentialScan);
+                if (stream.Length > 64 * 1024)
+                    throw new InvalidDataException("Storage IPC endpoint record exceeds the size limit.");
+                byte[] bytes = new byte[checked((int)stream.Length)];
+                stream.ReadExactly(bytes);
+                return bytes;
+            }
+            catch (IOException exception) when (
+                exception is not FileNotFoundException &&
+                exception is not DirectoryNotFoundException &&
+                attempt + 1 < maxAttempts)
+            {
+                // Windows may briefly retain a conflicting endpoint handle during
+                // owner restart or filesystem inspection. Retry sharing violations;
+                // a missing file remains visible to callers as FileNotFoundException.
+                Thread.Sleep(TimeSpan.FromMilliseconds(25));
+            }
+        }
     }
 
     private static void Validate(
