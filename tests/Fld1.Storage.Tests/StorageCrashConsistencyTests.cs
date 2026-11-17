@@ -143,6 +143,7 @@ public sealed class StorageCrashConsistencyTests
 
             using var reopened = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 1);
             Assert.Equal(2UL, reopened.LastCommitSeq);
+            Assert.True(reopened.TryGet(new byte[] { 0x08 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x09 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x0A }, out _));
         }
@@ -179,6 +180,7 @@ public sealed class StorageCrashConsistencyTests
                     throw new IOException("Injected B+ tree checkpoint root publication failure.");
             }, walRotateAfterBytes: 0))
             {
+                Put(database, 0x08, 0x88);
                 armed = true;
                 Assert.Throws<IOException>(() => database.Checkpoint());
                 Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x06 }, out _));
@@ -189,17 +191,19 @@ public sealed class StorageCrashConsistencyTests
 
             using (var recovered = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 0))
             {
-                Assert.Equal(2UL, recovered.LastCommitSeq);
+                Assert.Equal(3UL, recovered.LastCommitSeq);
                 Assert.True(recovered.TryGet(new byte[] { 0x06 }, out var first));
                 Assert.Equal(new byte[] { 0x66 }, first);
                 Assert.True(recovered.TryGet(new byte[] { 0x07 }, out var second));
                 Assert.Equal(new byte[] { 0x77 }, second);
+                Assert.True(recovered.TryGet(new byte[] { 0x08 }, out var third));
+                Assert.Equal(new byte[] { 0x88 }, third);
                 Put(recovered, 0x09, 0x99);
                 recovered.Checkpoint();
             }
 
             using var reopened = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 0);
-            Assert.Equal(3UL, reopened.LastCommitSeq);
+            Assert.Equal(4UL, reopened.LastCommitSeq);
             Assert.True(reopened.TryGet(new byte[] { 0x06 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x07 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x09 }, out _));
