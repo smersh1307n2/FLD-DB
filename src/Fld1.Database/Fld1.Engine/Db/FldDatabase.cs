@@ -2127,9 +2127,12 @@ public sealed partial class FldDatabase : IDisposable
             {
                 if (pinnedRunIds is null || pinnedRunIds.Contains(oldRun.runId))
                     continue;
-                _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
-                if (File.Exists(oldRun.path)) File.Delete(oldRun.path);
-                deleted = true;
+                deleted = _runBlobStore.DeleteBlob(RunBlobId(oldRun.runId));
+                if (File.Exists(oldRun.path))
+                {
+                    File.Delete(oldRun.path);
+                    deleted = true;
+                }
             }
             catch
             {
