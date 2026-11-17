@@ -396,8 +396,7 @@ public sealed class StorageBTreeUpdaterTests
                 StorageTreeLeafPage secondLeaf = StorageBTreePageCodec.DecodeLeaf(
                     files.ReadPage(secondLeafId, next.CommittedPageFileLength),
                     generation, secondLeafId);
-                Assert.Equal(StorageBTreePageCodec.MaxLeafEntries + 1 - secondLeaf.Entries.Length,
-                    StorageBTreePageCodec.MaxLeafEntries + 1 - secondLeaf.Entries.Length);
+                Assert.Equal(StorageBTreePageCodec.MaxLeafEntries / 2, secondLeaf.Entries.Length);
                 Assert.Equal("000000-0653",
                     Encoding.UTF8.GetString(files.ReadData(
                         secondLeaf.Entries[^1].Key.Offset,
