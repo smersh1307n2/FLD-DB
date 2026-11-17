@@ -264,30 +264,26 @@ internal static class StorageBTreeBuilder
 
 internal sealed class StorageBTreeReader
 {
-    private const int ValidationCacheCapacity = 4096;
-    private const int HotLookupCapacity = 16_384;
     private const int HotLookupMaxKeyLength = 256;
-    private readonly object _hotGate = new();
-    private readonly Dictionary<ulong, HotLookupEntry> _hotEntries = new();
-    private readonly Queue<ulong> _hotOrder = new();
+    private readonly StorageBTreeReaderCache _cache;
     private readonly ulong _generation,_root;private readonly Func<ulong,byte[]>? _readPage;
     private readonly Func<ulong,StoragePageCacheLease>? _readPageLease;
     private readonly Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> _readKey;
-    private readonly object _validationGate = new();
-    private readonly HashSet<ulong> _validatedPages = new();
-    private readonly Queue<ulong> _validationOrder = new();
-    public StorageBTreeReader(ulong generation,ulong root,Func<ulong,byte[]> readPage,Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey)
+
+    public StorageBTreeReader(ulong generation,ulong root,Func<ulong,byte[]> readPage,Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey, StorageBTreeReaderCache? cache = null)
     {
         if(generation==0)throw new ArgumentOutOfRangeException(nameof(generation));
         _generation=generation;_root=root;_readPage=readPage??throw new ArgumentNullException(nameof(readPage));
         _readKey=readKey??throw new ArgumentNullException(nameof(readKey));
+        _cache=cache??new StorageBTreeReaderCache();
     }
     public StorageBTreeReader(ulong generation,ulong root,Func<ulong,StoragePageCacheLease> readPageLease,
-        Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey)
+        Func<StorageTreeKeyReference,ReadOnlyMemory<byte>> readKey, StorageBTreeReaderCache? cache = null)
     {
         if(generation==0)throw new ArgumentOutOfRangeException(nameof(generation));
         _generation=generation;_root=root;_readPageLease=readPageLease??throw new ArgumentNullException(nameof(readPageLease));
         _readKey=readKey??throw new ArgumentNullException(nameof(readKey));
+        _cache=cache??new StorageBTreeReaderCache();
     }
     public bool TryGet(ReadOnlySpan<byte> key,out StorageTreeValueReference value)
     {
@@ -308,48 +304,26 @@ internal sealed class StorageBTreeReader
         finally { lease?.Dispose(); }
     }
 
-    internal int HotLookupCount { get { lock(_hotGate)return _hotEntries.Count; } }
+    internal int HotLookupCount => _cache.GetHotLookupCount(_generation, _root);
 
     private bool TryGetHot(ReadOnlySpan<byte> key,out bool found,out StorageTreeValueReference value)
+        => key.Length <= HotLookupMaxKeyLength
+            && _cache.TryGetHot(_generation, _root, key, out found, out value)
+            ? true
+            : Miss(out found, out value);
+
+    private static bool Miss(out bool found, out StorageTreeValueReference value)
     {
-        if(key.Length>HotLookupMaxKeyLength){found=false;value=default;return false;}
-        ulong hash=HashKey(key);
-        lock(_hotGate)
-        {
-            if(_hotEntries.TryGetValue(hash,out HotLookupEntry entry)
-                && entry.Key.AsSpan().SequenceEqual(key))
-            {
-                found=entry.Found;value=entry.Value;return true;
-            }
-        }
-        found=false;value=default;return false;
+        found = false;
+        value = default;
+        return false;
     }
 
     private void RememberHot(ReadOnlySpan<byte> key,bool found,StorageTreeValueReference value)
     {
-        if(key.Length>HotLookupMaxKeyLength)return;
-        ulong hash=HashKey(key);
-        lock(_hotGate)
-        {
-            // Hash collisions only reduce cache coverage; they never affect lookup correctness.
-            if(_hotEntries.ContainsKey(hash))return;
-            if(_hotEntries.Count>=HotLookupCapacity)
-                _hotEntries.Remove(_hotOrder.Dequeue());
-            _hotEntries.Add(hash,new HotLookupEntry(key.ToArray(),found,value));
-            _hotOrder.Enqueue(hash);
-        }
+        if(key.Length <= HotLookupMaxKeyLength)
+            _cache.RememberHot(_generation, _root, key, found, value);
     }
-
-    private static ulong HashKey(ReadOnlySpan<byte> key)
-    {
-        const ulong offset=14695981039346656037UL;
-        const ulong prime=1099511628211UL;
-        ulong hash=offset;
-        foreach(byte value in key){hash^=value;hash*=prime;}
-        return hash^checked((ulong)key.Length);
-    }
-
-    private readonly record struct HotLookupEntry(byte[] Key,bool Found,StorageTreeValueReference Value);
     public StorageBTreePrefixCursor OpenPrefixCursor(
         ReadOnlyMemory<byte> prefix,
         ReadOnlyMemory<byte> afterKey = default)
@@ -529,17 +503,8 @@ internal sealed class StorageBTreeReader
         leafId=0;
         return false;
     }
-    private bool IsValidated(ulong id){lock(_validationGate)return _validatedPages.Contains(id);}
-    private void MarkValidated(ulong id)
-    {
-        lock(_validationGate)
-        {
-            if(!_validatedPages.Add(id))return;
-            _validationOrder.Enqueue(id);
-            while(_validationOrder.Count>ValidationCacheCapacity)
-                _validatedPages.Remove(_validationOrder.Dequeue());
-        }
-    }
+    private bool IsValidated(ulong id) => _cache.IsValidated(_generation, id);
+    private void MarkValidated(ulong id) => _cache.MarkValidated(_generation, id);
     private int LowerBound(StorageBTreeLeafPageView leaf,ReadOnlySpan<byte> key)
     {
         int lo=0,hi=leaf.Count;
