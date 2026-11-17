@@ -17,6 +17,8 @@ public sealed class StorageDatabase : IDisposable
     private readonly Dictionary<StorageKey, byte[]> _values = new();
     private SortedList<StorageKey, byte[]>? _snapshotIndex;
     private readonly WalManager _wal;
+    private StorageBTreeGenerationFiles? _btreeFiles;
+    private StorageBTreeManifestV2 _btreeManifest;
     private readonly string _directory;
     private readonly Action<StorageFaultPoint>? _faultInjector;
     private ulong _snapshotGeneration;
@@ -84,18 +86,72 @@ public sealed class StorageDatabase : IDisposable
         var database = new StorageDatabase(directory, wal, faultInjector);
         try
         {
+            // Always validate the legacy checkpoint manifest while it exists. It is
+            // still used for upgrade compatibility, but the v2 root is authoritative
+            // once published.
             var snapshot = StorageSnapshotFile.Load(directory, partitionId);
-            if (snapshot is not null)
+            StorageBTreeManifestV2? root = StorageBTreeRootPublisher.TryLoad(directory, partitionId);
+
+            if (root.HasValue)
             {
-                foreach (var pair in snapshot.Values)
-                    database._values.Add(pair.Key, pair.Value);
-                database._snapshotGeneration = snapshot.Generation;
-                database._snapshotCommitSeq = snapshot.CommitSeq;
-                database._lastCommitSeq = snapshot.CommitSeq;
+                if (snapshot is not null && snapshot.CommitSeq > root.Value.CommitSeq)
+                    throw new InvalidDataException("Legacy snapshot is ahead of the durable B+ tree root.");
+
+                database._snapshotGeneration = snapshot?.Generation ?? 0;
+                database._snapshotCommitSeq = snapshot?.CommitSeq ?? 0;
+                database._btreeManifest = root.Value;
+                database._lastCommitSeq = root.Value.CommitSeq;
+
+                var files = new StorageBTreeGenerationFiles(directory, partitionId, root.Value.Generation);
+                try
+                {
+                    // WAL has already been fully validated by OpenStreaming. Only now
+                    // may bytes beyond the published root be discarded.
+                    files.TruncateToCommittedLengths(
+                        root.Value.CommittedPageFileLength,
+                        root.Value.CommittedDataFileLength);
+                    database._btreeFiles = files;
+                    database.LoadBTreeValues();
+                }
+                catch
+                {
+                    files.Dispose();
+                    throw;
+                }
             }
-            else if (!recovery.HasRecords && wal.NextCommitSeq != 1)
+            else
             {
-                throw new InvalidDataException("Storage WAL starts after sequence 1 but no snapshot manifest exists.");
+                if (snapshot is not null)
+                {
+                    foreach (var pair in snapshot.Values)
+                        database._values.Add(pair.Key, pair.Value);
+                    database._snapshotGeneration = snapshot.Generation;
+                    database._snapshotCommitSeq = snapshot.CommitSeq;
+                    database._lastCommitSeq = snapshot.CommitSeq;
+                }
+                else if (!recovery.HasRecords && wal.NextCommitSeq != 1)
+                {
+                    throw new InvalidDataException("Storage WAL starts after sequence 1 but no snapshot or B+ tree root exists.");
+                }
+
+                // One-time migration from the legacy snapshot/WAL format. Publish the
+                // root at the snapshot CommitSeq before replaying any later WAL records.
+                ulong generation = snapshot?.Generation ?? 1;
+                var files = new StorageBTreeGenerationFiles(directory, partitionId, generation);
+                try
+                {
+                    files.TruncateToCommittedLengths(0, 0);
+                    StorageBTreeManifestV2 initial = StorageBTreeGenerationBuilder.Build(
+                        files, database._lastCommitSeq, database.CreateBTreeBuildInputs());
+                    StorageBTreeRootPublisher.Publish(directory, initial, files, faultInjector);
+                    database._btreeFiles = files;
+                    database._btreeManifest = initial;
+                }
+                catch
+                {
+                    files.Dispose();
+                    throw;
+                }
             }
 
             recovery.Replay(record =>
@@ -108,15 +164,48 @@ public sealed class StorageDatabase : IDisposable
             });
 
             if (wal.NextCommitSeq != checked(database._lastCommitSeq + 1))
-                throw new InvalidDataException("Storage snapshot and WAL commit sequence do not form a contiguous recovery chain.");
+                throw new InvalidDataException("Storage root and WAL commit sequence do not form a contiguous recovery chain.");
 
             return database;
         }
         catch
         {
+            database._btreeFiles?.Dispose();
             wal.Dispose();
             throw;
         }
+    }
+
+    private void LoadBTreeValues()
+    {
+        StorageBTreeGenerationFiles files = _btreeFiles
+            ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+        StorageBTreeManifestV2 manifest = _btreeManifest;
+        var reader = new StorageBTreeReader(
+            manifest.Generation,
+            manifest.RootPageId,
+            pageId => files.ReadPage(pageId, manifest.CommittedPageFileLength),
+            key => files.ReadData(key.Offset, key.Length, manifest.CommittedDataFileLength));
+
+        using StorageBTreePrefixCursor cursor = reader.OpenAllCursor();
+        while (cursor.TryReadNext(out StorageTreeEntry entry))
+        {
+            byte[] keyBytes = files.ReadData(
+                entry.Key.Offset, entry.Key.Length, manifest.CommittedDataFileLength);
+            byte[] valueBytes = files.ReadData(
+                entry.Value.Offset, entry.Value.Length, manifest.CommittedDataFileLength);
+            if (!_values.TryAdd(new StorageKey(keyBytes), valueBytes))
+                throw new InvalidDataException("B+ tree root contains duplicate live keys.");
+        }
+    }
+
+    private StorageTreeBuildInput[] CreateBTreeBuildInputs()
+    {
+        var sorted = new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance);
+        return sorted.Select(pair => new StorageTreeBuildInput(
+            pair.Key.Span.ToArray(),
+            pair.Value,
+            IsTombstone: false)).ToArray();
     }
 
     public StorageWriteBatch BeginWriteBatch()
@@ -152,21 +241,44 @@ public sealed class StorageDatabase : IDisposable
             EnsureUsable();
             if (_lastCommitSeq == _snapshotCommitSeq) return;
 
+            StorageBTreeGenerationFiles? compactedFiles = null;
             try
             {
                 _wal.Flush();
                 _wal.Rotate();
-                ulong generation = checked(_snapshotGeneration + 1);
-                StorageSnapshotFile.Store(_directory, PartitionId, generation, _lastCommitSeq,
+
+                // Compact the append-only COW generation into a fresh immutable
+                // generation at the same CommitSeq. Root publication precedes WAL
+                // truncation; old generation files are retained until explicit GC.
+                ulong nextGeneration = checked(_btreeManifest.Generation + 1);
+                compactedFiles = new StorageBTreeGenerationFiles(_directory, PartitionId, nextGeneration);
+                compactedFiles.TruncateToCommittedLengths(0, 0);
+                StorageBTreeManifestV2 compacted = StorageBTreeGenerationBuilder.Build(
+                    compactedFiles, _lastCommitSeq, CreateBTreeBuildInputs());
+                StorageBTreeRootPublisher.Publish(_directory, compacted, compactedFiles, _faultInjector);
+
+                StorageBTreeGenerationFiles oldFiles = _btreeFiles
+                    ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+                _btreeFiles = compactedFiles;
+                _btreeManifest = compacted;
+                compactedFiles = null;
+                oldFiles.Dispose();
+
+                // Keep the legacy checkpoint as a migration/rollback mirror for now.
+                // It is no longer the recovery authority after the v2 root exists.
+                ulong snapshotGeneration = checked(_snapshotGeneration + 1);
+                StorageSnapshotFile.Store(_directory, PartitionId, snapshotGeneration, _lastCommitSeq,
                     new SortedDictionary<StorageKey, byte[]>(_values, StorageKeyComparer.Instance), _faultInjector);
-                _snapshotGeneration = generation;
+                _snapshotGeneration = snapshotGeneration;
                 _snapshotCommitSeq = _lastCommitSeq;
-                _wal.TruncateSealedSegments(_snapshotCommitSeq);
+                _wal.TruncateSealedSegments(_btreeManifest.CommitSeq);
             }
             catch
             {
-                // A failed checkpoint may have published an orphan snapshot or a new
-                // WAL segment. Reopen is the only authority for the manifest/WAL pair.
+                compactedFiles?.Dispose();
+                // A failed checkpoint may have published a new B+ tree root, an orphan
+                // generation or a legacy snapshot. Reopen is the only authority for
+                // reconciling the manifest/WAL pair.
                 _faulted = true;
                 throw;
             }
@@ -202,10 +314,27 @@ public sealed class StorageDatabase : IDisposable
             byte[] payload = EncodeBatch(mutations);
             try
             {
-                ulong commitSeq = _wal.Append(BatchCommitKind, payload);
-                _faultInjector?.Invoke(StorageFaultPoint.AfterWalAppendBeforeFlush);
-                _wal.Flush();
-                _faultInjector?.Invoke(StorageFaultPoint.AfterWalFlushBeforePublish);
+                StorageBTreeGenerationFiles files = _btreeFiles
+                    ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+                StorageTreeMutation[] treeMutations = mutations
+                    .OrderBy(x => new StorageKey(x.Key), StorageKeyComparer.Instance)
+                    .Select(x => new StorageTreeMutation(x.Key, x.Value, x.IsDelete))
+                    .ToArray();
+
+                StorageBTreeManifestV2 next = StorageBTreeUpdater.ApplyAndPublish(
+                    _directory,
+                    _btreeManifest,
+                    files,
+                    treeMutations,
+                    appendAndFlushWal: () =>
+                    {
+                        ulong sequence = _wal.Append(BatchCommitKind, payload);
+                        _faultInjector?.Invoke(StorageFaultPoint.AfterWalAppendBeforeFlush);
+                        _wal.Flush();
+                        _faultInjector?.Invoke(StorageFaultPoint.AfterWalFlushBeforePublish);
+                        return sequence;
+                    },
+                    faultInjector: _faultInjector);
 
                 foreach (var mutation in mutations)
                 {
@@ -214,12 +343,15 @@ public sealed class StorageDatabase : IDisposable
                     else _values[key] = mutation.Value.ToArray();
                 }
 
-                _lastCommitSeq = commitSeq;
+                _btreeManifest = next;
+                _lastCommitSeq = next.CommitSeq;
                 _snapshotIndex = null;
-                return commitSeq;
+                return next.CommitSeq;
             }
             catch
             {
+                // WAL is durable before COW pages/root publication. Any failure makes
+                // this instance unusable; reopen reconciles the last root with the WAL.
                 _faulted = true;
                 throw;
             }
@@ -231,6 +363,21 @@ public sealed class StorageDatabase : IDisposable
         if (commitSeq != _lastCommitSeq + 1)
             throw new InvalidDataException($"Storage WAL CommitSeq {commitSeq} does not follow {_lastCommitSeq}.");
         var mutations = DecodeBatch(payload);
+        StorageBTreeGenerationFiles files = _btreeFiles
+            ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+        StorageTreeMutation[] treeMutations = mutations
+            .OrderBy(x => new StorageKey(x.Key), StorageKeyComparer.Instance)
+            .Select(x => new StorageTreeMutation(x.Key, x.Value, x.IsDelete))
+            .ToArray();
+
+        // The WAL record has already been validated and is durable. Replay therefore
+        // applies COW pages/root directly without appending a duplicate WAL record.
+        StorageBTreeManifestV2 next = StorageBTreeUpdater.ApplyBatch(
+            _btreeManifest, files, treeMutations);
+        if (next.CommitSeq != commitSeq)
+            throw new InvalidDataException("Recovered WAL and B+ tree CommitSeq values diverged.");
+        StorageBTreeRootPublisher.Publish(_directory, next, files, _faultInjector);
+
         foreach (var mutation in mutations)
         {
             var key = new StorageKey(mutation.Key);
@@ -238,7 +385,9 @@ public sealed class StorageDatabase : IDisposable
             else _values[key] = mutation.Value;
         }
 
+        _btreeManifest = next;
         _lastCommitSeq = commitSeq;
+        _snapshotIndex = null;
     }
 
     private static byte[] EncodeBatch(IReadOnlyCollection<StorageMutation> mutations)
@@ -314,7 +463,8 @@ public sealed class StorageDatabase : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            _wal.Dispose();
+            try { _btreeFiles?.Dispose(); }
+            finally { _wal.Dispose(); }
         }
     }
 

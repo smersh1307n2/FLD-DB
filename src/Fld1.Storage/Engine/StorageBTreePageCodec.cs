@@ -353,6 +353,14 @@ internal sealed class StorageBTreeReader
     public StorageBTreePrefixCursor OpenPrefixCursor(ReadOnlyMemory<byte> prefix)
     {
         if(prefix.IsEmpty)throw new ArgumentException("Empty prefix.",nameof(prefix));
+        return OpenCursorCore(prefix);
+    }
+
+    public StorageBTreePrefixCursor OpenAllCursor()
+        => OpenCursorCore(ReadOnlyMemory<byte>.Empty);
+
+    private StorageBTreePrefixCursor OpenCursorCore(ReadOnlyMemory<byte> prefix)
+    {
         var path = new List<StorageTreePathFrame>();
         if(_root==0)return new(this,0,0,prefix.ToArray(),path);
         ulong id=FindLeaf(prefix.Span,path);var leaf=ReadLeafView(id,out var lease);
