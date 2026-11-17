@@ -171,6 +171,10 @@ public sealed class StorageDatabase : IDisposable
             if (wal.NextCommitSeq != checked(database._lastCommitSeq + 1))
                 throw new InvalidDataException("Storage root and WAL commit sequence do not form a contiguous recovery chain.");
 
+            // Every WAL record is now validated and represented by the published root.
+            // Sealed segments covered by that root can be reclaimed safely.
+            wal.TruncateSealedSegments(database._btreeManifest.CommitSeq);
+            CleanupUnreferencedGenerations(directory, partitionId, database._btreeManifest.Generation);
             return database;
         }
         catch
@@ -179,6 +183,54 @@ public sealed class StorageDatabase : IDisposable
             wal.Dispose();
             throw;
         }
+    }
+
+    private static void CleanupUnreferencedGenerations(
+        string directory,
+        ulong partitionId,
+        ulong currentGeneration)
+    {
+        string snapshots = Path.Combine(directory, "snapshots");
+        if (!Directory.Exists(snapshots)) return;
+
+        string prefix = $"p_{partitionId}.";
+        bool changed = false;
+        foreach (string extension in new[] { ".pages", ".data" })
+        {
+            foreach (string path in Directory.EnumerateFiles(snapshots, prefix + "*" + extension))
+            {
+                string name = Path.GetFileName(path);
+                string generationText = name.Substring(prefix.Length, name.Length - prefix.Length - extension.Length);
+                if (!ulong.TryParse(generationText, out ulong generation) ||
+                    generation == currentGeneration)
+                    continue;
+                try
+                {
+                    File.Delete(path);
+                    changed = true;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        // Legacy snapshots are read only when migrating a database with no v2 root.
+        // Once a valid root exists they are redundant and can be removed.
+        foreach (string path in Directory.EnumerateFiles(snapshots, prefix + "*.snap"))
+        {
+            try { File.Delete(path); changed = true; }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        string legacyManifest = Path.Combine(snapshots, $"p_{partitionId}.manifest");
+        if (File.Exists(legacyManifest))
+        {
+            try { File.Delete(legacyManifest); changed = true; }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        if (changed) StorageDirectorySync.Flush(snapshots);
     }
 
     private int CountBTreeValues(
