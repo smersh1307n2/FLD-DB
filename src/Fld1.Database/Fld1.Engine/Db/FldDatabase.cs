@@ -78,8 +78,8 @@ public sealed partial class FldDatabase : IDisposable
     private readonly object _commitLock = new();
     private WalManager _wal;
     private OutboxLog _outbox;
-    private readonly List<(ulong runId, string path, MappedRunFile? mapped)> _runs = new();
-    private readonly List<MappedRunFile> _retiredRunMappings = new();
+    private readonly List<(ulong runId, string path, IRunMemoryMapping? mapped)> _runs = new();
+    private readonly List<IRunMemoryMapping> _retiredRunMappings = new();
     private ulong _nextRunId = 1;
     private ulong _clientRequestSeq;
     private readonly byte[] _clientInstanceId = new byte[16];
@@ -1394,8 +1394,7 @@ public sealed partial class FldDatabase : IDisposable
             if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
                 throw new InvalidDataException(
                     $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
-            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
-            WriteRunAtomically(path, runBytes); // Compatibility mirror for legacy FLD1 readers.
+            _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);.
 
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
@@ -1921,7 +1920,6 @@ public sealed partial class FldDatabase : IDisposable
             ulong runId = AllocateRunId();
             string runPath = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), bytes);
-            WriteRunAtomically(runPath, bytes);
             InjectCompactionFault(FldCompactionFaultPoint.AfterReplacementRunDurable);
             outputRuns.Add((runId, runPath, outputMinRecord!, outputMaxRecord!));
 
@@ -2204,6 +2202,20 @@ public sealed partial class FldDatabase : IDisposable
             }
         }
 
+        // Active Runs are now read directly from contiguous Storage blobs. Migrate
+        // legacy page-based blobs once, then remove their redundant .fld1 mirrors.
+        // The Storage catalog remains authoritative throughout the cutover.
+        foreach (var run in _runs)
+        {
+            Guid blobId = RunBlobId(run.runId);
+            if (!_runBlobStore.ContainsBlob(blobId))
+                continue; // Pre-blob legacy databases remain readable from their .fld1 files.
+            if (!_runBlobStore.MigrateToSingleFile(blobId))
+                throw new IOException($"Run blob {run.runId} is still pinned during exclusive database open.");
+            try { File.Delete(run.path); }
+            catch { /* retry removal on the next open; the Storage blob is authoritative */ }
+        }
+
         // Run IDs are globally monotonic within the root, so the same live set protects
         // active, snapshot-pinned and in-progress stage blobs across every namespace.
         HashSet<Guid> liveBlobIds = liveRunIds.Select(RunBlobId).ToHashSet();
@@ -2484,45 +2496,64 @@ public sealed partial class FldDatabase : IDisposable
         if (mapped is not null)
             return mapped.ReadOnlyMemory;
 
-        // The Storage blob is authoritative. A mapped compatibility mirror is accepted
-        // only when its whole-file SHA-256 matches the durable blob catalog digest.
-        MappedRunFile? mappedFile = TryOpenValidatedRunMapping(runId, path);
-        if (mappedFile is not null)
-        {
-            _runs[index] = (runId, path, mappedFile);
-            return mappedFile.ReadOnlyMemory;
-        }
-
         Guid blobId = RunBlobId(runId);
-        byte[] bytes;
         if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
         {
-            using (blobReader)
-                bytes = blobReader.ReadAllBytes();
+            if (!blobReader.IsSingleFile)
+            {
+                blobReader.Dispose();
+                if (!_runBlobStore.MigrateToSingleFile(blobId))
+                    throw new IOException($"Run blob {runId} is pinned and cannot be migrated to the mapped layout.");
+                if (!_runBlobStore.TryOpenRead(blobId, out blobReader) || blobReader is null)
+                    throw new InvalidDataException($"Run blob {runId} disappeared after its storage migration.");
+            }
+
+            StorageBlobMappedView view;
+            try
+            {
+                view = blobReader.OpenMappedView();
+            }
+            catch
+            {
+                blobReader.Dispose();
+                throw;
+            }
+
+            var owner = new StorageBlobRunMapping(view);
+            try
+            {
+                var reader = new RunReader(owner.ReadOnlyMemory);
+                if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+                    throw new InvalidDataException(
+                        $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
+
+                _runs[index] = (runId, path, owner);
+                try { File.Delete(path); }
+                catch { /* the Storage blob is authoritative; retry legacy mirror cleanup on reopen */ }
+                return owner.ReadOnlyMemory;
+            }
+            catch
+            {
+                owner.Close();
+                throw;
+            }
         }
-        else if (_runBlobStore.ContainsBlob(blobId))
-        {
+
+        if (_runBlobStore.ContainsBlob(blobId))
             throw new InvalidDataException($"Run {runId} references an incomplete Storage blob.");
-        }
-        else
-        {
-            throw new InvalidDataException(
-                $"Run {runId} has no valid compatibility mirror and no authoritative Storage blob.");
-        }
 
-        var reader = new RunReader(bytes);
-        if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
+        // Compatibility for databases created before immutable Runs were copied into
+        // Storage blobs. This is a read-only fallback; all newly published Runs use the
+        // Storage-owned contiguous file and never create a .fld1 mirror.
+        IRunMemoryMapping? legacyMapping = TryOpenValidatedRunMapping(runId, path);
+        if (legacyMapping is null)
             throw new InvalidDataException(
-                $"Run {runId} is invalid for namespace {_namespaceId}: {verify.Status} {verify.Detail}");
-
-        // Repair a missing or stale mirror from the digest-verified Storage blob, then
-        // map the repaired immutable file instead of retaining the full managed array.
-        WriteRunAtomically(path, bytes);
-        MapRun(index);
-        return _runs[index].mapped!.ReadOnlyMemory;
+                $"Run {runId} has neither an authoritative Storage blob nor a valid legacy .fld1 file.");
+        _runs[index] = (runId, path, legacyMapping);
+        return legacyMapping.ReadOnlyMemory;
     }
 
-    private MappedRunFile? TryOpenValidatedRunMapping(ulong runId, string path)
+    private IRunMemoryMapping? TryOpenValidatedRunMapping(ulong runId, string path)
     {
         if (!File.Exists(path))
             return null;
@@ -2536,53 +2567,11 @@ public sealed partial class FldDatabase : IDisposable
                 mappedFile.Close();
                 return null;
             }
-
-            Guid blobId = RunBlobId(runId);
-            if (_runBlobStore.TryOpenRead(blobId, out StorageBlobReader? blobReader) && blobReader is not null)
-            {
-                using (blobReader)
-                {
-                    byte[] actualDigest = System.Security.Cryptography.SHA256.HashData(
-                        mappedFile.ReadOnlyMemory.Span);
-                    if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-                        actualDigest, blobReader.Digest))
-                    {
-                        mappedFile.Close();
-                        return null;
-                    }
-                }
-            }
-            else if (_runBlobStore.ContainsBlob(blobId))
-            {
-                throw new InvalidDataException($"Run {runId} references an incomplete Storage blob.");
-            }
-
             return mappedFile;
         }
         catch
         {
             mappedFile.Close();
-            throw;
-        }
-    }
-
-    private void MapRun(int index)
-    {
-        var (runId, path, mapped) = _runs[index];
-        if (mapped is not null)
-            return;
-        try
-        {
-            MappedRunFile? mappedFile = TryOpenValidatedRunMapping(runId, path);
-            if (mappedFile is null)
-                throw new InvalidDataException($"Run {runId} mirror is missing or does not match its Storage blob.");
-            _runs[index] = (runId, path, mappedFile);
-        }
-        catch
-        {
-            // The manifest may already publish this immutable Run. Stop using the
-            // current instance; reopen will recover/validate from the Storage blob.
-            _faulted = true;
             throw;
         }
     }
@@ -3531,25 +3520,6 @@ public sealed partial class FldDatabase : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_faulted)
             throw new InvalidOperationException("Database requires reopen after a failed durable operation.");
-    }
-
-    private static void WriteRunAtomically(string path, byte[] runBytes)
-    {
-        string tempPath = path + ".tmp";
-        string directory = Path.GetDirectoryName(path)!;
-        StorageDirectorySync.CreateDirectoryDurable(directory);
-
-        using (var fs = new FileStream(
-            tempPath, FileMode.Create, FileAccess.Write, FileShare.None,
-            bufferSize: 64 * 1024, FileOptions.WriteThrough))
-        {
-            fs.Write(runBytes);
-            fs.Flush(flushToDisk: true);
-        }
-
-        // The compatibility mirror must be durable before the FLD manifest or
-        // FULL_REPLACE stage cursor can publish a reference to it.
-        StorageDirectorySync.AtomicReplaceFile(tempPath, path);
     }
 
     public void Dispose()
