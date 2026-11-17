@@ -15,6 +15,7 @@ public sealed class StorageDatabase : IDisposable
     private const int MaxKeyLength = 1024 * 1024;
     private readonly object _gate = new();
     private readonly Dictionary<StorageKey, byte[]> _values = new();
+    private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
     private SortedList<StorageKey, byte[]>? _snapshotIndex;
     private readonly WalManager _wal;
     private StorageBTreeGenerationFiles? _btreeFiles;
@@ -202,13 +203,15 @@ public sealed class StorageDatabase : IDisposable
         }
     }
 
-    private static StorageBTreeReader CreateBTreeReader(
+    private StorageBTreeReader CreateBTreeReader(
         in StorageBTreeManifestV2 manifest,
         StorageBTreeGenerationFiles files)
         => new(
             manifest.Generation,
             manifest.RootPageId,
-            pageId => files.ReadPage(pageId, manifest.CommittedPageFileLength),
+            pageId => _pageCache.Acquire(
+                new StoragePageKey(manifest.Generation, pageId),
+                id => files.ReadPage(id, manifest.CommittedPageFileLength)),
             key => files.ReadData(
                 key.Offset,
                 key.Length,
@@ -317,6 +320,7 @@ public sealed class StorageDatabase : IDisposable
                 _btreeFiles = compactedFiles;
                 _btreeManifest = compacted;
                 _btreeReader = CreateBTreeReader(compacted, compactedFiles);
+                _pageCache.EvictGeneration(oldFiles.Generation);
                 compactedFiles = null;
                 oldFiles.Dispose();
 
