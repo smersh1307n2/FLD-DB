@@ -12,7 +12,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: fld-db-ci-${{ github.head_ref || github.ref_name }}
+  # Keep push and pull_request checks independent. They target the same SHA
+  # on PR branches; sharing a group cancels one run and leaves red checks.
+  group: fld-db-ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
