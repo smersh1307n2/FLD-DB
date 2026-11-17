@@ -18,7 +18,7 @@ namespace Fld1.Storage.Engine;
 public sealed class StorageBlobStore
 {
     private const uint MetadataMagic = 0x31424C53; // "SLB1"
-    private const ushort MetadataVersion = 1;
+    private const ushort MetadataVersion = 2;
     private const int MetadataSize = 56;
     private const int BlobIdSize = 16;
     private const int MaxBlobPages = 65_535;
@@ -321,14 +321,22 @@ public sealed class StorageBlobStore
     private void VerifyExistingSingleFile(Guid blobId, ReadOnlyMemory<byte> content)
     {
         string path = Path.Combine(BlobDirectory(blobId), "content.blob");
-        byte[] existing;
-        try { existing = File.ReadAllBytes(path); }
+        try
+        {
+            using var existing = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 64 * 1024, FileOptions.SequentialScan);
+            if ((ulong)existing.Length != (ulong)content.Length)
+                throw new InvalidDataException("Published Storage blob content has an invalid length.");
+            byte[] actualDigest = SHA256.HashData(existing);
+            byte[] requestedDigest = SHA256.HashData(content.Span);
+            if (!CryptographicOperations.FixedTimeEquals(actualDigest, requestedDigest))
+                throw new InvalidDataException("Published Storage blob content differs from its immutable bytes.");
+        }
         catch (FileNotFoundException ex)
         {
             throw new InvalidDataException("Published Storage blob content file is missing.", ex);
         }
-        if (!existing.AsSpan().SequenceEqual(content.Span))
-            throw new InvalidDataException("Published Storage blob content differs from its immutable bytes.");
     }
 
     /// <summary>
@@ -338,7 +346,17 @@ public sealed class StorageBlobStore
     /// that cleanup is harmless and a retry converges.
     /// </summary>
     public bool MigrateToSingleFile(Guid blobId)
+        => MigrateToSingleFile(blobId, out _);
+
+    /// <summary>
+    /// Migrates a page-based blob when needed. wasAlreadySingleFile distinguishes an
+    /// already-published contiguous blob from a page layout that was just verified and
+    /// migrated; callers must not discard legacy fallback files for the former until
+    /// the mapped content digest has been checked.
+    /// </summary>
+    public bool MigrateToSingleFile(Guid blobId, out bool wasAlreadySingleFile)
     {
+        wasAlreadySingleFile = false;
         ValidateBlobId(blobId);
         lock (_shared.Gate)
         {
@@ -348,12 +366,39 @@ public sealed class StorageBlobStore
             StorageBlobMetadata metadata = DecodeMetadata(bytes!);
             if (!metadata.IsComplete)
                 throw new InvalidDataException("Cannot migrate an incomplete Storage blob.");
+            wasAlreadySingleFile = metadata.IsSingleFile;
+            string directory = BlobDirectory(blobId);
             if (metadata.IsSingleFile)
+            {
+                string contentPath = Path.Combine(directory, "content.blob");
+                if (!File.Exists(contentPath) ||
+                    (ulong)new FileInfo(contentPath).Length != metadata.Length)
+                    throw new InvalidDataException("Published Storage blob content file is missing or has an invalid length.");
+
+                // If a crash happened after the catalog switch but before old page
+                // cleanup, verify the authoritative file before removing those backups.
+                string[] leftoverPages = Directory.EnumerateFiles(directory, "*.page").ToArray();
+                if (leftoverPages.Length != 0)
+                {
+                    using var content = new FileStream(
+                        contentPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                        bufferSize: 64 * 1024, FileOptions.SequentialScan);
+                    byte[] actualDigest = SHA256.HashData(content);
+                    if (!CryptographicOperations.FixedTimeEquals(actualDigest, metadata.Digest))
+                        throw new InvalidDataException("Storage blob content digest mismatch during page cleanup.");
+                    foreach (string page in leftoverPages)
+                    {
+                        try { File.Delete(page); }
+                        catch { /* retry cleanup on the next maintenance pass */ }
+                    }
+                    StorageDirectorySync.Flush(directory);
+                }
                 return true;
+            }
             if (_shared.Pins.TryGetValue(blobId, out int pins) && pins != 0)
                 return false;
 
-            string directory = BlobDirectory(blobId);
+
             string destination = Path.Combine(directory, "content.blob");
             string temporary = destination + ".tmp";
             using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -523,15 +568,18 @@ public sealed class StorageBlobStore
     private static StorageBlobMetadata DecodeMetadata(byte[] bytes)
     {
         if (bytes.Length != MetadataSize ||
-            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) != MetadataMagic ||
-            System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4)) != MetadataVersion)
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) != MetadataMagic)
+            throw new InvalidDataException("Storage blob metadata magic/version/length is invalid.");
+        ushort version = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(4));
+        if (version is not 1 and not MetadataVersion)
             throw new InvalidDataException("Storage blob metadata magic/version/length is invalid.");
         ushort flags = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(6));
         ulong length = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(8));
         int pageSize = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(16));
         int pageCount = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(20));
         byte[] digest = bytes.AsSpan(24, 32).ToArray();
-        if (flags > 3 || pageSize is < 4096 or > MaxPageSize ||
+        if ((version == 1 ? flags > 1 : flags > 3) ||
+            pageSize is < 4096 or > MaxPageSize ||
             pageCount is < 0 or > MaxBlobPages)
             throw new InvalidDataException("Storage blob metadata fields are invalid.");
         ulong pageSize64 = (ulong)pageSize;
@@ -542,7 +590,7 @@ public sealed class StorageBlobStore
         return new StorageBlobMetadata(
             length, pageSize, pageCount, digest,
             IsComplete: (flags & 1) != 0,
-            IsSingleFile: (flags & 2) != 0);
+            IsSingleFile: version >= 2 && (flags & 2) != 0);
     }
 
     private static void ValidateBlobId(Guid blobId)
@@ -907,13 +955,22 @@ public sealed unsafe class StorageBlobMappedView : MemoryManager<byte>
     {
         if (_disposed) return;
         _disposed = true;
-        if (_pointer != null)
+        try
         {
-            _view.SafeMemoryMappedViewHandle.ReleasePointer();
-            _pointer = null;
+            if (_pointer != null)
+            {
+                _view.SafeMemoryMappedViewHandle.ReleasePointer();
+                _pointer = null;
+            }
         }
-        _view.Dispose();
-        _mapping.Dispose();
-        _owner.ReleaseFromMappedView();
+        finally
+        {
+            try { _view.Dispose(); }
+            finally
+            {
+                try { _mapping.Dispose(); }
+                finally { _owner.ReleaseFromMappedView(); }
+            }
+        }
     }
 }
