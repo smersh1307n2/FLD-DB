@@ -2673,3 +2673,19 @@ A separate, manually dispatchable/push-triggered Ubuntu workflow exercises a one
 - Prefix cursor validates per-leaf ordering and leaf-chain boundaries, not every item.
 - 1M gate at HEAD 8a78251 passed: 1,535 pages, 172.5 ms build, 0.943 ms for repeated 10k hot lookups, 45.9 ms warm 1M prefix scan, 48.3 MiB builder allocations, 164.4 MiB process max RSS. The first 10k lookups include first-touch validation (192.1 ms).
 - Comparative 1k/10k/100k BenchmarkDotNet matrix at HEAD 8a78251 remains pending. No production routing until that matrix and durable crash/reopen gates pass.
+
+
+## 1.100. Run payload mirror cutover — 2026-11-17
+
+**Implemented on `feature/run-blob-single-file-mapping`; do not mark merged/released until the Storage index benchmark and final PR checks complete.**
+
+- New immutable Storage blobs use metadata v2 and one contiguous `content.blob` file. Metadata v1 page-based blobs remain readable and migrate atomically after streaming length/digest verification.
+- `StorageBlobReader.OpenMappedView()` maps the authoritative blob and transfers its snapshot pin to the mapping lifetime. Active and retired Run mappings retain that pin; cleanup waits for pins to drain.
+- Checkpoint, compaction and FULL_REPLACE now publish Run payloads only to Storage blobs. No new persistent `.fld1` mirrors are written.
+- Legacy `.fld1` files remain a read-only fallback when the Storage blob is absent. If a blob exists, its digest and Run header/namespace must validate before the mirror is removed. Corrupt blob content leaves the mirror in place.
+- FULL_REPLACE pre-switch validation now uses mapped memory instead of materializing each Run as a managed byte array.
+- Metadata v1 migration, crash-retry cleanup, pin fencing, corrupt-blob fallback preservation, and no-mirror publication are covered by tests.
+- Exact-head .NET CI on `30881891a6083d6300e1fdd81a129e0fe2e14022`: Windows, Ubuntu and macOS passed. Storage index scaling benchmark was still running at this checkpoint.
+- Design and migration details: [FLD Run payloads in mapped Storage blobs](FLD-RUN-BLOB-MAPPED-CUTOVER.md).
+
+**Still open:** final Storage index benchmark; Run Mapping Benchmark on the merged working branch; exact source/manifest synchronization into BIN-SYNC; peak RSS, long-history and Windows power-loss release gates. This cutover does not claim the complete Storage engine is out-of-core.

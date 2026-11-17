@@ -37,8 +37,12 @@ public sealed class FldDatabaseStreamingCompactionTests
                 }
 
                 Assert.NotEqual(0UL, database.Compact());
-                Assert.Equal(2, Directory.EnumerateFiles(
-                    Path.Combine(root, "runs"), "*.fld1").Count());
+                Assert.Empty(Directory.EnumerateFiles(
+                    Path.Combine(root, "runs"), "*.fld1"));
+                Assert.True(Directory.EnumerateFiles(
+                    Path.Combine(root, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8)),
+                    "content.blob", SearchOption.AllDirectories).Count() >= 2,
+                    "Both replacement Runs must be published as contiguous Storage blobs.");
 
                 foreach (var field in fields)
                 {
@@ -53,6 +57,9 @@ public sealed class FldDatabaseStreamingCompactionTests
                 Assert.True(reopened.TryGetBytes(recordId, field.FieldId, out byte[]? actual));
                 Assert.Equal(field.Value, actual);
             }
+            Assert.Equal(2, Directory.EnumerateFiles(
+                Path.Combine(root, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8)),
+                "content.blob", SearchOption.AllDirectories).Count());
         }
         finally
         {
