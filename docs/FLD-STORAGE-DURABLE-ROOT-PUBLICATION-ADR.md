@@ -112,9 +112,12 @@ For each boundary, run a child process that exits/crashes, reopen the database, 
 - Add strict committed-length, identity, CRC and reserved-field validation.
 - Keep v1 StorageDatabase routing unchanged.
 
-**Stage D.2 — streaming WAL recovery**
+**Stage D.2 — streaming WAL recovery — implemented 2026-11-17**
 - Add a sequential validated WAL scanner and corruption/torn-tail tests.
 - Prove recovery memory is bounded by one record/batch plus page/cache budgets.
+- The active StorageDatabase open path now uses a two-pass recovery plan: first validate segment continuity and torn-tail boundaries while retaining only segment summaries; then replay one decoded WAL record at a time after loading the snapshot.
+- Sealed-segment inspection during checkpoint also uses the streaming scanner. The compatibility WalManager.Open API still materializes records for existing internal callers/tests.
+- The Storage dictionary and v1 snapshot remain fully materialized; this stage removes the duplicate all-WAL-record collection only. It does not yet prove whole-database bounded-memory recovery.
 
 **Stage D.3 — root publication transaction**
 - Implement copy-on-write batch application and manifest root publication behind an internal/test-only path.
@@ -161,3 +164,10 @@ No production code calls these primitives yet. No v2 manifest is published, no W
 ### Stage D.1 exact-head verification — 2026-11-17
 
 The standalone manifest/file primitive block passed workflow 43984533449 on Ubuntu, macOS 15 and Windows: 322 tests passed on each platform, with zero failures or skips. The independent 1M B+ tree scale gate on the same code lineage (workflow 43984502223) also passed. These results validate the isolated codec/file primitives and existing regression suites only; no production root publication, streaming WAL replay, snapshot pin integration or generation reclamation has been enabled.
+
+
+### Stage D.2 implementation record — 2026-11-17
+
+WAL recovery now has a streaming visitor that validates the same header, envelope CRC, record CRC, padding, sequence order, corruption and torn-tail rules as the materializing reader. It retains one decoded record payload at a time. WalManager performs a validation pass over all segments, records only per-segment sequence/count/end-offset summaries, then returns a recovery plan that re-scans and replays records synchronously. The second pass verifies that the segment summaries still match the validated pass. StorageDatabase.Open now applies snapshot state first and then replays through this plan; sealed-segment checkpoint inspection also avoids materializing a record list.
+
+The compatibility WalManager.Open and WalRecovery.Recover methods remain available internally and retain their materializing behavior. The production StorageDatabase path no longer uses them. This does not remove the v1 Dictionary or SortedList materialization and therefore is not a bounded-memory database-open claim. Next: D.3 copy-on-write batch application and durable root publication, with the full flush/replace/crash matrix.

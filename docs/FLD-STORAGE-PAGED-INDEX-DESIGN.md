@@ -269,3 +269,10 @@ This is Stage D.1 only. The primitives are not connected to StorageDatabase, WAL
 ### 2026-11-17 — Stage D.1 exact-head verification
 
 The durability primitive tests and complete FLD-DB test matrix passed at the D.1 implementation head: workflow 43984533449, Ubuntu/macOS/Windows, 322 tests per platform, zero failures and zero skips. The 1M-entry scale gate on the same code lineage passed in workflow 43984502223. The comparative performance matrix remains the separate Stage C.1 result in workflow 43913464032; D.1 does not change the B+ tree lookup/scan path.
+
+
+### 2026-11-17 — Stage D.2 streaming WAL recovery
+
+StorageDatabase.Open now uses a two-pass WAL recovery plan. The validation pass checks segment continuity and every record without collecting the decoded records; it retains only small per-segment summaries. After the snapshot is loaded, replay scans the segments again and invokes the storage apply callback for one record at a time. The replay pass verifies record count, last CommitSeq and valid end offset against the validation pass. Torn tails are still truncated only in the final segment, and checkpoint sealed-segment inspection also uses the streaming visitor.
+
+The compatibility materializing WAL API remains for internal legacy callers. The active StorageDatabase open path no longer builds the all-record List, but it still loads the v1 Dictionary and snapshot. This is not yet a bounded-memory database-open implementation. D.3 must apply complete WAL batches to copy-on-write pages and durably publish roots before any v2 routing.

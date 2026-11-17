@@ -55,14 +55,36 @@ internal sealed class WalManager : IDisposable
         string walDir,
         ulong partitionId,
         long rotateAfterBytes = 64L * 1024 * 1024)
-        => OpenCore(walDir, partitionId, rotateAfterBytes, faultInjector: null);
+    {
+        var opened = OpenCore(walDir, partitionId, rotateAfterBytes, faultInjector: null, streaming: false);
+        return (opened.manager, opened.records);
+    }
 
     internal static (WalManager manager, List<WalRecoveredRecord> records) OpenForTesting(
         string walDir, ulong partitionId, long rotateAfterBytes, Action<StorageFaultPoint> faultInjector)
-        => OpenCore(walDir, partitionId, rotateAfterBytes, faultInjector);
+    {
+        var opened = OpenCore(walDir, partitionId, rotateAfterBytes, faultInjector, streaming: false);
+        return (opened.manager, opened.records);
+    }
 
-    private static (WalManager manager, List<WalRecoveredRecord> records) OpenCore(
-        string walDir, ulong partitionId, long rotateAfterBytes, Action<StorageFaultPoint>? faultInjector)
+    internal static (WalManager manager, WalRecoveryPlan recovery) OpenStreaming(
+        string walDir,
+        ulong partitionId,
+        long rotateAfterBytes = 64L * 1024 * 1024)
+    {
+        var opened = OpenCore(walDir, partitionId, rotateAfterBytes, faultInjector: null, streaming: true);
+        return (opened.manager, opened.recovery);
+    }
+
+    internal static (WalManager manager, WalRecoveryPlan recovery) OpenStreamingForTesting(
+        string walDir, ulong partitionId, long rotateAfterBytes, Action<StorageFaultPoint> faultInjector)
+    {
+        var opened = OpenCore(walDir, partitionId, rotateAfterBytes, faultInjector, streaming: true);
+        return (opened.manager, opened.recovery);
+    }
+
+    private static (WalManager manager, List<WalRecoveredRecord> records, WalRecoveryPlan recovery) OpenCore(
+        string walDir, ulong partitionId, long rotateAfterBytes, Action<StorageFaultPoint>? faultInjector, bool streaming)
     {
         walDir = Path.GetFullPath(walDir);
         StorageDirectorySync.CreateDirectoryDurable(walDir);
@@ -71,6 +93,7 @@ internal sealed class WalManager : IDisposable
         {
             var segs = ListSegments(walDir, partitionId);
             var allRecords = new List<WalRecoveredRecord>();
+            var recoveredSegments = new List<WalRecoverySegment>();
 
             if (segs.Count == 0)
             {
@@ -90,7 +113,8 @@ internal sealed class WalManager : IDisposable
                     ? WalWriter.OpenForAppend(path, partitionId, WalHeader.Size, nextCommitSeq: 1)
                     : WalWriter.OpenForAppendForTesting(path, partitionId, WalHeader.Size, nextCommitSeq: 1, faultInjector);
                 return (new WalManager(walDir, partitionId, rotateAfterBytes, initialWriter, 0,
-                    writerFence, faultInjector), allRecords);
+                    writerFence, faultInjector), allRecords,
+                    new WalRecoveryPlan(Array.Empty<WalRecoverySegment>(), nextCommitSeq: 1));
             }
 
         ulong? expectedNextSeq = null;
@@ -135,19 +159,34 @@ internal sealed class WalManager : IDisposable
                 expectedNextSeq ??= firstCommitSeq;
             }
 
-            WalRecoveryResult recovered = WalRecovery.Recover(path);
+            WalRecoveryResult recovered;
+            if (streaming)
+            {
+                recovered = WalRecovery.RecoverStreaming(path, record =>
+                {
+                    if (record.CommitSeq != expectedNextSeq!.Value)
+                        throw new InvalidDataException(
+                            $"WAL {path}: CommitSeq {record.CommitSeq}, expected {expectedNextSeq.Value}.");
+                    expectedNextSeq = checked(expectedNextSeq.Value + 1);
+                });
+            }
+            else
+            {
+                recovered = WalRecovery.Recover(path);
+                foreach (var record in recovered.Records)
+                {
+                    if (record.CommitSeq != expectedNextSeq!.Value)
+                        throw new InvalidDataException(
+                            $"WAL {path}: CommitSeq {record.CommitSeq}, expected {expectedNextSeq.Value}.");
+                    expectedNextSeq = checked(expectedNextSeq.Value + 1);
+                }
+                allRecords.AddRange(recovered.Records);
+            }
+
             if (recovered.Status == WalRecoveryStatus.TruncatedTorn && index != segs.Count - 1)
                 throw new InvalidDataException($"WAL {path}: torn tail in a non-final segment.");
             if (recovered.Status is not (WalRecoveryStatus.Ok or WalRecoveryStatus.TruncatedTorn))
                 throw new InvalidDataException($"WAL {path}: {recovered.Status} {recovered.Detail}");
-
-            foreach (var record in recovered.Records)
-            {
-                if (record.CommitSeq != expectedNextSeq!.Value)
-                    throw new InvalidDataException(
-                        $"WAL {path}: CommitSeq {record.CommitSeq}, expected {expectedNextSeq.Value}.");
-                expectedNextSeq = checked(expectedNextSeq.Value + 1);
-            }
 
             if (recovered.Status == WalRecoveryStatus.TruncatedTorn)
             {
@@ -156,7 +195,8 @@ internal sealed class WalManager : IDisposable
                 writable.Flush(flushToDisk: true);
             }
 
-            allRecords.AddRange(recovered.Records);
+            recoveredSegments.Add(new WalRecoverySegment(
+                path, firstCommitSeq, recovered.RecordCount, recovered.LastCommitSeq, recovered.ValidEndOffset));
             lastValidEnd = recovered.ValidEndOffset;
             lastPath = path;
             lastSeg = segment;
@@ -167,7 +207,8 @@ internal sealed class WalManager : IDisposable
                 ? WalWriter.OpenForAppend(lastPath, partitionId, (ulong)lastValidEnd, nextSeq)
                 : WalWriter.OpenForAppendForTesting(lastPath, partitionId, (ulong)lastValidEnd, nextSeq, faultInjector);
             return (new WalManager(walDir, partitionId, rotateAfterBytes, writer, lastSeg,
-                writerFence, faultInjector), allRecords);
+                writerFence, faultInjector), allRecords,
+                new WalRecoveryPlan(recoveredSegments.ToArray(), nextSeq));
         }
         catch
         {
@@ -298,7 +339,7 @@ internal sealed class WalManager : IDisposable
                     break;
 
                 string path = SegmentPath(_walDir, _partitionId, segment);
-                WalRecoveryResult recovered = WalRecovery.Recover(path);
+                WalRecoveryResult recovered = WalRecovery.RecoverStreaming(path, static _ => { });
                 if (recovered.Status is not (WalRecoveryStatus.Ok or WalRecoveryStatus.TruncatedTorn))
                     break;
 

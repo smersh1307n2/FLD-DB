@@ -78,9 +78,9 @@ public sealed class StorageDatabase : IDisposable
         string walDirectory = Path.Combine(directory, "wal");
         // Acquire the partition's exclusive writer fence before reading the snapshot
         // or WAL. Otherwise a second process could race recovery against a checkpoint.
-        var (wal, records) = faultInjector is null
-            ? WalManager.Open(walDirectory, partitionId, walRotateAfterBytes)
-            : WalManager.OpenForTesting(walDirectory, partitionId, walRotateAfterBytes, faultInjector);
+        var (wal, recovery) = faultInjector is null
+            ? WalManager.OpenStreaming(walDirectory, partitionId, walRotateAfterBytes)
+            : WalManager.OpenStreamingForTesting(walDirectory, partitionId, walRotateAfterBytes, faultInjector);
         var database = new StorageDatabase(directory, wal, faultInjector);
         try
         {
@@ -93,19 +93,19 @@ public sealed class StorageDatabase : IDisposable
                 database._snapshotCommitSeq = snapshot.CommitSeq;
                 database._lastCommitSeq = snapshot.CommitSeq;
             }
-            else if (records.Count == 0 && wal.NextCommitSeq != 1)
+            else if (!recovery.HasRecords && wal.NextCommitSeq != 1)
             {
                 throw new InvalidDataException("Storage WAL starts after sequence 1 but no snapshot manifest exists.");
             }
 
-            foreach (var record in records)
+            recovery.Replay(record =>
             {
                 if (record.CommitSeq <= database._lastCommitSeq)
-                    continue;
+                    return;
                 if (record.Kind != BatchCommitKind)
                     throw new InvalidDataException($"Unknown Storage WAL record kind {record.Kind}.");
                 database.ApplyRecovered(record.CommitSeq, record.Payload);
-            }
+            });
 
             if (wal.NextCommitSeq != checked(database._lastCommitSeq + 1))
                 throw new InvalidDataException("Storage snapshot and WAL commit sequence do not form a contiguous recovery chain.");
