@@ -166,16 +166,19 @@ public sealed class StorageCrashConsistencyTests
 
         try
         {
-            StorageBTreeManifestV2 oldRoot;
+            using (var seedDatabase = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 0))
+            {
+                Put(seedDatabase, 0x06, 0x66);
+                Put(seedDatabase, 0x07, 0x77);
+            }
+
+            StorageBTreeManifestV2 oldRoot = StorageBTreeRootPublisher.TryLoad(directory, partitionId)!.Value;
             using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
             {
                 if (armed && point == faultPoint)
                     throw new IOException("Injected B+ tree checkpoint root publication failure.");
             }, walRotateAfterBytes: 0))
             {
-                Put(database, 0x06, 0x66);
-                Put(database, 0x07, 0x77);
-                oldRoot = StorageBTreeRootPublisher.TryLoad(directory, partitionId)!.Value;
                 armed = true;
                 Assert.Throws<IOException>(() => database.Checkpoint());
                 Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x06 }, out _));
