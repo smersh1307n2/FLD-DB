@@ -509,13 +509,16 @@ public sealed class StorageCrashConsistencyTests
                 Assert.Equal(1UL, recovered.LastCommitSeq);
                 Assert.True(recovered.TryGet(new byte[] { 0x31 }, out var value));
                 Assert.Equal(new byte[] { 0x41 }, value);
+                Put(recovered, 0x32, 0x42);
                 recovered.Checkpoint();
             }
 
             using var reopened = StorageDatabase.Open(directory, partitionId);
-            Assert.Equal(1UL, reopened.LastCommitSeq);
+            Assert.Equal(2UL, reopened.LastCommitSeq);
             Assert.True(reopened.TryGet(new byte[] { 0x31 }, out var reopenedValue));
             Assert.Equal(new byte[] { 0x41 }, reopenedValue);
+            Assert.True(reopened.TryGet(new byte[] { 0x32 }, out var secondValue));
+            Assert.Equal(new byte[] { 0x42 }, secondValue);
         }
         finally
         {
