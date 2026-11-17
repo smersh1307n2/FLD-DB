@@ -143,7 +143,7 @@ public sealed class StorageDatabase : IDisposable
                     files.TruncateToCommittedLengths(0, 0);
                     StorageBTreeManifestV2 initial = StorageBTreeGenerationBuilder.Build(
                         files, database._lastCommitSeq, database.CreateBTreeBuildInputs());
-                    StorageBTreeRootPublisher.Publish(directory, initial, files, faultInjector);
+                    StorageBTreeRootPublisher.Publish(directory, initial, files);
                     database._btreeFiles = files;
                     database._btreeManifest = initial;
                 }
@@ -208,6 +208,39 @@ public sealed class StorageDatabase : IDisposable
             IsTombstone: false)).ToArray();
     }
 
+    private StorageTreeBuildInput[] CreateBTreeBuildInputsFromCurrentTree()
+    {
+        StorageBTreeGenerationFiles files = _btreeFiles
+            ?? throw new InvalidOperationException("B+ tree generation files are not open.");
+        StorageBTreeManifestV2 manifest = _btreeManifest;
+        var reader = new StorageBTreeReader(
+            manifest.Generation,
+            manifest.RootPageId,
+            pageId => files.ReadPage(pageId, manifest.CommittedPageFileLength),
+            key => files.ReadData(key.Offset, key.Length, manifest.CommittedDataFileLength));
+
+        var entries = new List<StorageTreeBuildInput>();
+        using StorageBTreePrefixCursor cursor = reader.OpenAllCursor(includeTombstones: true);
+        while (cursor.TryReadNext(out StorageTreeEntry entry))
+        {
+            byte[] key = files.ReadData(
+                entry.Key.Offset, entry.Key.Length, manifest.CommittedDataFileLength);
+            if (entry.Value.IsTombstone)
+            {
+                entries.Add(new StorageTreeBuildInput(
+                    key, ReadOnlyMemory<byte>.Empty, IsTombstone: true));
+            }
+            else
+            {
+                byte[] value = files.ReadData(
+                    entry.Value.Offset, entry.Value.Length, manifest.CommittedDataFileLength);
+                entries.Add(new StorageTreeBuildInput(key, value, IsTombstone: false));
+            }
+        }
+
+        return entries.ToArray();
+    }
+
     public StorageWriteBatch BeginWriteBatch()
     {
         lock (_gate) { EnsureUsable(); return new StorageWriteBatch(this, _lastCommitSeq); }
@@ -254,7 +287,7 @@ public sealed class StorageDatabase : IDisposable
                 compactedFiles = new StorageBTreeGenerationFiles(_directory, PartitionId, nextGeneration);
                 compactedFiles.TruncateToCommittedLengths(0, 0);
                 StorageBTreeManifestV2 compacted = StorageBTreeGenerationBuilder.Build(
-                    compactedFiles, _lastCommitSeq, CreateBTreeBuildInputs());
+                    compactedFiles, _lastCommitSeq, CreateBTreeBuildInputsFromCurrentTree());
                 StorageBTreeRootPublisher.Publish(_directory, compacted, compactedFiles, _faultInjector);
 
                 StorageBTreeGenerationFiles oldFiles = _btreeFiles

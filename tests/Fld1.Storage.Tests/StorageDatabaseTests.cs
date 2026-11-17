@@ -30,6 +30,116 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void BTree_root_recovery_replays_durable_WAL_when_page_flush_precedes_manifest_publish()
+    {
+        const ulong partition = 114;
+        string directory = Path.Combine(_dir, "btree-before-root");
+        bool armed = false;
+
+        using (var db = StorageDatabase.OpenForTesting(directory, partition, point =>
+        {
+            if (armed && point == StorageFaultPoint.AfterBTreePageFlushBeforeManifest)
+                throw new IOException("Injected failure after B+ tree page flush.");
+        }))
+        {
+            armed = true;
+            using var batch = db.BeginWriteBatch();
+            batch.Put("durable-key"u8, "durable-value"u8);
+            Assert.Throws<IOException>(() => batch.Commit());
+            Assert.Throws<InvalidOperationException>(() => db.TryGet("durable-key"u8, out _));
+        }
+
+        using (var recovered = StorageDatabase.Open(directory, partition))
+        {
+            Assert.Equal(1UL, recovered.LastCommitSeq);
+            Assert.True(recovered.TryGet("durable-key"u8, out var value));
+            Assert.Equal("durable-value"u8.ToArray(), value);
+        }
+
+        StorageBTreeManifestV2 root = StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value;
+        Assert.Equal(1UL, root.CommitSeq);
+    }
+
+    [Fact]
+    public void BTree_root_recovery_uses_published_root_when_failure_occurs_after_manifest_replace()
+    {
+        const ulong partition = 115;
+        string directory = Path.Combine(_dir, "btree-after-root");
+        bool armed = false;
+
+        using (var db = StorageDatabase.OpenForTesting(directory, partition, point =>
+        {
+            if (armed && point == StorageFaultPoint.AfterBTreeManifestReplace)
+                throw new IOException("Injected failure after B+ tree root replacement.");
+        }))
+        {
+            armed = true;
+            using var batch = db.BeginWriteBatch();
+            batch.Put("published-key"u8, "published-value"u8);
+            Assert.Throws<IOException>(() => batch.Commit());
+            Assert.Throws<InvalidOperationException>(() => db.TryGet("published-key"u8, out _));
+        }
+
+        using var recovered = StorageDatabase.Open(directory, partition);
+        Assert.Equal(1UL, recovered.LastCommitSeq);
+        Assert.True(recovered.TryGet("published-key"u8, out var value));
+        Assert.Equal("published-value"u8.ToArray(), value);
+        Assert.Equal(1UL, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value.CommitSeq);
+    }
+
+    [Fact]
+    public void Checkpoint_compaction_preserves_BTree_tombstones()
+    {
+        const ulong partition = 116;
+        string directory = Path.Combine(_dir, "btree-tombstone-compaction");
+        using (var db = StorageDatabase.Open(directory, partition))
+        {
+            using (var put = db.BeginWriteBatch())
+            {
+                put.Put("deleted-key"u8, "old-value"u8);
+                put.Commit();
+            }
+
+            using (var delete = db.BeginWriteBatch())
+            {
+                delete.Delete("deleted-key"u8);
+                delete.Commit();
+            }
+
+            db.Checkpoint();
+            Assert.Equal(0, db.Count);
+        }
+
+        StorageBTreeManifestV2 root = StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value;
+        using (var files = new StorageBTreeGenerationFiles(directory, partition, root.Generation))
+        {
+            var reader = new StorageBTreeReader(
+                root.Generation,
+                root.RootPageId,
+                pageId => files.ReadPage(pageId, root.CommittedPageFileLength),
+                key => files.ReadData(key.Offset, key.Length, root.CommittedDataFileLength));
+            using var cursor = reader.OpenAllCursor(includeTombstones: true);
+            StorageTreeEntry tombstone = Assert.Single(ReadAll(cursor));
+            Assert.True(tombstone.Value.IsTombstone);
+            Assert.Equal("deleted-key",
+                System.Text.Encoding.UTF8.GetString(files.ReadData(
+                    tombstone.Key.Offset, tombstone.Key.Length, root.CommittedDataFileLength)));
+        }
+
+        using var reopened = StorageDatabase.Open(directory, partition);
+        Assert.Equal(0, reopened.Count);
+        Assert.False(reopened.TryGet("deleted-key"u8, out _));
+
+        static List<StorageTreeEntry> ReadAll(StorageBTreePrefixCursor cursor)
+        {
+            var entries = new List<StorageTreeEntry>();
+            while (cursor.TryReadNext(out StorageTreeEntry entry))
+                entries.Add(entry);
+            return entries;
+        }
+    }
+
+    [Fact]
     public void Batch_coalesces_repeated_key_updates_and_delete_is_durable()
     {
         using (var db = StorageDatabase.Open(_dir, 102))

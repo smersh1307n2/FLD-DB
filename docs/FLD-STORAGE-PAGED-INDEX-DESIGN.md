@@ -311,3 +311,8 @@ ApplyBatch increments the manifest CommitSeq once per batch and rolls back uncom
 ### Stage D.4 current verification — 2026-11-17
 
 At commit 9fd8b047be667536d63c44db542f689396af4d96, all .NET CI jobs passed on Ubuntu/macOS/Windows with 337 tests per platform and no failures/skips. The 1M-entry scale gate and storage-index benchmark workflows also passed. The COW updater is still internal and not connected to StorageDatabase/WAL transactions.
+
+
+### 2026-11-17 — StorageDatabase WAL/root integration
+
+StorageDatabase now publishes a COW B+ tree root after every durable WAL commit. Recovery validates the WAL first, loads the last published root, truncates only uncommitted generation tails, and replays later WAL records into new COW roots. Checkpoint bulk-builds a compacted generation at the same CommitSeq before WAL segment reclamation. The legacy snapshot remains a temporary migration mirror. Tombstones are included when compacting the tree; live-key reads/snapshots still use the in-memory dictionary cache. No generation reclamation or production page-backed read path is enabled yet.

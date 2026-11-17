@@ -356,15 +356,17 @@ internal sealed class StorageBTreeReader
         return OpenCursorCore(prefix);
     }
 
-    public StorageBTreePrefixCursor OpenAllCursor()
-        => OpenCursorCore(ReadOnlyMemory<byte>.Empty);
+    public StorageBTreePrefixCursor OpenAllCursor(bool includeTombstones = false)
+        => OpenCursorCore(ReadOnlyMemory<byte>.Empty, includeTombstones);
 
-    private StorageBTreePrefixCursor OpenCursorCore(ReadOnlyMemory<byte> prefix)
+    private StorageBTreePrefixCursor OpenCursorCore(
+        ReadOnlyMemory<byte> prefix,
+        bool includeTombstones = false)
     {
         var path = new List<StorageTreePathFrame>();
-        if(_root==0)return new(this,0,0,prefix.ToArray(),path);
+        if(_root==0)return new(this,0,0,prefix.ToArray(),path,includeTombstones);
         ulong id=FindLeaf(prefix.Span,path);var leaf=ReadLeafView(id,out var lease);
-        try { return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),path,leaf,lease); }
+        try { return new(this,id,LowerBound(leaf,prefix.Span),prefix.ToArray(),path,includeTombstones,leaf,lease); }
         catch { lease?.Dispose();throw; }
     }
     internal StorageBTreeLeafPageView ReadLeafView(ulong id,out StoragePageCacheLease? lease)
@@ -546,13 +548,16 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
 {
     private readonly StorageBTreeReader _reader;private readonly byte[] _prefix;
     private readonly List<StorageTreePathFrame> _path;
+    private readonly bool _includeTombstones;
     private ulong _page;private int _index;private bool _entered,_finished,_disposed,_leafFullyMatches;private StorageTreeKeyReference? _previousLeafLastKey;
     private StorageBTreeLeafPageView? _leafPage;
     private StoragePageCacheLease? _leafLease;
     internal StorageBTreePrefixCursor(StorageBTreeReader reader,ulong page,int index,byte[] prefix,
-        List<StorageTreePathFrame> path,StorageBTreeLeafPageView? initialLeaf=null,StoragePageCacheLease? initialLease=null)
+        List<StorageTreePathFrame> path,bool includeTombstones=false,
+        StorageBTreeLeafPageView? initialLeaf=null,StoragePageCacheLease? initialLease=null)
     {
-        _reader=reader;_page=page;_index=index;_prefix=prefix;_path=path;_finished=page==0;
+        _reader=reader;_page=page;_index=index;_prefix=prefix;_path=path;
+        _includeTombstones=includeTombstones;_finished=page==0;
         _leafPage=initialLeaf;_leafLease=initialLease;_entered=initialLeaf.HasValue;
     }
     public bool TryReadNext(out StorageTreeEntry entry)
@@ -577,7 +582,7 @@ internal sealed class StorageBTreePrefixCursor:IDisposable
             {
                 var e=leaf.GetEntry(_index++);
                 if(!_leafFullyMatches&&!_reader.HasPrefix(e.Key,_prefix)){_finished=true;break;}
-                if(!e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
+                if(_includeTombstones || !e.Value.IsTombstone){entry=new(e.Key,e.Value);return true;}
             }
             if(leaf.Count>0)_previousLeafLastKey=leaf.GetEntry(leaf.Count-1).Key;
             _leafLease?.Dispose();_leafLease=null;

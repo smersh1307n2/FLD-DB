@@ -222,3 +222,12 @@ Latest verification at commit 9fd8b047be667536d63c44db542f689396af4d96: .NET CI 
 The internal ApplyAndPublish entry point now requires an `appendAndFlushWal` callback and verifies that the durable WAL sequence equals current CommitSeq + 1 before writing any generation bytes. A mismatch is rejected without touching page/data files or the published root. Once the WAL callback succeeds, any subsequent page/root failure is a recovery event: reopen must reconcile the durable WAL record with the last published root. This keeps the recovery authority explicit in the API instead of relying only on a comment.
 
 A full-capacity internal-root split regression constructs a root with exactly MaxInternalChildren leaves, inserts enough keys into one leaf to split it, and verifies the parent splits into two internal pages beneath a new root. The test also verifies prefix traversal and lookup through the increased tree height.
+
+
+### Stage D.5 — StorageDatabase WAL/root integration
+
+The v2 root is now the durable base for StorageDatabase. Open validates the WAL plan, loads the published B+ tree root, truncates only generation-file tails beyond the root high-water marks, materializes the live-key cache from the tree, and replays only WAL records newer than root.CommitSeq. Legacy snapshots are validated and used for one-time migration when no v2 root exists.
+
+Commit now follows the enforced order: append the batch WAL record, flush it, apply a path-copy COW batch, flush data/pages, atomically publish the root, then update the in-memory live-key cache. A failure after WAL durability faults the current instance; reopen resolves whether the old or new root was published and replays only if needed. Checkpoint compacts the append-only tree into a fresh generation at the same CommitSeq, publishes that root, writes the legacy snapshot mirror for migration compatibility, and only then truncates sealed WAL segments. Old B+ tree generations are retained; generation GC is still disabled.
+
+The compaction path reads tombstones from the current tree and writes them into the new generation. Normal StorageDatabase lookups and snapshots still use the live-key dictionary cache; routing read paths directly through B+ tree pages is a later phase. Child-process power-loss tests and broader concurrent reader/writer tests remain pending.
