@@ -366,7 +366,7 @@ internal static class StorageBTreeUpdater
         ulong id = rootPageId;
         for (int depth = 0; depth < 64; depth++)
         {
-            byte[] bytes = files.ReadPage(id, files.PageFileLength);
+            byte[] bytes = pageReadCache.Read(files, id, files.PageFileLength);
             StoragePageView page = StoragePageCodec.Decode(bytes, files.Generation, id);
             if (page.Kind == StoragePageKind.Leaf)
                 return id;
