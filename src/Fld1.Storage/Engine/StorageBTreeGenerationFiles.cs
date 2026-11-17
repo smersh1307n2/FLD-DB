@@ -16,7 +16,6 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
     public StorageBTreeGenerationFiles(string databaseDirectory, ulong partitionId, ulong generation)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseDirectory);
-        if (partitionId == 0) throw new ArgumentOutOfRangeException(nameof(partitionId));
         if (generation == 0) throw new ArgumentOutOfRangeException(nameof(generation));
 
         _partitionId = partitionId;

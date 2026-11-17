@@ -104,8 +104,8 @@ internal static class StorageBTreeManifestCodec
 
     private static void Validate(in StorageBTreeManifestV2 manifest)
     {
-        if (manifest.PartitionId == 0 || manifest.Generation == 0)
-            throw new InvalidDataException("Paged Storage manifest identity must be non-zero.");
+        // Partition zero is a valid Storage namespace (used by the FLD database
+        // default namespace). Only generation zero is reserved.
         if (manifest.PageSize != StoragePageCodec.PageSize)
             throw new InvalidDataException("Paged Storage manifest page size is unsupported.");
         if (manifest.CommittedPageFileLength > (ulong)long.MaxValue ||

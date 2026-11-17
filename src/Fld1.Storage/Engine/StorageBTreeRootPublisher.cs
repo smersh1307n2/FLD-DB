@@ -69,8 +69,6 @@ internal static class StorageBTreeRootPublisher
     public static StorageBTreeManifestV2? TryLoad(string databaseDirectory, ulong partitionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseDirectory);
-        if (partitionId == 0) throw new ArgumentOutOfRangeException(nameof(partitionId));
-
         string snapshots = Path.Combine(databaseDirectory, "snapshots");
         string manifestPath = ManifestPath(snapshots, partitionId);
         if (!File.Exists(manifestPath))
