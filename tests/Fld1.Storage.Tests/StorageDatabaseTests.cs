@@ -193,6 +193,53 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Database_point_reads_follow_BTree_after_multileaf_COW_and_checkpoint()
+    {
+        const ulong partition = 117;
+        string directory = Path.Combine(_dir, "btree-point-reads");
+        using (var db = StorageDatabase.Open(directory, partition))
+        {
+            using (var seed = db.BeginWriteBatch())
+            {
+                for (int i = 0; i < 600; i++)
+                    seed.Put(System.Text.Encoding.UTF8.GetBytes($"key-{i:D4}"),
+                        System.Text.Encoding.UTF8.GetBytes($"value-{i:D4}"));
+                seed.Commit();
+            }
+
+            foreach (int i in new[] { 0, 31, 127, 255, 511, 599 })
+            {
+                Assert.True(db.TryGet(System.Text.Encoding.UTF8.GetBytes($"key-{i:D4}"), out var value));
+                Assert.Equal(System.Text.Encoding.UTF8.GetBytes($"value-{i:D4}"), value);
+            }
+
+            using (var update = db.BeginWriteBatch())
+            {
+                for (int i = 0; i < 600; i += 37)
+                    update.Put(System.Text.Encoding.UTF8.GetBytes($"key-{i:D4}"),
+                        System.Text.Encoding.UTF8.GetBytes($"updated-{i:D4}"));
+                for (int i = 10; i < 600; i += 41)
+                    update.Delete(System.Text.Encoding.UTF8.GetBytes($"key-{i:D4}"));
+                update.Commit();
+            }
+
+            Assert.True(db.TryGet("key-0000"u8, out var changed));
+            Assert.Equal("updated-0000"u8.ToArray(), changed);
+            Assert.False(db.TryGet("key-0010"u8, out _));
+            db.Checkpoint();
+            Assert.True(db.TryGet("key-0599"u8, out var last));
+            Assert.Equal("updated-0599"u8.ToArray(), last);
+        }
+
+        using var reopened = StorageDatabase.Open(directory, partition);
+        Assert.True(reopened.TryGet("key-0000"u8, out var persisted));
+        Assert.Equal("updated-0000"u8.ToArray(), persisted);
+        Assert.False(reopened.TryGet("key-0010"u8, out _));
+        Assert.True(reopened.TryGet("key-0599"u8, out var final));
+        Assert.Equal("updated-0599"u8.ToArray(), final);
+    }
+
+    [Fact]
     public void Partitions_are_isolated_even_when_keys_match()
     {
         using var one = StorageDatabase.Open(Path.Combine(_dir, "one"), 1);
