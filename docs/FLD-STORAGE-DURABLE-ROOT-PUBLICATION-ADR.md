@@ -215,3 +215,10 @@ Tests cover leaf split, existing-value replacement, insert, existing/new tombsto
 The path-copy COW updater and tree-order prefix cursor are present on the PR branch. It groups sorted mutations by target leaf, rewrites each affected leaf and its ancestor path, handles leaf/internal page splits, retains tombstones, and publishes a single incremented CommitSeq root. The updater remains an internal prototype: the caller must append the matching WAL batch durably before publishing; StorageDatabase does not yet route normal writes through it.
 
 Latest verification at commit 9fd8b047be667536d63c44db542f689396af4d96: .NET CI passed on Ubuntu, macOS 15 and Windows (337 tests per platform, zero failures/skips); the 1M-entry scale gate and storage-index benchmark workflows passed. These results do not satisfy the pending WAL/root crash matrix or authorize production routing.
+
+
+### Stage D.4.1 — enforce WAL-before-COW publication contract
+
+The internal ApplyAndPublish entry point now requires an `appendAndFlushWal` callback and verifies that the durable WAL sequence equals current CommitSeq + 1 before writing any generation bytes. A mismatch is rejected without touching page/data files or the published root. Once the WAL callback succeeds, any subsequent page/root failure is a recovery event: reopen must reconcile the durable WAL record with the last published root. This keeps the recovery authority explicit in the API instead of relying only on a comment.
+
+A full-capacity internal-root split regression constructs a root with exactly MaxInternalChildren leaves, inserts enough keys into one leaf to split it, and verifies the parent splits into two internal pages beneath a new root. The test also verifies prefix traversal and lookup through the increased tree height.

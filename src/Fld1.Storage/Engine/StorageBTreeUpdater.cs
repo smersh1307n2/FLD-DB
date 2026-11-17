@@ -117,8 +117,19 @@ internal static class StorageBTreeUpdater
         in StorageBTreeManifestV2 current,
         StorageBTreeGenerationFiles files,
         IReadOnlyList<StorageTreeMutation> mutations,
+        Func<ulong> appendAndFlushWal,
         Action<StorageFaultPoint>? faultInjector = null)
     {
+        ArgumentNullException.ThrowIfNull(appendAndFlushWal);
+        ulong expectedCommitSeq = checked(current.CommitSeq + 1);
+        ulong durableCommitSeq = appendAndFlushWal();
+        if (durableCommitSeq != expectedCommitSeq)
+            throw new InvalidDataException(
+                $"B+ tree COW batch requires durable WAL CommitSeq {expectedCommitSeq}, received {durableCommitSeq}.");
+
+        // WAL is the recovery authority. If page writing or root publication fails
+        // after this point, reopen/recovery must replay the durable batch or publish
+        // a root at this CommitSeq; never truncate the WAL entry as an ordinary retry.
         StorageBTreeManifestV2 next = ApplyBatch(current, files, mutations);
         StorageBTreeRootPublisher.Publish(databaseDirectory, next, files, faultInjector);
         return next;

@@ -155,7 +155,17 @@ public sealed class StorageBTreeUpdaterTests
             StorageBTreeManifestV2 next;
             using (var files = new StorageBTreeGenerationFiles(directory, partition, generation))
             {
-                next = StorageBTreeUpdater.ApplyAndPublish(directory, empty, files, mutations);
+                bool walDurable = false;
+                ulong pageLengthBeforeWal = files.PageFileLength;
+                next = StorageBTreeUpdater.ApplyAndPublish(
+                    directory, empty, files, mutations,
+                    appendAndFlushWal: () =>
+                    {
+                        Assert.Equal(pageLengthBeforeWal, files.PageFileLength);
+                        walDurable = true;
+                        return empty.CommitSeq + 1;
+                    });
+                Assert.True(walDurable);
                 Assert.NotEqual(0UL, next.RootPageId);
             }
 
@@ -271,6 +281,127 @@ public sealed class StorageBTreeUpdaterTests
             Assert.True(reopenedReader.TryGet("key-00700"u8, out StorageTreeValueReference reopenedValue));
             Assert.Equal("updated-second-leaf",
                 Encoding.UTF8.GetString(reopened.ReadData(reopenedValue.Offset, reopenedValue.Length, next.CommittedDataFileLength)));
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void COW_batch_requires_matching_durable_WAL_sequence_before_writing_pages()
+    {
+        string directory = NewDirectory();
+        const ulong partition = 106;
+        const ulong generation = 1;
+        try
+        {
+            StorageBTreeManifestV2 current = BuildInitial(directory, partition, generation, 50);
+            var mutations = new[]
+            {
+                new StorageTreeMutation("key-00010x"u8.ToArray(), "value"u8.ToArray(), false)
+            };
+            using var files = new StorageBTreeGenerationFiles(directory, partition, generation);
+            ulong pageLength = files.PageFileLength;
+            ulong dataLength = files.DataFileLength;
+
+            Assert.Throws<InvalidDataException>(() =>
+                StorageBTreeUpdater.ApplyAndPublish(
+                    directory, current, files, mutations,
+                    appendAndFlushWal: () => current.CommitSeq + 2));
+
+            Assert.Equal(pageLength, files.PageFileLength);
+            Assert.Equal(dataLength, files.DataFileLength);
+            Assert.Equal(current, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void COW_batch_splits_a_full_internal_root_and_grows_tree_height()
+    {
+        string directory = NewDirectory();
+        const ulong partition = 107;
+        const ulong generation = 1;
+        try
+        {
+            StorageBTreeManifestV2 current;
+            using (var files = new StorageBTreeGenerationFiles(directory, partition, generation))
+            {
+                int childCapacity = StorageBTreePageCodec.MaxInternalChildren;
+                var children = new StorageTreeChild[childCapacity];
+                for (int i = 0; i < childCapacity; i++)
+                {
+                    byte[] keyBytes = Encoding.UTF8.GetBytes($"{i * 100:D6}");
+                    byte[] valueBytes = "v"u8.ToArray();
+                    ulong keyOffset = files.AppendData(keyBytes);
+                    ulong valueOffset = files.AppendData(valueBytes);
+                    var key = new StorageTreeKeyReference(keyOffset, keyBytes.Length);
+                    ulong pageId = (ulong)i + 1;
+                    var entry = new StorageTreeLeafEntry(
+                        key,
+                        new StorageTreeValueReference(valueOffset, valueBytes.Length, false));
+                    files.AppendPage(pageId,
+                        StorageBTreePageCodec.EncodeLeaf(generation, pageId, 0, new[] { entry }));
+                    children[i] = new StorageTreeChild(pageId, key);
+                }
+
+                ulong rootPageId = (ulong)childCapacity + 1;
+                var separators = children.Skip(1).ToArray();
+                files.AppendPage(rootPageId,
+                    StorageBTreePageCodec.EncodeInternal(
+                        generation, rootPageId, children[0].PageId, separators));
+                current = new StorageBTreeManifestV2(
+                    partition, generation, 1, rootPageId,
+                    files.PageFileLength, files.DataFileLength,
+                    StoragePageCodec.PageSize, FormatFlags: 0);
+                StorageBTreeRootPublisher.Publish(directory, current, files);
+            }
+
+            var mutations = new StorageTreeMutation[StorageBTreePageCodec.MaxLeafEntries];
+            for (int i = 0; i < mutations.Length; i++)
+            {
+                mutations[i] = new StorageTreeMutation(
+                    Encoding.UTF8.GetBytes($"000000-{i:D4}"),
+                    Encoding.UTF8.GetBytes($"inserted-{i:D4}"),
+                    false);
+            }
+
+            StorageBTreeManifestV2 next;
+            using (var files = new StorageBTreeGenerationFiles(directory, partition, generation))
+            {
+                next = StorageBTreeUpdater.ApplyBatch(current, files, mutations);
+                Assert.NotEqual(current.RootPageId, next.RootPageId);
+                StorageBTreePageView rootPage = StoragePageCodec.Decode(
+                    files.ReadPage(next.RootPageId, next.CommittedPageFileLength),
+                    generation, next.RootPageId);
+                StorageTreeInternalPage root = StorageBTreePageCodec.DecodeInternal(rootPage);
+                Assert.Single(root.Separators);
+
+                StorageTreeInternalPage left = StorageBTreePageCodec.DecodeInternal(
+                    StoragePageCodec.Decode(
+                        files.ReadPage(root.FirstChild, next.CommittedPageFileLength),
+                        generation, root.FirstChild));
+                ulong rightId = root.Separators[0].PageId;
+                StorageTreeInternalPage right = StorageBTreePageCodec.DecodeInternal(
+                    StoragePageCodec.Decode(
+                        files.ReadPage(rightId, next.CommittedPageFileLength),
+                        generation, rightId));
+                Assert.Equal(childCapacity + 1, left.Separators.Length + right.Separators.Length + 2);
+
+                var reader = CreateReader(files, next);
+                Assert.True(reader.TryGet("000000-0653"u8, out _));
+                Assert.True(reader.TryGet("081800"u8, out _));
+                using var cursor = reader.OpenPrefixCursor("000000"u8.ToArray());
+                int count = 0;
+                while (cursor.TryReadNext(out _)) count++;
+                Assert.Equal(StorageBTreePageCodec.MaxLeafEntries + 1, count);
+            }
+
+            Assert.Equal(next, StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value);
         }
         finally
         {
