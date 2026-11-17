@@ -193,6 +193,40 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Snapshot_pins_old_BTree_generation_until_disposed_after_checkpoint()
+    {
+        const ulong partition = 118;
+        string directory = Path.Combine(_dir, "btree-snapshot-generation-pin");
+        using var db = StorageDatabase.Open(directory, partition);
+        using (var seed = db.BeginWriteBatch())
+        {
+            seed.Put("stable"u8, "before"u8);
+            seed.Commit();
+        }
+
+        StorageBTreeManifestV2 oldRoot = StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value;
+        var snapshot = db.OpenSnapshot();
+        using (var update = db.BeginWriteBatch())
+        {
+            update.Put("stable"u8, "after"u8);
+            update.Commit();
+        }
+
+        db.Checkpoint();
+        StorageBTreeManifestV2 newRoot = StorageBTreeRootPublisher.TryLoad(directory, partition)!.Value;
+        Assert.NotEqual(oldRoot.Generation, newRoot.Generation);
+        Assert.True(snapshot.TryGet("stable"u8, out var oldValue));
+        Assert.Equal("before"u8.ToArray(), oldValue);
+        string oldPages = Path.Combine(directory, "snapshots", $"p_{partition}.{oldRoot.Generation}.pages");
+        Assert.True(File.Exists(oldPages));
+
+        snapshot.Dispose();
+        Assert.False(File.Exists(oldPages));
+        Assert.True(db.TryGet("stable"u8, out var currentValue));
+        Assert.Equal("after"u8.ToArray(), currentValue);
+    }
+
+    [Fact]
     public void Database_point_reads_follow_BTree_after_multileaf_COW_and_checkpoint()
     {
         const ulong partition = 117;
