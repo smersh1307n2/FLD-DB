@@ -98,7 +98,20 @@ internal sealed class StorageBTreeReaderCache
                 _hot.Remove(key);
             foreach (ValidatedPageKey key in _validated.Where(key => key.Generation == generation).ToArray())
                 _validated.Remove(key);
+
+            // Remove stale FIFO nodes as well; otherwise repeated generation retirement
+            // and reuse could grow the queues without bound or evict a newer duplicate key.
+            RebuildQueue(_hotOrder, key => _hot.ContainsKey(key));
+            RebuildQueue(_validatedOrder, key => _validated.Contains(key));
         }
+    }
+
+    private static void RebuildQueue<T>(Queue<T> queue, Func<T, bool> keep)
+    {
+        T[] retained = queue.Where(keep).ToArray();
+        queue.Clear();
+        foreach (T item in retained)
+            queue.Enqueue(item);
     }
 
     private static ulong HashKey(ReadOnlySpan<byte> key)
