@@ -490,16 +490,18 @@ public sealed class StorageCrashConsistencyTests
         StorageFaultPoint faultPoint = (StorageFaultPoint)faultPointValue;
         const ulong partitionId = 921;
         string directory = Path.Combine(_root, "checkpoint-fault-" + faultPoint);
+        bool armed = false;
 
         try
         {
             using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
             {
-                if (point == faultPoint)
+                if (armed && point == faultPoint)
                     throw new IOException("Injected B+ tree checkpoint publication boundary failure.");
             }))
             {
                 Put(database, 0x31, 0x41);
+                armed = true;
                 Assert.Throws<IOException>(() => database.Checkpoint());
                 Assert.Throws<InvalidOperationException>(() => database.TryGet(new byte[] { 0x31 }, out _));
             }
