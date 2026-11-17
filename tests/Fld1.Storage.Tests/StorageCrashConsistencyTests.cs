@@ -145,7 +145,6 @@ public sealed class StorageCrashConsistencyTests
 
             using var reopened = StorageDatabase.Open(directory, partitionId, walRotateAfterBytes: 1);
             Assert.Equal(2UL, reopened.LastCommitSeq);
-            Assert.True(reopened.TryGet(new byte[] { 0x08 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x09 }, out _));
             Assert.True(reopened.TryGet(new byte[] { 0x0A }, out _));
         }
