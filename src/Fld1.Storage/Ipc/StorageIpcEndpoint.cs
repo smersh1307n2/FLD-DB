@@ -164,6 +164,10 @@ public static class StorageIpcEndpoint
         {
             endpoint = JsonSerializer.Deserialize<StorageIpcEndpointInfo>(ReadEndpointBytes(path));
         }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
         catch (JsonException)
         {
             return false;
