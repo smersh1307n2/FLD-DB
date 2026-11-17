@@ -6,15 +6,20 @@ namespace Fld1.Engine.Db;
 /// replacement generation and no pending source/relay reference can resurrect it.
 /// </summary>
 public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandidate>
+/// <summary>
+/// Stores the three binary identities in one owned buffer. Keeping separate arrays
+/// for RecordId, ChangeId and AuthorNodeId multiplied short-lived allocations for
+/// every tombstone examined by a full namespace sweep.
+/// </summary>
 {
-    private readonly byte[] _recordId;
-    private readonly byte[] _changeId;
-    private readonly byte[] _authorNodeId;
+    private readonly byte[] _identity;
+    private readonly int _changeIdLength;
+    private readonly int _authorNodeIdLength;
 
-    public ReadOnlyMemory<byte> RecordId => _recordId;
+    public ReadOnlyMemory<byte> RecordId => _identity.AsMemory(0, 16);
     public ushort FieldId { get; }
-    public ReadOnlyMemory<byte> ChangeId => _changeId;
-    public ReadOnlyMemory<byte> AuthorNodeId => _authorNodeId;
+    public ReadOnlyMemory<byte> ChangeId => _identity.AsMemory(16, _changeIdLength);
+    public ReadOnlyMemory<byte> AuthorNodeId => _identity.AsMemory(16 + _changeIdLength, _authorNodeIdLength);
     public ulong HlcWall { get; }
     public uint HlcLogical { get; }
     public uint OriginAuthorEpoch { get; }
@@ -34,7 +39,7 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
         bool isRecordTombstone,
         bool isFieldTombstone)
         : this(
-            CopyAndValidate(recordId, fieldId, changeId, authorNodeId,
+            CopyAndValidate(recordId.Span, fieldId, changeId.Span, authorNodeId.Span,
                 isRecordTombstone, isFieldTombstone),
             fieldId, hlcWall, hlcLogical, originAuthorEpoch, originSequence,
             isRecordTombstone, isFieldTombstone)
@@ -42,7 +47,7 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
     }
 
     private FldTombstoneGcCandidate(
-        (byte[] RecordId, byte[] ChangeId, byte[] AuthorNodeId) identity,
+        (byte[] Identity, int ChangeIdLength, int AuthorNodeIdLength) identity,
         ushort fieldId,
         ulong hlcWall,
         uint hlcLogical,
@@ -51,9 +56,9 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
         bool isRecordTombstone,
         bool isFieldTombstone)
     {
-        _recordId = identity.RecordId;
-        _changeId = identity.ChangeId;
-        _authorNodeId = identity.AuthorNodeId;
+        _identity = identity.Identity;
+        _changeIdLength = identity.ChangeIdLength;
+        _authorNodeIdLength = identity.AuthorNodeIdLength;
         FieldId = fieldId;
         HlcWall = hlcWall;
         HlcLogical = hlcLogical;
@@ -64,10 +69,10 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
     }
 
     internal static FldTombstoneGcCandidate CreateOwned(
-        byte[] recordId,
+        byte[] identity,
+        int changeIdLength,
+        int authorNodeIdLength,
         ushort fieldId,
-        byte[] changeId,
-        byte[] authorNodeId,
         ulong hlcWall,
         uint hlcLogical,
         uint originAuthorEpoch,
@@ -75,24 +80,32 @@ public readonly struct FldTombstoneGcCandidate : IEquatable<FldTombstoneGcCandid
         bool isRecordTombstone,
         bool isFieldTombstone)
     {
-        ValidateIdentity(recordId.Length, fieldId, changeId.Length, authorNodeId.Length,
+        if (identity is null)
+            throw new ArgumentNullException(nameof(identity));
+        ValidateIdentity(16, fieldId, changeIdLength, authorNodeIdLength,
             isRecordTombstone, isFieldTombstone);
+        if (identity.Length != 16 + changeIdLength + authorNodeIdLength)
+            throw new ArgumentException("FLD tombstone candidate identity buffer has an invalid length.", nameof(identity));
         return new FldTombstoneGcCandidate(
-            (recordId, changeId, authorNodeId), fieldId, hlcWall, hlcLogical,
+            (identity, changeIdLength, authorNodeIdLength), fieldId, hlcWall, hlcLogical,
             originAuthorEpoch, originSequence, isRecordTombstone, isFieldTombstone);
     }
 
-    private static (byte[] RecordId, byte[] ChangeId, byte[] AuthorNodeId) CopyAndValidate(
-        ReadOnlyMemory<byte> recordId,
+    private static (byte[] Identity, int ChangeIdLength, int AuthorNodeIdLength) CopyAndValidate(
+        ReadOnlySpan<byte> recordId,
         ushort fieldId,
-        ReadOnlyMemory<byte> changeId,
-        ReadOnlyMemory<byte> authorNodeId,
+        ReadOnlySpan<byte> changeId,
+        ReadOnlySpan<byte> authorNodeId,
         bool isRecordTombstone,
         bool isFieldTombstone)
     {
         ValidateIdentity(recordId.Length, fieldId, changeId.Length, authorNodeId.Length,
             isRecordTombstone, isFieldTombstone);
-        return (recordId.ToArray(), changeId.ToArray(), authorNodeId.ToArray());
+        byte[] identity = new byte[recordId.Length + changeId.Length + authorNodeId.Length];
+        recordId.CopyTo(identity);
+        changeId.CopyTo(identity.AsSpan(recordId.Length));
+        authorNodeId.CopyTo(identity.AsSpan(recordId.Length + changeId.Length));
+        return (identity, changeId.Length, authorNodeId.Length);
     }
 
     private static void ValidateIdentity(
