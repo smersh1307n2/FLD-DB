@@ -150,10 +150,23 @@ public sealed class RunBuilder
         MarkBuildDiagnostic("author-intern", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
             $"Authors={authors.Count}");
 
+        // Count groups and provenance rows first so the planning lists allocate once
+        // at exact capacity instead of repeatedly growing during the 250k-record pass.
+        Span<FieldWrite> sortedSpan = CollectionsMarshal.AsSpan(sortedWinners);
+        int clusterCount = 0;
+        int provenanceCount = 0;
+        for (int i = 0; i < sortedSpan.Length; i++)
+        {
+            if (i == 0 || !ByteUtil.Equals16(sortedSpan[i - 1].RecordId, sortedSpan[i].RecordId))
+                clusterCount++;
+            if (sortedSpan[i].ChangeId.Length == 16)
+                provenanceCount++;
+        }
+
         // First pass plans cluster layout without allocating one byte[] per cluster.
-        var provenanceEntries = new List<FieldWrite>();
-        var clusterPlans = new List<ClusterPlan>();
-        var clusterRecordIds = new List<byte[]>();
+        var provenanceEntries = new List<FieldWrite>(provenanceCount);
+        var clusterPlans = new List<ClusterPlan>(clusterCount);
+        var clusterRecordIds = new List<byte[]>(clusterCount);
         uint totalFields = 0;
         uint aliveFields = 0;
         bool anyHlcOverride = false;
@@ -162,7 +175,6 @@ public sealed class RunBuilder
         int externalCount = 0;
         int externalBlobBytes = 0;
 
-        Span<FieldWrite> sortedSpan = CollectionsMarshal.AsSpan(sortedWinners);
         int recordStart = 0;
         while (recordStart < sortedSpan.Length)
         {
@@ -231,9 +243,12 @@ public sealed class RunBuilder
             int pad = (8 - (clusterSize % 8)) % 8;
             clusterSize += pad;
 
+            byte planFlags = 0;
+            if (dead) planFlags |= 0x01;
+            if (clusterHasExternal) planFlags |= 0x02;
             clusterPlans.Add(new ClusterPlan(
-                groupStart, recordEnd, clusterSize, overrideCount,
-                mode.Wall, mode.Logical, mode.InternId, dead, clusterHasExternal));
+                groupStart, recordEnd, clusterSize, checked((ushort)overrideCount),
+                mode.Wall, mode.Logical, mode.InternId, planFlags));
         }
 
         var externalEntries = new List<ExternalEntry>(externalCount);
@@ -524,12 +539,15 @@ public sealed class RunBuilder
         int Start,
         int End,
         int Size,
-        int OverrideCount,
+        ushort OverrideCount,
         ulong Wall,
         uint Logical,
         uint InternId,
-        bool Dead,
-        bool HasExternal);
+        byte Flags)
+    {
+        public bool Dead => (Flags & 0x01) != 0;
+        public bool HasExternal => (Flags & 0x02) != 0;
+    }
 
     private static void MarkBuildDiagnostic(
         string stage, string? path, ref long allocatedBefore, ref long startedTicks, string? detail = null)
