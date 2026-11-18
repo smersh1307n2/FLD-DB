@@ -52,6 +52,8 @@ internal static class StorageBTreeUpdater
         long leafWriteAllocated = 0;
         long pathRewriteAllocated = 0;
         var pageReadCache = new BatchPageReadCache();
+        Func<StorageTreeKeyReference, ReadOnlyMemory<byte>> readKey =
+            reference => pageReadCache.ReadKey(files, reference);
 
         ulong nextCommitSeq = checked(current.CommitSeq + 1);
         ulong nextPageId = checked(current.CommittedPageFileLength / StoragePageCodec.PageSize + 1);
@@ -66,16 +68,14 @@ internal static class StorageBTreeUpdater
                 var path = new List<StorageTreePathFrame>();
                 ulong leafId = rootPageId == 0
                     ? 0
-                    : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache);
+                    : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache, readKey);
 
                 int end = start + 1;
-                var candidatePath = new List<StorageTreePathFrame>();
                 while (end < mutations.Count)
                 {
-                    candidatePath.Clear();
                     ulong candidate = rootPageId == 0
                         ? 0
-                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, candidatePath, pageReadCache);
+                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, path: null, pageReadCache, readKey);
                     if (candidate != leafId)
                         break;
                     end++;
@@ -397,8 +397,9 @@ internal static class StorageBTreeUpdater
         ulong rootPageId,
         ReadOnlySpan<byte> key,
         StorageBTreeGenerationFiles files,
-        List<StorageTreePathFrame> path,
-        BatchPageReadCache pageReadCache)
+        List<StorageTreePathFrame>? path,
+        BatchPageReadCache pageReadCache,
+        Func<StorageTreeKeyReference, ReadOnlyMemory<byte>> readKey)
     {
         ulong id = rootPageId;
         for (int depth = 0; depth < 64; depth++)
@@ -409,9 +410,8 @@ internal static class StorageBTreeUpdater
 
             StorageTreeInternalPage node =
                 pageReadCache.ReadInternal(files, id, files.PageFileLength);
-            int childIndex = StorageBTreePageCodec.SelectInternalChildIndex(
-                page, key, reference => pageReadCache.ReadKey(files, reference));
-            path.Add(new StorageTreePathFrame(id, childIndex));
+            int childIndex = StorageBTreePageCodec.SelectInternalChildIndex(page, key, readKey);
+            path?.Add(new StorageTreePathFrame(id, childIndex));
             id = StorageBTreePageCodec.GetInternalChild(node, childIndex);
         }
 
