@@ -32,6 +32,9 @@ public sealed class StorageDatabase : IDisposable
     private bool _faulted;
     private ulong _lastCommitSeq;
 
+    // Optional test-only observer; null in production keeps the commit path inert.
+    internal Action<string, long>? AllocationObserver { get; set; }
+
     public ulong PartitionId => _wal.PartitionId;
     /// <summary>Canonical directory containing this Storage partition.</summary>
     public string DirectoryPath => _directory;
@@ -444,6 +447,16 @@ public sealed class StorageDatabase : IDisposable
 
     internal ulong Commit(IReadOnlyCollection<StorageMutation> mutations, ulong expectedBaseCommitSeq)
     {
+        Action<string, long>? observer = AllocationObserver;
+        long allocationCheckpoint = observer is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
+        void ReportAllocation(string phase)
+        {
+            if (observer is null) return;
+            long allocated = GC.GetTotalAllocatedBytes(precise: true);
+            observer(phase, allocated - allocationCheckpoint);
+            allocationCheckpoint = allocated;
+        }
+
         lock (_gate)
         {
             EnsureUsable();
@@ -463,7 +476,9 @@ public sealed class StorageDatabase : IDisposable
                 else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
             }
 
+            ReportAllocation("storage-live-count-validation");
             byte[] payload = EncodeBatch(mutations);
+            ReportAllocation("storage-wal-batch-encoding");
             try
             {
                 StorageBTreeGenerationFiles files = _btreeFiles
@@ -472,6 +487,7 @@ public sealed class StorageDatabase : IDisposable
                     .OrderBy(x => new StorageKey(x.Key), StorageKeyComparer.Instance)
                     .Select(x => new StorageTreeMutation(x.Key, x.Value, x.IsDelete))
                     .ToArray();
+                ReportAllocation("storage-tree-mutation-sort");
 
                 StorageBTreeManifestV2 next = StorageBTreeUpdater.ApplyAndPublish(
                     _directory,
@@ -487,6 +503,7 @@ public sealed class StorageDatabase : IDisposable
                         return sequence;
                     },
                     faultInjector: _faultInjector);
+                ReportAllocation("storage-btree-cow-apply-and-publish");
 
                 _btreeManifest = next;
                 _btreeReader = CreateBTreeReader(next, files);
