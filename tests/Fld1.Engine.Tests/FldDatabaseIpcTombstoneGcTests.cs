@@ -103,18 +103,22 @@ public sealed class FldDatabaseIpcTombstoneGcTests
 
             // A Receipt-GC scan seals the same committed WAL prefix but is not
             // authority to enter the physical Tombstone approval-spool commit path.
+            Guid receiptModeSpool = await client.BeginTombstoneGcApprovalSpoolAsync();
+            await client.AppendTombstoneGcApprovalSpoolAsync(receiptModeSpool, approved);
+            await client.SealTombstoneGcApprovalSpoolAsync(receiptModeSpool);
             Guid receiptModeLease = await client.AcquireGcLeaseAsync();
             FldDatabaseIpcGcReferenceScan receiptModeScan =
                 await client.OpenReceiptGcReferenceScanAsync();
             try
             {
                 Assert.False(receiptModeScan.HasSnapshotPin);
-                Assert.Equal(0, await client.CommitTombstoneGcApprovalSpoolAsync(pinnedSpool));
+                Assert.Equal(0, await client.CommitTombstoneGcApprovalSpoolAsync(receiptModeSpool));
             }
             finally
             {
                 await client.ReleaseGcReferenceScanAsync(receiptModeScan.Token);
                 await client.ReleaseGcLeaseAsync(receiptModeLease);
+                await client.AbortTombstoneGcApprovalSpoolAsync(receiptModeSpool);
             }
 
             // Stream the proof-approved identities to a Host-owned scratch spool.
