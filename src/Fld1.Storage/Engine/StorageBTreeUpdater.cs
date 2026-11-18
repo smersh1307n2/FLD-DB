@@ -439,9 +439,14 @@ internal static class StorageBTreeUpdater
     private static void ValidateInternalNode(
         StorageTreeInternalPage node,
         StorageBTreeGenerationFiles files,
-        BatchPageReadCache pageReadCache)
+        BatchPageReadCache pageReadCache,
+        HashSet<ulong> children)
     {
-        var children = new HashSet<ulong> { node.FirstChild };
+        // One validation set is reused by the batch-local page cache. Internal
+        // pages are validated once when decoded; allocating a fresh HashSet for
+        // every page creates avoidable Gen0 garbage during large COW batches.
+        children.Clear();
+        children.Add(node.FirstChild);
         StorageTreeKeyReference? previous = null;
         foreach (StorageTreeChild separator in node.Separators)
         {
@@ -468,6 +473,7 @@ internal static class StorageBTreeUpdater
         private const int Capacity = 512;
         private readonly Dictionary<ulong, PageEntry> _pages = new();
         private readonly Queue<ulong> _order = new();
+        private readonly HashSet<ulong> _validationChildren = new();
         private const int KeyCapacity = 4_096;
         private const int MaxCachedKeyLength = 256;
         private readonly Dictionary<(ulong Offset, int Length), byte[]> _keys = new();
@@ -520,7 +526,7 @@ internal static class StorageBTreeUpdater
             StoragePageView page = entry.DecodedPage ??
                 (entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId)).Value;
             StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
-            ValidateInternalNode(node, files, this);
+            ValidateInternalNode(node, files, this, _validationChildren);
             entry.InternalPage = node;
             return node;
         }
