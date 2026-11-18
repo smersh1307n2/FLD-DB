@@ -315,6 +315,13 @@ public sealed class StorageBTreeTests
         Assert.False(shared.TryGetTreeKey(
             generation, new StorageTreeKeyReference(0, 16), out _));
         Assert.True(shared.TryGetTreeKey(generation, newest, out _));
+        Assert.False(shared.TryGetTreeKey(
+            generation + 1, newest, out _));
+
+        var oversized = new StorageTreeKeyReference(checked((ulong)(capacity + 1) * 32), 257);
+        shared.RememberTreeKey(generation, oversized, new byte[257]);
+        Assert.Equal(capacity, shared.TreeKeyCount);
+        Assert.False(shared.TryGetTreeKey(generation, oversized, out _));
 
         shared.EvictGeneration(generation);
         Assert.Equal(0, shared.TreeKeyCount);
