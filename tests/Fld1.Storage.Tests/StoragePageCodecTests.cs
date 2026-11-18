@@ -75,4 +75,20 @@ public sealed class StoragePageCodecTests
                 1, 1, StoragePageKind.Leaf,
                 new byte[StoragePageCodec.PageSize - StoragePageCodec.HeaderSize + 1]));
     }
+
+    [Fact]
+    public void In_place_page_encoder_matches_allocating_encoder()
+    {
+        byte[] payload = Enumerable.Range(0, 2048).Select(value => (byte)(value * 17)).ToArray();
+        byte[] expected = StoragePageCodec.Encode(9, 27, StoragePageKind.Leaf, payload);
+        byte[] reusable = new byte[StoragePageCodec.PageSize];
+
+        payload.CopyTo(reusable.AsSpan(StoragePageCodec.HeaderSize));
+        StoragePageCodec.EncodeInPlace(
+            reusable, 9, 27, StoragePageKind.Leaf, payload.Length);
+
+        Assert.Equal(expected, reusable);
+        StoragePageView decoded = StoragePageCodec.Decode(reusable, 9, 27);
+        Assert.Equal(payload, decoded.Payload.ToArray());
+    }
 }
