@@ -687,6 +687,15 @@ public sealed class StorageDatabase : IDisposable
     {
         private readonly byte[] _bytes;
         public StorageKey(ReadOnlySpan<byte> bytes) => _bytes = bytes.ToArray();
+        private StorageKey(byte[] ownedBytes, bool takeOwnership) => _bytes = ownedBytes;
+        internal static StorageKey FromOwned(byte[] ownedBytes)
+        {
+            ArgumentNullException.ThrowIfNull(ownedBytes);
+            if (ownedBytes.Length == 0)
+                throw new ArgumentException("Storage key must not be empty.", nameof(ownedBytes));
+            return new StorageKey(ownedBytes, takeOwnership: true);
+        }
+        internal byte[] Bytes => _bytes;
         public ReadOnlySpan<byte> Span => _bytes;
         public bool Equals(StorageKey other) => _bytes.AsSpan().SequenceEqual(other._bytes);
         public override bool Equals(object? obj) => obj is StorageKey other && Equals(other);
