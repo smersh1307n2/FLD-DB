@@ -52,20 +52,38 @@ internal static class StoragePageCodec
             throw new ArgumentOutOfRangeException(nameof(payload), "Storage page payload exceeds the fixed page capacity.");
 
         byte[] page = new byte[PageSize];
-        Span<byte> header = page.AsSpan(0, HeaderSize);
+        payload.CopyTo(page.AsSpan(HeaderSize));
+        EncodeInPlace(page, generation, pageId, kind, payload.Length);
+        return page;
+    }
+
+    /// <summary>
+    /// Completes an envelope in a caller-owned page buffer whose payload has already
+    /// been written at HeaderSize. The caller clears the full buffer before reuse.
+    /// </summary>
+    internal static void EncodeInPlace(
+        Span<byte> page, ulong generation, ulong pageId, StoragePageKind kind, int payloadLength)
+    {
+        if (page.Length != PageSize) throw new ArgumentException("Page buffer must have the fixed Storage page size.", nameof(page));
+        if (generation == 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        if (pageId == 0) throw new ArgumentOutOfRangeException(nameof(pageId));
+        ValidateKind(kind);
+        if (payloadLength < 0 || payloadLength > PageSize - HeaderSize)
+            throw new ArgumentOutOfRangeException(nameof(payloadLength));
+
+        Span<byte> header = page[..HeaderSize];
+        header.Clear();
         BinaryPrimitives.WriteUInt32LittleEndian(header, Magic);
         BinaryPrimitives.WriteUInt16LittleEndian(header.Slice(4), Version);
         header[6] = (byte)kind;
         header[7] = 0;
         BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8), generation);
         BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(16), pageId);
-        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(24), checked((uint)payload.Length));
-        payload.CopyTo(page.AsSpan(HeaderSize));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(24), checked((uint)payloadLength));
         uint crc = StorageChecksums.Crc32C(
-            page.AsSpan(0, CrcOffset),
-            page.AsSpan(HeaderSize, payload.Length));
+            page[..CrcOffset],
+            page.Slice(HeaderSize, payloadLength));
         BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(CrcOffset), crc);
-        return page;
     }
 
     public static StoragePageView Decode(ReadOnlyMemory<byte> page)
