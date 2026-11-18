@@ -81,6 +81,7 @@ public sealed class FldProviderSnapshot : IDisposable
     private int _lastPageLimit;
     private bool _lastPageIncludesValues;
     private object? _lastPage;
+    private byte[]? _lastMetadataPagePayload;
     private bool _disposed;
 
     internal FldProviderSnapshot(
@@ -198,6 +199,64 @@ public sealed class FldProviderSnapshot : IDisposable
     }
 
     /// <summary>
+    /// Reads a metadata page directly into its fixed-width IPC representation.
+    /// This avoids allocating a metadata object and three identity arrays per entry.
+    /// </summary>
+    public byte[] ReadMetadataPagePayload(int afterIndex, int limit = 256)
+    {
+        if (afterIndex < 0) throw new ArgumentOutOfRangeException(nameof(afterIndex));
+        if (limit <= 0 || limit > 4096) throw new ArgumentOutOfRangeException(nameof(limit));
+        lock (_gate)
+        {
+            EnsureOpen();
+            if (afterIndex == _lastPageStart && _lastPageLimit == limit &&
+                !_lastPageIncludesValues && _lastMetadataPagePayload is not null)
+                return _lastMetadataPagePayload;
+            if (afterIndex < _nextIndex)
+                ResetCursor();
+
+            Span<byte> scratch = stackalloc byte[FldDatabaseIpcProtocol.SnapshotPageEntryBytes];
+            while (_nextIndex < afterIndex)
+            {
+                if (!TryReadNextMetadataEntryToSpan(scratch))
+                    throw new ArgumentOutOfRangeException(nameof(afterIndex));
+            }
+
+            int start = _nextIndex;
+            byte[] response = new byte[checked(
+                FldDatabaseIpcProtocol.SnapshotPageResponseHeaderBytes +
+                limit * FldDatabaseIpcProtocol.SnapshotPageEntryBytes)];
+            int count = 0;
+            int offset = FldDatabaseIpcProtocol.SnapshotPageResponseHeaderBytes;
+            while (count < limit &&
+                   TryReadNextMetadataEntryToSpan(response.AsSpan(
+                       offset, FldDatabaseIpcProtocol.SnapshotPageEntryBytes)))
+            {
+                count++;
+                offset += FldDatabaseIpcProtocol.SnapshotPageEntryBytes;
+            }
+
+            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Count)
+                || _recordIdQueue.Count != 0
+                || _overlayEntryIndex < _overlayEntries!.Length;
+            BinaryPrimitives.WriteInt32LittleEndian(response, _nextIndex);
+            response[4] = hasMore ? (byte)1 : (byte)0;
+            BinaryPrimitives.WriteUInt16LittleEndian(response.AsSpan(5), checked((ushort)count));
+            if (count < limit)
+                Array.Resize(ref response, checked(
+                    FldDatabaseIpcProtocol.SnapshotPageResponseHeaderBytes +
+                    count * FldDatabaseIpcProtocol.SnapshotPageEntryBytes));
+
+            _lastPageStart = start;
+            _lastPageLimit = limit;
+            _lastPageIncludesValues = false;
+            _lastPage = null;
+            _lastMetadataPagePayload = response;
+            return response;
+        }
+    }
+
+    /// <summary>
     /// Copies only the requested value slice from the immutable snapshot generation.
     /// The RecordId/FieldId pair is resolved against the pinned Runs and overlay;
     /// no mutable current-database state is consulted.
@@ -272,6 +331,7 @@ public sealed class FldProviderSnapshot : IDisposable
         _lastPageLimit = 0;
         _lastPageIncludesValues = false;
         _lastPage = null;
+        _lastMetadataPagePayload = null;
     }
 
     public void Dispose()
@@ -290,6 +350,7 @@ public sealed class FldProviderSnapshot : IDisposable
             _currentRecordId = null;
             _currentFieldIds = null;
             _lastPage = null;
+            _lastMetadataPagePayload = null;
             callback = _onDispose;
         }
         callback?.Invoke(this);
@@ -480,6 +541,107 @@ public sealed class FldProviderSnapshot : IDisposable
         out FldProviderSnapshotEntryMetadata? metadata,
         out ReadOnlyMemory<byte> resolvedValue)
     {
+        if (!TryResolveCore(recordId, fieldId, out ResolvedSnapshotField resolved))
+        {
+            entry = null;
+            metadata = null;
+            resolvedValue = ReadOnlyMemory<byte>.Empty;
+            return false;
+        }
+
+        resolvedValue = resolved.Value;
+        if (includeValues)
+        {
+            entry = new FldProviderSnapshotEntry(
+                recordId.ToArray(), fieldId, resolved.Value.ToArray(),
+                resolved.Wall, resolved.Logical, resolved.AuthorNodeId.ToArray(),
+                resolved.IsRecordTombstone ? (ushort)0 : resolved.KeyEpoch,
+                resolved.IsTombstone, resolved.ChangeId.ToArray(),
+                resolved.OriginAuthorEpoch, resolved.OriginSequence, resolved.IsRecordTombstone);
+            metadata = null;
+        }
+        else if (includeMetadata)
+        {
+            entry = null;
+            metadata = new FldProviderSnapshotEntryMetadata(
+                recordId.ToArray(), fieldId, checked((uint)resolved.Value.Length),
+                resolved.Wall, resolved.Logical, resolved.AuthorNodeId.ToArray(),
+                resolved.IsRecordTombstone ? (ushort)0 : resolved.KeyEpoch,
+                resolved.IsTombstone, resolved.ChangeId.ToArray(),
+                resolved.OriginAuthorEpoch, resolved.OriginSequence, resolved.IsRecordTombstone);
+        }
+        else
+        {
+            entry = null;
+            metadata = null;
+        }
+        return true;
+    }
+
+    private bool TryReadNextMetadataEntryToSpan(Span<byte> destination)
+    {
+        EnsureOpen();
+        while (true)
+        {
+            if (_currentFieldIds is null || _fieldIndex >= _currentFieldIds.Count)
+            {
+                if (!TryLoadNextRecord())
+                    return false;
+                if (_currentFieldIds!.Count == 0)
+                    continue;
+            }
+
+            ushort fieldId = _currentFieldIds![_fieldIndex++];
+            if (!TryResolveCore(_currentRecordId!, fieldId, out ResolvedSnapshotField resolved))
+                continue;
+
+            ReadOnlySpan<byte> author = resolved.AuthorNodeId.Span;
+            ReadOnlySpan<byte> changeId = resolved.ChangeId.Span;
+            uint valueLength = checked((uint)resolved.Value.Length);
+            ushort keyEpoch = resolved.IsRecordTombstone ? (ushort)0 : resolved.KeyEpoch;
+            if (_currentRecordId!.Length != 16 ||
+                _currentRecordId.AsSpan().IndexOfAnyExcept((byte)0) < 0 ||
+                (author.Length is not (0 or 16)) ||
+                (changeId.Length is not (0 or 16)) ||
+                ((resolved.IsTombstone || resolved.IsRecordTombstone) && valueLength != 0) ||
+                (resolved.IsRecordTombstone && (resolved.IsTombstone || keyEpoch != 0)))
+                throw new InvalidDataException("FLD snapshot page entry identity or tombstone fields are invalid.");
+
+            destination.Clear();
+            int offset = 0;
+            _currentRecordId.CopyTo(destination);
+            offset += 16;
+            BinaryPrimitives.WriteUInt16LittleEndian(destination[offset..], fieldId);
+            offset += 2;
+            BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], valueLength);
+            offset += 4;
+            BinaryPrimitives.WriteUInt64LittleEndian(destination[offset..], resolved.Wall);
+            offset += 8;
+            BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], resolved.Logical);
+            offset += 4;
+            byte flags = 0;
+            if (resolved.IsTombstone) flags |= 1;
+            if (resolved.IsRecordTombstone) flags |= 2;
+            if (author.Length == 16) flags |= 4;
+            if (changeId.Length == 16) flags |= 8;
+            destination[offset++] = flags;
+            if (author.Length == 16) author.CopyTo(destination[offset..]);
+            offset += 16;
+            BinaryPrimitives.WriteUInt16LittleEndian(destination[offset..], keyEpoch);
+            offset += 2;
+            if (changeId.Length == 16) changeId.CopyTo(destination[offset..]);
+            offset += 16;
+            BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], resolved.OriginAuthorEpoch);
+            offset += 4;
+            BinaryPrimitives.WriteUInt64LittleEndian(destination[offset..], resolved.OriginSequence);
+            _nextIndex = checked(_nextIndex + 1);
+            return true;
+        }
+    }
+
+    private bool TryResolveCore(
+        byte[] recordId, ushort fieldId, out ResolvedSnapshotField resolved)
+    {
         EnsureOpen();
         bool have = false;
         ulong bestWall = 0;
@@ -529,9 +691,7 @@ public sealed class FldProviderSnapshot : IDisposable
 
         if (!have)
         {
-            entry = null;
-            metadata = null;
-            resolvedValue = ReadOnlyMemory<byte>.Empty;
+            resolved = default;
             return false;
         }
 
@@ -542,9 +702,7 @@ public sealed class FldProviderSnapshot : IDisposable
                 throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
             if (bestValue.Span.SequenceEqual(FldLifecycle.AliveValue))
             {
-                entry = null;
-                metadata = null;
-                resolvedValue = ReadOnlyMemory<byte>.Empty;
+                resolved = default;
                 return false;
             }
             if (!bestValue.Span.SequenceEqual(FldLifecycle.DeadValue))
@@ -552,50 +710,20 @@ public sealed class FldProviderSnapshot : IDisposable
             recordTombstone = true;
         }
 
-        resolvedValue = recordTombstone || bestTombstone
-            ? ReadOnlyMemory<byte>.Empty
-            : bestValue;
-        if (includeValues)
-        {
-            entry = new FldProviderSnapshotEntry(
-                recordId.ToArray(),
-                fieldId,
-                resolvedValue.ToArray(),
-                bestWall,
-                bestLogical,
-                bestAuthor.ToArray(),
-                recordTombstone ? (ushort)0 : bestKeyEpoch,
-                bestTombstone,
-                bestChangeId.ToArray(),
-                bestOriginEpoch,
-                bestOriginSequence,
-                recordTombstone);
-            metadata = null;
-        }
-        else if (includeMetadata)
-        {
-            entry = null;
-            metadata = new FldProviderSnapshotEntryMetadata(
-                recordId.ToArray(),
-                fieldId,
-                checked((uint)resolvedValue.Length),
-                bestWall,
-                bestLogical,
-                bestAuthor.ToArray(),
-                recordTombstone ? (ushort)0 : bestKeyEpoch,
-                bestTombstone,
-                bestChangeId.ToArray(),
-                bestOriginEpoch,
-                bestOriginSequence,
-                recordTombstone);
-        }
-        else
-        {
-            entry = null;
-            metadata = null;
-        }
+        ReadOnlyMemory<byte> value = recordTombstone || bestTombstone
+            ? ReadOnlyMemory<byte>.Empty : bestValue;
+        resolved = new ResolvedSnapshotField(
+            bestWall, bestLogical, bestAuthor, value, bestChangeId,
+            bestOriginEpoch, bestOriginSequence, bestKeyEpoch,
+            bestTombstone, recordTombstone);
         return true;
     }
+
+    private readonly record struct ResolvedSnapshotField(
+        ulong Wall, uint Logical, ReadOnlyMemory<byte> AuthorNodeId,
+        ReadOnlyMemory<byte> Value, ReadOnlyMemory<byte> ChangeId,
+        uint OriginAuthorEpoch, ulong OriginSequence, ushort KeyEpoch,
+        bool IsTombstone, bool IsRecordTombstone);
 
     private bool TryGetOverlayValue(ushort fieldId, out MemFieldValue? value)
     {
