@@ -150,40 +150,43 @@ public sealed class RunBuilder
         MarkBuildDiagnostic("author-intern", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
             $"Authors={authors.Count}");
 
-        // External value refs collected in (RecordId, FieldId) order during cluster build.
-        var externalEntries = new List<ExternalEntry>();
-        // Provenance rows follow the same canonical (RecordId, FieldId) order.
+        // First pass plans cluster layout without allocating one byte[] per cluster.
         var provenanceEntries = new List<FieldWrite>();
-
-        var clusterBlobs = new List<byte[]>();
+        var clusterPlans = new List<ClusterPlan>();
         var clusterRecordIds = new List<byte[]>();
         uint totalFields = 0;
         uint aliveFields = 0;
         bool anyHlcOverride = false;
         bool anyKeyEpoch = false;
         bool anyExternal = false;
+        int externalCount = 0;
+        int externalBlobBytes = 0;
 
         Span<FieldWrite> sortedSpan = CollectionsMarshal.AsSpan(sortedWinners);
         int recordStart = 0;
         while (recordStart < sortedSpan.Length)
         {
-            byte[] recordId = sortedSpan[recordStart].RecordId;
-            int recordEnd = recordStart + 1;
+            int groupStart = recordStart;
+            byte[] recordId = sortedSpan[groupStart].RecordId;
+            int recordEnd = groupStart + 1;
             while (recordEnd < sortedSpan.Length &&
                    ByteUtil.Equals16(recordId, sortedSpan[recordEnd].RecordId))
                 recordEnd++;
 
-            ReadOnlySpan<FieldWrite> fields = sortedSpan.Slice(recordStart, recordEnd - recordStart);
+            ReadOnlySpan<FieldWrite> fields = sortedSpan.Slice(groupStart, recordEnd - groupStart);
             recordStart = recordEnd;
+            clusterRecordIds.Add(recordId);
 
             foreach (FieldWrite field in fields)
+            {
                 if (field.ChangeId.Length == 16)
                     provenanceEntries.Add(field);
+            }
 
             totalFields += (uint)fields.Length;
             var mode = ComputeMode(fields, authorToIntern);
 
-            List<(int idx, FieldWrite f, uint internId)>? overrides = null;
+            int overrideCount = 0;
             for (int i = 0; i < fields.Length; i++)
             {
                 FieldWrite field = fields[i];
@@ -191,10 +194,8 @@ public sealed class RunBuilder
                 bool needsOverride = field.Wall != mode.Wall || field.Logical != mode.Logical
                                      || internId != mode.InternId || field.KeyEpoch != 0;
                 if (needsOverride)
-                    (overrides ??= new List<(int, FieldWrite, uint)>()).Add((i, field, internId));
+                    overrideCount++;
             }
-
-            int overrideCount = overrides?.Count ?? 0;
             if (overrideCount > 0) anyHlcOverride = true;
 
             bool dead = false;
@@ -212,6 +213,8 @@ public sealed class RunBuilder
                 {
                     clusterHasExternal = true;
                     anyExternal = true;
+                    externalCount++;
+                    externalBlobBytes += field.Value.Length;
                 }
                 else
                 {
@@ -228,89 +231,14 @@ public sealed class RunBuilder
             int pad = (8 - (clusterSize % 8)) % 8;
             clusterSize += pad;
 
-            var blob = new byte[clusterSize];
-            var span = blob.AsSpan();
-
-            recordId.AsSpan().CopyTo(span.Slice(0, 16));
-            BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(16), (ushort)fields.Length);
-            ushort cflags = 0;
-            if (dead) cflags |= (ushort)ClusterFlags.Dead;
-            if (clusterHasExternal) cflags |= (ushort)ClusterFlags.HasExternal;
-            BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(18), cflags);
-            BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(20), mode.Wall);
-            BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(28), mode.Logical);
-            BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(32), mode.InternId);
-
-            int payloadOff = 0;
-            int descBase = RunConstants.ClusterHeaderSize;
-            int overrideCursor = 0;
-            for (int i = 0; i < fields.Length; i++)
-            {
-                FieldWrite field = fields[i];
-                int descriptor = descBase + i * RunConstants.FieldDescSize;
-                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(descriptor), field.FieldId);
-                ushort valueLength;
-                ushort valueOffset;
-                byte descriptorFlags = 0;
-                if (field.IsTombstone)
-                {
-                    descriptorFlags |= (byte)FieldDescFlags.Tombstone;
-                    valueLength = 0;
-                    valueOffset = 0;
-                }
-                else if ((uint)field.Value.Length > _inlinePolicy)
-                {
-                    valueLength = RunConstants.ExternalValLen;
-                    // ValueRef index assigned after all clusters — store placeholder, fix up later.
-                    valueOffset = (ushort)externalEntries.Count;
-                    externalEntries.Add(new ExternalEntry(recordId, field.FieldId, field.Value));
-                }
-                else
-                {
-                    valueLength = (ushort)field.Value.Length;
-                    valueOffset = (ushort)payloadOff;
-                    payloadOff += field.Value.Length;
-                }
-
-                if (overrideCursor < overrideCount && overrides![overrideCursor].idx == i)
-                {
-                    descriptorFlags |= (byte)FieldDescFlags.HasHlcOverride;
-                    overrideCursor++;
-                }
-
-                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(descriptor + 2), valueLength);
-                span[descriptor + 4] = descriptorFlags;
-                span[descriptor + 5] = 0;
-                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(descriptor + 6), valueOffset);
-            }
-
-            int overrideBase = descBase + descBytes;
-            for (int i = 0; i < overrideCount; i++)
-            {
-                var (index, field, internId) = overrides![i];
-                int offset = overrideBase + i * RunConstants.FieldHlcOverrideSize;
-                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(offset), (ushort)index);
-                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(offset + 2), field.KeyEpoch);
-                BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(offset + 4), field.Wall);
-                BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(offset + 12), field.Logical);
-                BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(offset + 16), internId);
-            }
-
-            int payloadBase = overrideBase + ovBytes;
-            int payloadCursor = 0;
-            foreach (FieldWrite field in fields)
-            {
-                if (field.IsTombstone || (uint)field.Value.Length > _inlinePolicy)
-                    continue;
-                field.Value.CopyTo(span.Slice(payloadBase + payloadCursor, field.Value.Length));
-                payloadCursor += field.Value.Length;
-            }
-
-            clusterBlobs.Add(blob);
-            clusterRecordIds.Add(recordId);
+            clusterPlans.Add(new ClusterPlan(
+                groupStart, recordEnd, clusterSize, overrideCount,
+                mode.Wall, mode.Logical, mode.InternId, dead, clusterHasExternal));
         }
+
+        var externalEntries = new List<ExternalEntry>(externalCount);
         MarkBuildDiagnostic("cluster-build", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
-            $"Clusters={clusterBlobs.Count} Fields={totalFields} Provenance={provenanceEntries.Count}");
+            $"Clusters={clusterPlans.Count} Fields={totalFields} Provenance={provenanceEntries.Count}");
 
         // Sort external entries by (RecordId, FieldId) for ValueRef catalog — already insertion order
         // matches FieldId ASC within RecordId ASC because we iterate byRecord sorted + fields sorted.
@@ -328,24 +256,23 @@ public sealed class RunBuilder
         int pgmBytes = pgmSegs.Count * RunConstants.PgmSegmentSize;
 
         ulong slotOff = pgmOff + (ulong)pgmBytes;
-        int slotBytes = clusterBlobs.Count * RunConstants.CompactSlotSize;
+        int slotBytes = clusterPlans.Count * RunConstants.CompactSlotSize;
 
         ulong dataOff = slotOff + (ulong)slotBytes;
         int dataBytes = 0;
-        foreach (var b in clusterBlobs) dataBytes += b.Length;
+        foreach (var plan in clusterPlans) dataBytes += plan.Size;
 
         // Values section
         ulong valuesOff;
         ulong valuesLen;
         int valuesSectionBytes = 0;
-        if (externalEntries.Count > 0)
+        if (externalCount > 0)
         {
             // Align values section start to 8
             ulong dataEnd = dataOff + (ulong)dataBytes;
             valuesOff = (dataEnd + 7) & ~7UL;
-            int refBytes = externalEntries.Count * RunConstants.ValueRefSize;
-            int blobBytes = 0;
-            foreach (var e in externalEntries) blobBytes += e.Value.Length;
+            int refBytes = externalCount * RunConstants.ValueRefSize;
+            int blobBytes = externalBlobBytes;
             // valuesLen includes refs + blobs + pad to 8
             int raw = refBytes + blobBytes;
             int padded = (raw + 7) & ~7;
@@ -361,7 +288,7 @@ public sealed class RunBuilder
 
         ulong footerOff = valuesOff + valuesLen;
         // When no external: valuesOff == footerOff already.
-        if (externalEntries.Count == 0)
+        if (externalCount == 0)
         {
             footerOff = valuesOff;
             valuesOff = footerOff;
@@ -397,16 +324,112 @@ public sealed class RunBuilder
             BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(pos + 24, 8), seg.Den);
         }
 
-        // Slots + data
-        int dataCursor = (int)dataOff;
-        for (int i = 0; i < clusterBlobs.Count; i++)
+        // Slots first: offsets are known from the first-pass cluster plan.
+        int slotDataCursor = (int)dataOff;
+        for (int i = 0; i < clusterPlans.Count; i++)
         {
             int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
-            BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(slotPos, 8), (ulong)dataCursor);
+            BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(slotPos, 8), (ulong)slotDataCursor);
             clusterRecordIds[i].AsSpan(12, 4).CopyTo(fs.Slice(slotPos + 8, 4));
-            clusterBlobs[i].CopyTo(fs.Slice(dataCursor));
-            dataCursor += clusterBlobs[i].Length;
+            slotDataCursor += clusterPlans[i].Size;
         }
+
+        // Second pass writes each cluster directly into the final Run buffer.
+        bool measureClusterWrite = !string.IsNullOrWhiteSpace(diagnosticsPath);
+        long clusterWriteAllocated = measureClusterWrite ? GC.GetTotalAllocatedBytes(precise: true) : 0;
+        long clusterWriteStarted = measureClusterWrite ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        int clusterWriteCursor = (int)dataOff;
+        for (int clusterIndex = 0; clusterIndex < clusterPlans.Count; clusterIndex++)
+        {
+            ClusterPlan plan = clusterPlans[clusterIndex];
+            ReadOnlySpan<FieldWrite> fields = sortedSpan.Slice(plan.Start, plan.End - plan.Start);
+            byte[] recordId = sortedSpan[plan.Start].RecordId;
+            var span = fs.Slice(clusterWriteCursor, plan.Size);
+
+            recordId.AsSpan().CopyTo(span.Slice(0, 16));
+            BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(16), (ushort)fields.Length);
+            ushort cflags = 0;
+            if (plan.Dead) cflags |= (ushort)ClusterFlags.Dead;
+            if (plan.HasExternal) cflags |= (ushort)ClusterFlags.HasExternal;
+            BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(18), cflags);
+            BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(20), plan.Wall);
+            BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(28), plan.Logical);
+            BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(32), plan.InternId);
+
+            int descBytes = fields.Length * RunConstants.FieldDescSize;
+            int ovBytes = plan.OverrideCount * RunConstants.FieldHlcOverrideSize;
+            int descBase = RunConstants.ClusterHeaderSize;
+            int overrideBase = descBase + descBytes;
+            int overrideCursor = 0;
+            int payloadOff = 0;
+
+            for (int i = 0; i < fields.Length; i++)
+            {
+                FieldWrite field = fields[i];
+                int descriptor = descBase + i * RunConstants.FieldDescSize;
+                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(descriptor), field.FieldId);
+                ushort valueLength;
+                ushort valueOffset;
+                byte descriptorFlags = 0;
+                if (field.IsTombstone)
+                {
+                    descriptorFlags |= (byte)FieldDescFlags.Tombstone;
+                    valueLength = 0;
+                    valueOffset = 0;
+                }
+                else if ((uint)field.Value.Length > _inlinePolicy)
+                {
+                    valueLength = RunConstants.ExternalValLen;
+                    valueOffset = (ushort)externalEntries.Count;
+                    externalEntries.Add(new ExternalEntry(recordId, field.FieldId, field.Value));
+                }
+                else
+                {
+                    valueLength = (ushort)field.Value.Length;
+                    valueOffset = (ushort)payloadOff;
+                    payloadOff += field.Value.Length;
+                }
+
+                uint internId = authorToIntern[new IdKey(field.AuthorNodeId)];
+                bool needsOverride = field.Wall != plan.Wall || field.Logical != plan.Logical
+                                     || internId != plan.InternId || field.KeyEpoch != 0;
+                if (needsOverride)
+                {
+                    descriptorFlags |= (byte)FieldDescFlags.HasHlcOverride;
+                    int offset = overrideBase + overrideCursor * RunConstants.FieldHlcOverrideSize;
+                    BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(offset), (ushort)i);
+                    BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(offset + 2), field.KeyEpoch);
+                    BinaryPrimitives.WriteUInt64LittleEndian(span.Slice(offset + 4), field.Wall);
+                    BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(offset + 12), field.Logical);
+                    BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(offset + 16), internId);
+                    overrideCursor++;
+                }
+
+                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(descriptor + 2), valueLength);
+                span[descriptor + 4] = descriptorFlags;
+                span[descriptor + 5] = 0;
+                BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(descriptor + 6), valueOffset);
+            }
+
+            if (overrideCursor != plan.OverrideCount)
+                throw new InvalidOperationException("Cluster override plan changed during Run build.");
+
+            int payloadBase = overrideBase + ovBytes;
+            int payloadCursor = 0;
+            foreach (FieldWrite field in fields)
+            {
+                if (field.IsTombstone || (uint)field.Value.Length > _inlinePolicy)
+                    continue;
+                field.Value.CopyTo(span.Slice(payloadBase + payloadCursor, field.Value.Length));
+                payloadCursor += field.Value.Length;
+            }
+
+            clusterWriteCursor += plan.Size;
+        }
+        if (clusterWriteCursor != (int)dataOff + dataBytes)
+            throw new InvalidOperationException("Cluster data size does not match first-pass plan.");
+        WriteCheckpointDiagnostic("cluster-write", measureClusterWrite, clusterWriteAllocated, clusterWriteStarted,
+            $"Clusters={clusterPlans.Count} DataBytes={dataBytes}");
 
         // Values section: ValueRef catalog then blob pool
         if (externalEntries.Count > 0)
@@ -467,7 +490,7 @@ public sealed class RunBuilder
             fs.Slice(0, RunHeader.Size),
             _namespaceId,
             runFlags,
-            numClusters: (uint)clusterBlobs.Count,
+            numClusters: (uint)clusterPlans.Count,
             numFields: totalFields,
             internCount: (uint)authors.Count,
             pgmSegments: (uint)pgmSegs.Count,
@@ -495,6 +518,17 @@ public sealed class RunBuilder
             $"RunBytes={file.Length}");
         return file;
     }
+
+    private readonly record struct ClusterPlan(
+        int Start,
+        int End,
+        int Size,
+        int OverrideCount,
+        ulong Wall,
+        uint Logical,
+        uint InternId,
+        bool Dead,
+        bool HasExternal);
 
     private static void MarkBuildDiagnostic(
         string stage, string? path, ref long allocatedBefore, ref long startedTicks, string? detail = null)
