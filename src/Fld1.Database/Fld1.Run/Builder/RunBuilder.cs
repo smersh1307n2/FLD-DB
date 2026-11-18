@@ -407,21 +407,11 @@ public sealed class RunBuilder
         Span<byte> nsLe = stackalloc byte[4];
         BinaryPrimitives.WriteUInt32LittleEndian(nsLe, _namespaceId);
         var bodySlice = fs.Slice((int)internOff, (int)(footerOff - internOff));
-        int hashLen = Tags.RunStateV1.Length + 4 + bodySlice.Length;
-        byte[] hashRented = ArrayPool<byte>.Shared.Rent(hashLen);
+        Span<byte> hashPrefix = stackalloc byte[Tags.RunStateV1.Length + 4];
+        Tags.RunStateV1.CopyTo(hashPrefix);
+        nsLe.CopyTo(hashPrefix.Slice(Tags.RunStateV1.Length));
         Span<byte> digest = stackalloc byte[32];
-        try
-        {
-            var hashInput = hashRented.AsSpan(0, hashLen);
-            Tags.RunStateV1.CopyTo(hashInput);
-            nsLe.CopyTo(hashInput.Slice(Tags.RunStateV1.Length));
-            bodySlice.CopyTo(hashInput.Slice(Tags.RunStateV1.Length + 4));
-            Hashes.Blake3_256(hashInput, digest);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(hashRented);
-        }
+        Hashes.Blake3_256Tagged(hashPrefix, bodySlice, digest);
 
         RunHeader.WriteCore(
             fs.Slice(0, RunHeader.Size),
