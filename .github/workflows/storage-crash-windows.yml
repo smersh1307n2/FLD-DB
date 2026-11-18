@@ -1,0 +1,52 @@
+name: Storage Crash Consistency Windows
+
+on:
+  push:
+    branches:
+      - fix/crash-consistency-outbox
+    paths:
+      - 'src/Fld1.Storage/Engine/**'
+      - 'tests/Fld1.Storage.Tests/StorageCrashConsistencyTests.cs'
+      - '.github/workflows/storage-crash-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fld-storage-crash-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  crash:
+    name: Storage crash/recovery matrix (.NET 10, Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout FLD-DB
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test Storage crash consistency fault matrix
+        shell: pwsh
+        run: |
+          dotnet test tests/Fld1.Storage.Tests/Fld1.Storage.Tests.csproj --configuration Release `
+            --filter "FullyQualifiedName~StorageCrashConsistencyTests" `
+            --logger "console;verbosity=normal" `
+            --logger "trx;LogFileName=storage-crash-windows.trx" `
+            --results-directory "$env:RUNNER_TEMP/storage-crash-windows-results" `
+            --blame-hang-timeout 5m `
+            --blame-hang-dump-type mini
+
+      - name: Upload Windows crash diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-crash-windows-diagnostics
+          path: ${{ runner.temp }}/storage-crash-windows-results
+          retention-days: 14
+          if-no-files-found: ignore

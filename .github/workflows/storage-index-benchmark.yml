@@ -1,0 +1,32 @@
+name: Storage index scaling benchmark
+
+on:
+  # Explicit milestone benchmark; ordinary PRs run functional tests only.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  storage-index-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
+      - name: Run Storage index scaling matrix
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-index-only
+      - name: Verify all benchmark cases produced measurements
+        run: python3 eng/verify-storage-index-benchmark.py
+      - name: Upload BenchmarkDotNet reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-index-benchmark-${{ github.sha }}
+          path: BenchmarkDotNet.Artifacts/**
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,69 @@
+name: FLD Run Mapping Benchmark
+
+on:
+  push:
+    branches: ["fix/**"]
+    paths:
+      - "bench/Fld1.Engine.Bench/RunMappingBench.cs"
+      - "src/Fld1.Database/Fld1.Engine/**"
+      - "src/Fld1.Database/Fld1.Manifest/**"
+      - "src/Fld1.Database/Fld1.Run/**"
+      - "src/Fld1.Database/Fld1.Wal/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fld-run-mapping-benchmark-v1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: demand-paged Run mapping (.NET 10, Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Run fresh-map and warm-map benchmark matrix
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release -- --run-mapping-only
+
+      - name: Verify all benchmark cases produced reports
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+
+          reports = list(Path("BenchmarkDotNet.Artifacts/results").glob("*-report.csv"))
+          if len(reports) != 1:
+              raise SystemExit(f"Expected one consolidated BenchmarkDotNet CSV, found {len(reports)}")
+          with reports[0].open(newline="", encoding="utf-8-sig") as stream:
+              rows = list(csv.DictReader(stream))
+          if len(rows) != 6:
+              raise SystemExit(f"Expected 6 benchmark parameter cases, found {len(rows)}")
+          required = {"FreshDatabaseOpenAndFirstMappedLookup", "WarmMappedLookups"}
+          methods = {row.get("Method") for row in rows}
+          if methods != required:
+              raise SystemExit(f"Unexpected benchmark methods: {sorted(methods)}")
+          counts = {row.get("RunCount") for row in rows}
+          if counts != {"1", "16", "64"}:
+              raise SystemExit(f"Unexpected RunCount matrix: {sorted(counts)}")
+          print("Validated all six benchmark cases in the consolidated CSV.")
+          PY
+
+      - name: Upload BenchmarkDotNet results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fld-run-mapping-benchmark-${{ github.sha }}
+          path: BenchmarkDotNet.Artifacts/**
+          if-no-files-found: warn
+          retention-days: 30

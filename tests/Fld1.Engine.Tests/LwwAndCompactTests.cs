@@ -1,0 +1,119 @@
+using Fld1.Engine.Db;
+using Xunit;
+
+namespace Fld1.Engine.Tests;
+
+public class LwwAndCompactTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "fld-lww-" + Guid.NewGuid().ToString("N"));
+    public LwwAndCompactTests() => Directory.CreateDirectory(_dir);
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    [Fact]
+    public void Lww_newer_checkpoint_wins_over_older_run()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "v1"u8);
+        db.Commit();
+        db.Checkpoint();
+        db.Put(rec, 1, "v2"u8);
+        db.Commit();
+        db.Checkpoint();
+        Assert.True(db.TryGetBytes(rec, 1, out var v) && v!.SequenceEqual("v2"u8.ToArray()));
+    }
+
+    [Fact]
+    public void Lww_tombstone_hides_older_value()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "alive"u8);
+        db.Commit();
+        db.Checkpoint();
+        db.Delete(rec, 1);
+        db.Commit();
+        Assert.False(db.TryGetBytes(rec, 1, out _));
+        db.Checkpoint();
+        Assert.False(db.TryGetBytes(rec, 1, out _));
+    }
+
+    [Fact]
+    public void Compact_preserves_tombstone_without_older_live_value()
+    {
+        var recordId = FldDatabase.NewRecordId();
+        ulong deletedFieldWall;
+
+        using (var db = FldDatabase.Open(_dir))
+        {
+            // Field 77 has no earlier live value. Its only stored state is a tombstone.
+            db.Delete(recordId, 77);
+            db.Put(recordId, 1, "still-live"u8);
+            db.Commit();
+            db.Checkpoint();
+
+            Assert.True(db.TryResolve(recordId, 77, out var before));
+            Assert.True(before.Found);
+            Assert.True(before.IsTombstone);
+            deletedFieldWall = before.Wall;
+
+            db.Compact();
+
+            Assert.True(db.TryResolve(recordId, 77, out var after));
+            Assert.True(after.Found);
+            Assert.True(after.IsTombstone);
+            Assert.Equal(deletedFieldWall, after.Wall);
+            Assert.True(db.TryGetBytes(recordId, 1, out var live));
+            Assert.Equal("still-live"u8.ToArray(), live);
+        }
+
+        using (var reopened = FldDatabase.Open(_dir))
+        {
+            Assert.True(reopened.TryResolve(recordId, 77, out var afterRestart));
+            Assert.True(afterRestart.Found);
+            Assert.True(afterRestart.IsTombstone);
+            Assert.False(reopened.TryGetBytes(recordId, 77, out _));
+        }
+    }
+
+    [Fact]
+    public void Lifecycle_delete_record()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var rec = FldDatabase.NewRecordId();
+        db.Put(rec, 1, "x"u8);
+        db.DeleteRecord(rec);
+        Assert.True(db.IsRecordDead(rec));
+        db.UndeleteRecord(rec);
+        Assert.False(db.IsRecordDead(rec));
+    }
+
+    [Fact]
+    public void Compact_merges_runs()
+    {
+        using var db = FldDatabase.Open(_dir);
+        var r1 = FldDatabase.NewRecordId();
+        var r2 = FldDatabase.NewRecordId();
+        db.Put(r1, 1, "a"u8);
+        db.Commit();
+        db.Checkpoint();
+        db.Put(r2, 1, "b"u8);
+        db.Commit();
+        db.Checkpoint();
+        db.Put(r1, 1, "a2"u8);
+        db.Commit();
+        db.Checkpoint();
+
+        ulong id = db.Compact();
+        Assert.True(id >= 1);
+        Assert.Equal(0, db.OverlayCount);
+        Assert.True(db.TryGetBytes(r1, 1, out var a) && a!.SequenceEqual("a2"u8.ToArray()));
+        Assert.True(db.TryGetBytes(r2, 1, out var b) && b!.SequenceEqual("b"u8.ToArray()));
+        // The compacted namespace is represented by Storage-owned blobs, not
+        // persistent legacy .fld1 mirrors.
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "runs"), "*.fld1"));
+        Assert.NotEmpty(Directory.EnumerateFiles(
+            Path.Combine(_dir, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8)),
+            "content.blob", SearchOption.AllDirectories));
+    }
+}
