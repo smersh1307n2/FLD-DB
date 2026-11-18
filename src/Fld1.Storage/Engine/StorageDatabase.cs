@@ -508,6 +508,13 @@ public sealed class StorageDatabase : IDisposable
                 }
                 ReportAllocation("storage-tree-mutation-sort");
 
+                Action<string, long>? btreeAllocationObserver = observer is null
+                    ? null
+                    : (phase, allocated) =>
+                    {
+                        observer(phase, allocated);
+                        allocationCheckpoint = GC.GetTotalAllocatedBytes(precise: true);
+                    };
                 StorageBTreeManifestV2 next = StorageBTreeUpdater.ApplyAndPublish(
                     _directory,
                     _btreeManifest,
@@ -521,8 +528,9 @@ public sealed class StorageDatabase : IDisposable
                         _faultInjector?.Invoke(StorageFaultPoint.AfterWalFlushBeforePublish);
                         return sequence;
                     },
-                    faultInjector: _faultInjector);
-                ReportAllocation("storage-btree-cow-apply-and-publish");
+                    faultInjector: _faultInjector,
+                    allocationObserver: btreeAllocationObserver);
+                ReportAllocation("storage-btree-root-publish");
 
                 _btreeManifest = next;
                 _btreeReader = CreateBTreeReader(next, files);
