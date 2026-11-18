@@ -887,11 +887,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 throw new InvalidOperationException("FLD snapshot handle has been released.");
             long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
             long started = System.Diagnostics.Stopwatch.GetTimestamp();
-            FldProviderSnapshotMetadataPage page =
-                handle.Snapshot.ReadMetadataPage(request.AfterIndex, request.Limit);
-            byte[] response = FldDatabaseIpcProtocol.EncodeSnapshotPageResponse(page);
+            byte[] response =
+                handle.Snapshot.ReadMetadataPagePayload(request.AfterIndex, request.Limit);
+            int count = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(5));
             handle.ReadPageCalls++;
-            handle.ReadPageEntries = checked(handle.ReadPageEntries + page.Entries.Count);
+            handle.ReadPageEntries = checked(handle.ReadPageEntries + count);
             handle.ReadPageElapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
             handle.ReadPageAllocatedBytes += GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
             return response;

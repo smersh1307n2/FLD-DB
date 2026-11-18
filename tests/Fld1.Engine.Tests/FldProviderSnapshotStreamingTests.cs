@@ -108,4 +108,50 @@ public sealed class FldProviderSnapshotStreamingTests
         id[0] = value;
         return id;
     }
+
+    [Fact]
+    public void Metadata_page_payload_matches_object_page_without_materializing_entries()
+    {
+        const uint namespaceId = 0x785;
+        string root = Path.Combine(
+            Path.GetTempPath(), "fld-provider-snapshot-payload-" + Guid.NewGuid().ToString("N"));
+        byte[][] recordIds = [Id(0x10), Id(0x20), Id(0x30)];
+
+        try
+        {
+            using (var database = FldDatabase.Open(root, namespaceId, Id(0x73)))
+            {
+                for (int i = 0; i < recordIds.Length; i++)
+                    database.Put(recordIds[i], 7, BitConverter.GetBytes(i + 1));
+                Assert.NotEqual(0UL, database.Commit());
+
+                using FldProviderSnapshot snapshot = database.OpenProviderSnapshot();
+                byte[] raw = snapshot.ReadMetadataPagePayload(0, 2);
+                Assert.Equal(raw, snapshot.ReadMetadataPagePayload(0, 2));
+
+                var actual = FldDatabaseIpcProtocol.DecodeSnapshotPageResponse(raw);
+                FldProviderSnapshotMetadataPage expected = snapshot.ReadMetadataPage(0, 2);
+                Assert.Equal(expected.NextIndex, actual.NextIndex);
+                Assert.Equal(expected.HasMore, actual.HasMore);
+                Assert.Equal(expected.Entries.Count, actual.Entries.Count);
+                for (int i = 0; i < expected.Entries.Count; i++)
+                {
+                    Assert.Equal(expected.Entries[i].RecordId, actual.Entries[i].RecordId);
+                    Assert.Equal(expected.Entries[i].FieldId, actual.Entries[i].FieldId);
+                    Assert.Equal(expected.Entries[i].ValueLength, actual.Entries[i].ValueLength);
+                    Assert.Equal(expected.Entries[i].HlcWall, actual.Entries[i].HlcWall);
+                    Assert.Equal(expected.Entries[i].HlcLogical, actual.Entries[i].HlcLogical);
+                    Assert.Equal(expected.Entries[i].AuthorNodeId, actual.Entries[i].AuthorNodeId);
+                    Assert.Equal(expected.Entries[i].ChangeId, actual.Entries[i].ChangeId);
+                    Assert.Equal(expected.Entries[i].OriginAuthorEpoch, actual.Entries[i].OriginAuthorEpoch);
+                    Assert.Equal(expected.Entries[i].OriginSequence, actual.Entries[i].OriginSequence);
+                }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
 }
