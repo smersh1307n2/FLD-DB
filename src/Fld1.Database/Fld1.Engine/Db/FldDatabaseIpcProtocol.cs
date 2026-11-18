@@ -128,9 +128,7 @@ public static class FldDatabaseIpcProtocol
     private const int SnapshotValueChunkRequestBytes = 58;
     private const int SnapshotValueChunkResponseHeaderBytes = 13;
     private const int SnapshotReleasePayloadBytes = 32;
-    // 4096 fixed-size metadata entries remain well below the IPC payload cap and
-    // amortize host round-trip overhead for large provider scans.
-    public const int MaxSnapshotPageEntries = 4096;
+    public const int MaxSnapshotPageEntries = 256;
     public const int MaxSnapshotValueChunkBytes = StorageIpcProtocol.MaxPayloadBytes - SnapshotValueChunkResponseHeaderBytes;
 
     public static byte[] EncodeOutboxLeaseResponse(ulong leaseEpoch)
