@@ -9,7 +9,6 @@ on:
       - "src/Fld1.Database/Fld1.Manifest/**"
       - "src/Fld1.Database/Fld1.Run/**"
       - "src/Fld1.Database/Fld1.Wal/**"
-      - "src/Fld1.Storage/Engine/StorageBTreeUpdater.cs"
   workflow_dispatch:
 
 permissions:
