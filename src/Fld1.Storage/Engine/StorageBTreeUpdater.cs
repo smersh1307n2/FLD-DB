@@ -65,7 +65,7 @@ internal static class StorageBTreeUpdater
         var mergedLeafEntries = new List<StorageTreeLeafEntry>();
         // AppendPage consumes the encoded bytes synchronously, so one page-sized
         // buffer can be reused for every newly written leaf in this batch.
-        byte[] leafPageBuffer = new byte[StoragePageCodec.PageSize];
+        byte[] pageBuffer = new byte[StoragePageCodec.PageSize];
 
         // Reuse the root-to-leaf path buffer across groups. A sorted delete
         // batch may touch thousands of leaves; each path is consumed by RewritePath
@@ -109,12 +109,13 @@ internal static class StorageBTreeUpdater
 
                 phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 List<StorageTreeChild> replacements = WriteLeafLevel(
-                    mergedLeafEntries, files, ref nextPageId, leafPageBuffer);
+                    mergedLeafEntries, files, ref nextPageId, pageBuffer);
                 if (allocationObserver is not null)
                     leafWriteAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
                 phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
-                rootPageId = RewritePath(path, leafId, replacements, files, ref nextPageId, pageReadCache);
+                rootPageId = RewritePath(
+                    path, leafId, replacements, files, ref nextPageId, pageReadCache, pageBuffer);
                 if (allocationObserver is not null)
                     pathRewriteAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
                 start = end;
@@ -318,7 +319,8 @@ internal static class StorageBTreeUpdater
         List<StorageTreeChild> replacements,
         StorageBTreeGenerationFiles files,
         ref ulong nextPageId,
-        BatchPageReadCache pageReadCache)
+        BatchPageReadCache pageReadCache,
+        byte[] pageBuffer)
     {
         ulong oldChildId = oldLeafId;
         for (int i = path.Count - 1; i >= 0; i--)
@@ -333,17 +335,18 @@ internal static class StorageBTreeUpdater
             List<StorageTreeChild> children = ExpandChildren(parent, files, pageReadCache);
             children.RemoveAt(frame.ChildIndex);
             children.InsertRange(frame.ChildIndex, replacements);
-            replacements = WriteInternalLevel(children, files, ref nextPageId);
+            replacements = WriteInternalLevel(children, files, ref nextPageId, pageBuffer);
             oldChildId = frame.PageId;
         }
 
         while (replacements.Count > StorageBTreePageCodec.MaxInternalChildren)
-            replacements = WriteInternalLevel(replacements, files, ref nextPageId);
+            replacements = WriteInternalLevel(replacements, files, ref nextPageId, pageBuffer);
 
         if (replacements.Count == 1)
             return replacements[0].PageId;
 
-        List<StorageTreeChild> root = WriteInternalLevel(replacements, files, ref nextPageId);
+        List<StorageTreeChild> root = WriteInternalLevel(
+            replacements, files, ref nextPageId, pageBuffer);
         if (root.Count != 1)
             throw new InvalidOperationException("B+ tree root construction did not converge.");
         return root[0].PageId;
@@ -352,7 +355,8 @@ internal static class StorageBTreeUpdater
     private static List<StorageTreeChild> WriteInternalLevel(
         IReadOnlyList<StorageTreeChild> children,
         StorageBTreeGenerationFiles files,
-        ref ulong nextPageId)
+        ref ulong nextPageId,
+        byte[] pageBuffer)
     {
         if (children.Count == 0)
             throw new InvalidDataException("B+ tree internal node cannot have zero children.");
@@ -370,8 +374,9 @@ internal static class StorageBTreeUpdater
         {
             int count = baseSize + (group < extra ? 1 : 0);
             ulong pageId = Allocate(ref nextPageId);
-            files.AppendPage(pageId,
-                StorageBTreePageCodec.EncodeInternal(files.Generation, pageId, children, start, count));
+            StorageBTreePageCodec.EncodeInternalInto(
+                pageBuffer, files.Generation, pageId, children, start, count);
+            files.AppendPage(pageId, pageBuffer);
             result.Add(new StorageTreeChild(pageId, children[start].FirstKey));
             start += count;
         }
