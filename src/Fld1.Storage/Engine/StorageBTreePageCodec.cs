@@ -38,37 +38,87 @@ internal static class StorageBTreePageCodec
     public static int MaxLeafEntries=>(Capacity-Header)/LeafEntry;
     public static int MaxInternalChildren=>(Capacity-Header)/InternalEntry+1;
 
-    public static byte[] EncodeLeaf(ulong generation,ulong pageId,ulong next,IReadOnlyList<StorageTreeLeafEntry> entries)
+    public static byte[] EncodeLeaf(ulong generation, ulong pageId, ulong next, IReadOnlyList<StorageTreeLeafEntry> entries)
     {
         ArgumentNullException.ThrowIfNull(entries);
-        if(entries.Count is <1 || entries.Count>MaxLeafEntries) throw new ArgumentOutOfRangeException(nameof(entries));
-        byte[] p=new byte[Header+entries.Count*LeafEntry];p[0]=Version;
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2),checked((ushort)entries.Count));
-        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4),next);int o=Header;
-        foreach(var e in entries)
-        {
-            WriteKey(p.AsSpan(o,12),e.Key);o+=12;
-            if(e.Value.Length<0 || (e.Value.IsTombstone && e.Value.Length!=0))throw new InvalidDataException("Invalid value reference.");
-            _=checked(e.Value.Offset+(ulong)e.Value.Length);
-            BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o),e.Value.Offset);
-            BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o+8),e.Value.Length);
-            p[o+12]=e.Value.IsTombstone?(byte)1:(byte)0;o+=13;
-        }
-        return StoragePageCodec.Encode(generation,pageId,StoragePageKind.Leaf,p);
+        return EncodeLeaf(generation, pageId, next, entries, 0, entries.Count);
     }
-    public static byte[] EncodeInternal(ulong generation,ulong pageId,ulong first,IReadOnlyList<StorageTreeChild> separators)
+
+    public static byte[] EncodeLeaf(
+        ulong generation, ulong pageId, ulong next,
+        IReadOnlyList<StorageTreeLeafEntry> entries, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        if (start < 0 || count is < 1 || count > MaxLeafEntries ||
+            count > entries.Count || start > entries.Count - count)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        byte[] p = new byte[Header + count * LeafEntry];
+        p[0] = Version;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), checked((ushort)count));
+        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4), next);
+        int o = Header;
+        for (int i = 0; i < count; i++)
+        {
+            StorageTreeLeafEntry e = entries[start + i];
+            WriteKey(p.AsSpan(o, 12), e.Key);
+            o += 12;
+            if (e.Value.Length < 0 || (e.Value.IsTombstone && e.Value.Length != 0))
+                throw new InvalidDataException("Invalid value reference.");
+            _ = checked(e.Value.Offset + (ulong)e.Value.Length);
+            BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o), e.Value.Offset);
+            BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o + 8), e.Value.Length);
+            p[o + 12] = e.Value.IsTombstone ? (byte)1 : (byte)0;
+            o += 13;
+        }
+        return StoragePageCodec.Encode(generation, pageId, StoragePageKind.Leaf, p);
+    }
+    public static byte[] EncodeInternal(ulong generation, ulong pageId, ulong first, IReadOnlyList<StorageTreeChild> separators)
     {
         ArgumentNullException.ThrowIfNull(separators);
-        if(first==0 || separators.Count>MaxInternalChildren-1)throw new ArgumentOutOfRangeException(nameof(first));
-        byte[] p=new byte[Header+separators.Count*InternalEntry];p[0]=Version;
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2),checked((ushort)separators.Count));
-        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4),first);int o=Header;
-        foreach(var c in separators)
+        if (first == 0 || separators.Count > MaxInternalChildren - 1)
+            throw new ArgumentOutOfRangeException(nameof(first));
+        byte[] p = new byte[Header + separators.Count * InternalEntry];
+        p[0] = Version;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), checked((ushort)separators.Count));
+        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4), first);
+        int o = Header;
+        foreach (StorageTreeChild child in separators)
         {
-            if(c.PageId==0)throw new InvalidDataException("Null B+ tree child.");
-            WriteKey(p.AsSpan(o,12),c.FirstKey);BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o+12),c.PageId);o+=InternalEntry;
+            if (child.PageId == 0) throw new InvalidDataException("Null B+ tree child.");
+            WriteKey(p.AsSpan(o, 12), child.FirstKey);
+            BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o + 12), child.PageId);
+            o += InternalEntry;
         }
-        return StoragePageCodec.Encode(generation,pageId,StoragePageKind.Internal,p);
+        return StoragePageCodec.Encode(generation, pageId, StoragePageKind.Internal, p);
+    }
+
+    public static byte[] EncodeInternal(
+        ulong generation, ulong pageId,
+        IReadOnlyList<StorageTreeChild> children, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(children);
+        if (start < 0 || count is < 2 || count > MaxInternalChildren ||
+            count > children.Count || start > children.Count - count)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        ulong first = children[start].PageId;
+        if (first == 0) throw new InvalidDataException("Null B+ tree first child.");
+        int separatorCount = count - 1;
+        byte[] p = new byte[Header + separatorCount * InternalEntry];
+        p[0] = Version;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), checked((ushort)separatorCount));
+        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4), first);
+        int o = Header;
+        for (int i = 1; i < count; i++)
+        {
+            StorageTreeChild child = children[start + i];
+            if (child.PageId == 0) throw new InvalidDataException("Null B+ tree child.");
+            WriteKey(p.AsSpan(o, 12), child.FirstKey);
+            BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o + 12), child.PageId);
+            o += InternalEntry;
+        }
+        return StoragePageCodec.Encode(generation, pageId, StoragePageKind.Internal, p);
     }
     public static ulong SelectInternalChild(
         ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
