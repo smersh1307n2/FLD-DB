@@ -53,26 +53,50 @@ internal static class StorageBTreePageCodec
             count > entries.Count || start > entries.Count - count)
             throw new ArgumentOutOfRangeException(nameof(count));
 
-        byte[] p = new byte[Header + count * LeafEntry];
-        p[0] = Version;
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), checked((ushort)count));
-        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4), next);
+        byte[] page = new byte[StoragePageCodec.PageSize];
+        EncodeLeafInto(page, generation, pageId, next, entries, start, count);
+        return page;
+    }
+    /// <summary>
+    /// Encodes a leaf directly into caller-owned fixed-size page memory. The full
+    /// buffer is cleared first so unused payload padding remains canonical.
+    /// </summary>
+    public static void EncodeLeafInto(
+        Span<byte> page, ulong generation, ulong pageId, ulong next,
+        IReadOnlyList<StorageTreeLeafEntry> entries, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        if (page.Length != StoragePageCodec.PageSize)
+            throw new ArgumentException("Page buffer must have the fixed Storage page size.", nameof(page));
+        if (start < 0 || count is < 1 || count > MaxLeafEntries ||
+            count > entries.Count || start > entries.Count - count)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        page.Clear();
+        int payloadLength = Header + count * LeafEntry;
+        Span<byte> payload = page.Slice(StoragePageCodec.HeaderSize, payloadLength);
+        payload[0] = Version;
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.Slice(2), checked((ushort)count));
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.Slice(4), next);
         int o = Header;
         for (int i = 0; i < count; i++)
         {
-            StorageTreeLeafEntry e = entries[start + i];
-            WriteKey(p.AsSpan(o, 12), e.Key);
+            StorageTreeLeafEntry entry = entries[start + i];
+            WriteKey(payload.Slice(o, 12), entry.Key);
             o += 12;
-            if (e.Value.Length < 0 || (e.Value.IsTombstone && e.Value.Length != 0))
+            if (entry.Value.Length < 0 || (entry.Value.IsTombstone && entry.Value.Length != 0))
                 throw new InvalidDataException("Invalid value reference.");
-            _ = checked(e.Value.Offset + (ulong)e.Value.Length);
-            BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o), e.Value.Offset);
-            BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o + 8), e.Value.Length);
-            p[o + 12] = e.Value.IsTombstone ? (byte)1 : (byte)0;
+            _ = checked(entry.Value.Offset + (ulong)entry.Value.Length);
+            BinaryPrimitives.WriteUInt64LittleEndian(payload.Slice(o), entry.Value.Offset);
+            BinaryPrimitives.WriteInt32LittleEndian(payload.Slice(o + 8), entry.Value.Length);
+            payload[o + 12] = entry.Value.IsTombstone ? (byte)1 : (byte)0;
             o += 13;
         }
-        return StoragePageCodec.Encode(generation, pageId, StoragePageKind.Leaf, p);
+
+        StoragePageCodec.EncodeInPlace(
+            page, generation, pageId, StoragePageKind.Leaf, payloadLength);
     }
+
     public static byte[] EncodeInternal(ulong generation, ulong pageId, ulong first, IReadOnlyList<StorageTreeChild> separators)
     {
         ArgumentNullException.ThrowIfNull(separators);
