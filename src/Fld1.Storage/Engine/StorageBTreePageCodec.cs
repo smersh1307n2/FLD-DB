@@ -207,6 +207,48 @@ internal static class StorageBTreePageCodec
         return lo;
     }
 
+    public static int GetInternalSeparatorCount(StoragePageView page)
+    {
+        if (page.Kind != StoragePageKind.Internal)
+            throw new InvalidDataException("Expected B+ tree internal page.");
+        return ReadHeader(page.Payload.Span, InternalEntry, true);
+    }
+
+    public static ulong GetInternalFirstChild(StoragePageView page)
+    {
+        if (page.Kind != StoragePageKind.Internal)
+            throw new InvalidDataException("Expected B+ tree internal page.");
+        ulong child = BinaryPrimitives.ReadUInt64LittleEndian(page.Payload.Span.Slice(4, 8));
+        if (child == 0) throw new InvalidDataException("Null B+ tree first child.");
+        return child;
+    }
+
+    public static StorageTreeChild GetInternalSeparator(StoragePageView page, int separatorIndex)
+    {
+        int count = GetInternalSeparatorCount(page);
+        if ((uint)separatorIndex >= (uint)count)
+            throw new ArgumentOutOfRangeException(nameof(separatorIndex));
+        ReadOnlySpan<byte> payload = page.Payload.Span;
+        int offset = Header + separatorIndex * InternalEntry;
+        StorageTreeKeyReference key = ReadKey(payload.Slice(offset, 12));
+        ulong child = BinaryPrimitives.ReadUInt64LittleEndian(payload.Slice(offset + 12, 8));
+        if (child == 0) throw new InvalidDataException("Null B+ tree child.");
+        return new StorageTreeChild(child, key);
+    }
+
+    public static ulong GetInternalChild(StoragePageView page, int childIndex)
+    {
+        int count = GetInternalSeparatorCount(page);
+        if ((uint)childIndex > (uint)count)
+            throw new ArgumentOutOfRangeException(nameof(childIndex));
+        if (childIndex == 0) return GetInternalFirstChild(page);
+        ReadOnlySpan<byte> payload = page.Payload.Span;
+        ulong child = BinaryPrimitives.ReadUInt64LittleEndian(
+            payload.Slice(Header + (childIndex - 1) * InternalEntry + 12, 8));
+        if (child == 0) throw new InvalidDataException("Null B+ tree child.");
+        return child;
+    }
+
     public static ulong GetInternalChild(StorageTreeInternalPage node, int childIndex)
     {
         ArgumentNullException.ThrowIfNull(node);
