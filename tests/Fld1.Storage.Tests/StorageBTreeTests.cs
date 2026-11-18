@@ -291,4 +291,33 @@ public sealed class StorageBTreeTests
     }
     [Fact] public void Empty_tree_and_one_megabyte_external_key_work(){ulong id=1;Assert.Equal(0UL,StorageBTreeBuilder.Build(1,Array.Empty<StorageTreeBuildEntry>(),()=>id++,(_,_)=>{}));byte[] k=new byte[1024*1024];k[^1]=1;var pages=new Dictionary<ulong,byte[]>();ulong p=1;ulong root=StorageBTreeBuilder.Build(2,new[]{new StorageTreeBuildEntry(k,99,100,3,false)},()=>p++,(n,b)=>pages.Add(n,b));var reader=new StorageBTreeReader(2,root,n=>pages[n],_=>k);Assert.True(reader.TryGet(k,out var v));Assert.Equal(3,v.Length);}
     [Fact] public void Page_codec_rejects_identity_and_crc_corruption(){byte[] p=StorageBTreePageCodec.EncodeLeaf(3,4,0,new[]{new StorageTreeLeafEntry(new(1,2),new(10,5,false))});Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,5));p[^1]=0x7f;Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,4));}
+    [Fact]
+    public void Reader_tree_key_cache_is_bounded_and_evicted_with_generation()
+    {
+        var shared = new StorageBTreeReaderCache();
+        const ulong generation = 73;
+        const int capacity = 4_096;
+
+        for (int i = 0; i < capacity; i++)
+        {
+            var reference = new StorageTreeKeyReference(checked((ulong)i * 32), 16);
+            shared.RememberTreeKey(generation, reference, new byte[16]);
+        }
+
+        Assert.Equal(capacity, shared.TreeKeyCount);
+        Assert.True(shared.TryGetTreeKey(
+            generation, new StorageTreeKeyReference(0, 16), out _));
+
+        var newest = new StorageTreeKeyReference(checked((ulong)capacity * 32), 16);
+        shared.RememberTreeKey(generation, newest, new byte[16]);
+
+        Assert.Equal(capacity, shared.TreeKeyCount);
+        Assert.False(shared.TryGetTreeKey(
+            generation, new StorageTreeKeyReference(0, 16), out _));
+        Assert.True(shared.TryGetTreeKey(generation, newest, out _));
+
+        shared.EvictGeneration(generation);
+        Assert.Equal(0, shared.TreeKeyCount);
+    }
+
 }

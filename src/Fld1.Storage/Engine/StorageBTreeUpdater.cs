@@ -78,9 +78,9 @@ internal static class StorageBTreeUpdater
                     ? Array.Empty<StorageTreeLeafEntry>()
                     : StorageBTreePageCodec.DecodeLeaf(
                         pageReadCache.Read(files, leafId, files.PageFileLength), files.Generation, leafId).Entries;
-                ValidateLeafEntries(existing, files);
+                ValidateLeafEntries(existing, files, pageReadCache);
 
-                List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files);
+                List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files, pageReadCache);
                 List<StorageTreeChild> replacements = WriteLeafLevel(merged, files, ref nextPageId);
                 rootPageId = RewritePath(path, leafId, replacements, files, ref nextPageId, pageReadCache);
                 start = end;
@@ -148,7 +148,8 @@ internal static class StorageBTreeUpdater
         IReadOnlyList<StorageTreeMutation> mutations,
         int mutationStart,
         int mutationEnd,
-        StorageBTreeGenerationFiles files)
+        StorageBTreeGenerationFiles files,
+        BatchPageReadCache pageReadCache)
     {
         var merged = new List<StorageTreeLeafEntry>(existing.Length + mutationEnd - mutationStart);
         int e = 0;
@@ -169,7 +170,7 @@ internal static class StorageBTreeUpdater
 
             StorageTreeLeafEntry current = existing[e];
             StorageTreeMutation mutation = mutations[m];
-            ReadOnlyMemory<byte> existingKey = ReadKey(files, current.Key);
+            ReadOnlyMemory<byte> existingKey = pageReadCache.ReadKey(files, current.Key);
             int comparison = existingKey.Span.SequenceCompareTo(mutation.Key.Span);
             if (comparison < 0)
             {
@@ -378,7 +379,7 @@ internal static class StorageBTreeUpdater
             StorageTreeInternalPage node =
                 pageReadCache.ReadInternal(files, id, files.PageFileLength);
             int childIndex = StorageBTreePageCodec.SelectInternalChildIndex(
-                page, key, reference => ReadKey(files, reference));
+                page, key, reference => pageReadCache.ReadKey(files, reference));
             path.Add(new StorageTreePathFrame(id, childIndex));
             id = StorageBTreePageCodec.GetInternalChild(node, childIndex);
         }
@@ -395,7 +396,7 @@ internal static class StorageBTreeUpdater
         foreach (StorageTreeChild separator in node.Separators)
         {
             if (previous.HasValue &&
-                ReadKey(files, previous.Value).Span.SequenceCompareTo(ReadKey(files, separator.FirstKey).Span) >= 0)
+                pageReadCache.ReadKey(files, previous.Value).Span.SequenceCompareTo(pageReadCache.ReadKey(files, separator.FirstKey).Span) >= 0)
                 throw new InvalidDataException("B+ tree internal separators are not strictly ordered.");
             if (!children.Add(separator.PageId))
                 throw new InvalidDataException("B+ tree internal page contains a duplicate child reference.");
@@ -409,8 +410,8 @@ internal static class StorageBTreeUpdater
     {
         for (int i = 1; i < entries.Length; i++)
         {
-            if (ReadKey(files, entries[i - 1].Key).Span.SequenceCompareTo(
-                    ReadKey(files, entries[i].Key).Span) >= 0)
+            if (pageReadCache.ReadKey(files, entries[i - 1].Key).Span.SequenceCompareTo(
+                    pageReadCache.ReadKey(files, entries[i].Key).Span) >= 0)
                 throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
         }
     }
@@ -429,6 +430,28 @@ internal static class StorageBTreeUpdater
         private const int Capacity = 4096;
         private readonly Dictionary<ulong, PageEntry> _pages = new();
         private readonly Queue<ulong> _order = new();
+        private const int KeyCapacity = 4_096;
+        private const int MaxCachedKeyLength = 256;
+        private readonly Dictionary<(ulong Offset, int Length), byte[]> _keys = new();
+        private readonly Queue<(ulong Offset, int Length)> _keyOrder = new();
+
+        public ReadOnlyMemory<byte> ReadKey(StorageBTreeGenerationFiles files, StorageTreeKeyReference reference)
+        {
+            if (reference.Length <= MaxCachedKeyLength &&
+                _keys.TryGetValue((reference.Offset, reference.Length), out byte[]? cached))
+                return cached;
+
+            byte[] key = files.ReadData(reference.Offset, reference.Length, files.DataFileLength);
+            if (reference.Length <= MaxCachedKeyLength)
+            {
+                var cacheKey = (reference.Offset, reference.Length);
+                if (_keys.Count == KeyCapacity)
+                    _keys.Remove(_keyOrder.Dequeue());
+                _keys[cacheKey] = key;
+                _keyOrder.Enqueue(cacheKey);
+            }
+            return key;
+        }
 
         public byte[] Read(
             StorageBTreeGenerationFiles files,
@@ -459,7 +482,7 @@ internal static class StorageBTreeUpdater
             StoragePageView page = entry.DecodedPage ??
                 (entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId)).Value;
             StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
-            ValidateInternalNode(node, files);
+            ValidateInternalNode(node, files, this);
             entry.InternalPage = node;
             return node;
         }

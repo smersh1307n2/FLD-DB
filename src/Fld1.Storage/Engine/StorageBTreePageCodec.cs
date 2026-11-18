@@ -382,7 +382,24 @@ internal sealed class StorageBTreeReader
         }
         catch { lease?.Dispose();lease=null;throw; }
     }
-    internal ReadOnlyMemory<byte> ReadKey(StorageTreeKeyReference r){ReadOnlyMemory<byte> key=_readKey(r);if(key.Length!=r.Length)throw new InvalidDataException("Key length mismatch.");return key;}
+    internal ReadOnlyMemory<byte> ReadKey(StorageTreeKeyReference reference)
+    {
+        if (_cache.TryGetTreeKey(_generation, reference, out byte[] cached))
+            return cached;
+
+        ReadOnlyMemory<byte> key = _readKey(reference);
+        if (key.Length != reference.Length)
+            throw new InvalidDataException("Key length mismatch.");
+
+        if (reference.Length <= 256)
+        {
+            byte[] retained = key.ToArray();
+            _cache.RememberTreeKey(_generation, reference, retained);
+            return retained;
+        }
+
+        return key;
+    }
     internal bool HasPrefix(StorageTreeKeyReference key,ReadOnlySpan<byte> prefix)=>ReadKey(key).Span.StartsWith(prefix);
     internal int CompareKeys(StorageTreeKeyReference left,StorageTreeKeyReference right)
         => ReadKey(left).Span.SequenceCompareTo(ReadKey(right).Span);

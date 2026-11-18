@@ -9,14 +9,19 @@ internal sealed class StorageBTreeReaderCache
 {
     private const int HotLookupCapacity = 16_384;
     private const int ValidationCacheCapacity = 4_096;
+    private const int TreeKeyCacheCapacity = 4_096;
+    private const int MaxCachedKeyLength = 256;
     private readonly object _gate = new();
     private readonly Dictionary<HotLookupKey, HotLookupEntry> _hot = new();
     private readonly Queue<HotLookupKey> _hotOrder = new();
     private readonly HashSet<ValidatedPageKey> _validated = new();
     private readonly Queue<ValidatedPageKey> _validatedOrder = new();
+    private readonly Dictionary<TreeKeyCacheKey, byte[]> _treeKeys = new();
+    private readonly Queue<TreeKeyCacheKey> _treeKeyOrder = new();
 
     public int HotLookupCount { get { lock (_gate) return _hot.Count; } }
     public int ValidatedPageCount { get { lock (_gate) return _validated.Count; } }
+    public int TreeKeyCount { get { lock (_gate) return _treeKeys.Count; } }
 
     public bool TryGetHot(
         ulong generation, ulong root, ReadOnlySpan<byte> key,
@@ -67,6 +72,48 @@ internal sealed class StorageBTreeReaderCache
             return _hot.Keys.Count(key => key.Generation == generation && key.Root == root);
     }
 
+    public bool TryGetTreeKey(ulong generation, StorageTreeKeyReference reference, out byte[] key)
+    {
+        if (reference.Length > MaxCachedKeyLength)
+        {
+            key = Array.Empty<byte>();
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_treeKeys.TryGetValue(
+                    new TreeKeyCacheKey(generation, reference.Offset, reference.Length), out byte[]? cached))
+            {
+                key = cached;
+                return true;
+            }
+        }
+
+        key = Array.Empty<byte>();
+        return false;
+    }
+
+    public void RememberTreeKey(ulong generation, StorageTreeKeyReference reference, byte[] key)
+    {
+        if (reference.Length > MaxCachedKeyLength || key.Length != reference.Length)
+            return;
+
+        var cacheKey = new TreeKeyCacheKey(generation, reference.Offset, reference.Length);
+        lock (_gate)
+        {
+            if (_treeKeys.ContainsKey(cacheKey))
+                return;
+            while (_treeKeys.Count >= TreeKeyCacheCapacity)
+            {
+                TreeKeyCacheKey oldest = _treeKeyOrder.Dequeue();
+                _treeKeys.Remove(oldest);
+            }
+            _treeKeys.Add(cacheKey, key);
+            _treeKeyOrder.Enqueue(cacheKey);
+        }
+    }
+
     public bool IsValidated(ulong generation, ulong pageId)
     {
         lock (_gate)
@@ -98,11 +145,14 @@ internal sealed class StorageBTreeReaderCache
                 _hot.Remove(key);
             foreach (ValidatedPageKey key in _validated.Where(key => key.Generation == generation).ToArray())
                 _validated.Remove(key);
+            foreach (TreeKeyCacheKey key in _treeKeys.Keys.Where(key => key.Generation == generation).ToArray())
+                _treeKeys.Remove(key);
 
             // Remove stale FIFO nodes as well; otherwise repeated generation retirement
             // and reuse could grow the queues without bound or evict a newer duplicate key.
             RebuildQueue(_hotOrder, key => _hot.ContainsKey(key));
             RebuildQueue(_validatedOrder, key => _validated.Contains(key));
+            RebuildQueue(_treeKeyOrder, key => _treeKeys.ContainsKey(key));
         }
     }
 
@@ -129,5 +179,6 @@ internal sealed class StorageBTreeReaderCache
 
     private readonly record struct HotLookupKey(ulong Generation, ulong Root, ulong Hash);
     private readonly record struct ValidatedPageKey(ulong Generation, ulong PageId);
+    private readonly record struct TreeKeyCacheKey(ulong Generation, ulong Offset, int Length);
     private readonly record struct HotLookupEntry(byte[] Key, bool Found, StorageTreeValueReference Value);
 }
