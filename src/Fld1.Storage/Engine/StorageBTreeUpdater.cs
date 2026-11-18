@@ -420,9 +420,8 @@ internal static class StorageBTreeUpdater
                 return firstKey;
             }
 
-            StorageTreeInternalPage node =
-                pageReadCache.ReadInternal(files, id, files.PageFileLength);
-            id = node.FirstChild;
+            pageReadCache.ValidateInternal(files, id, files.PageFileLength);
+            id = StorageBTreePageCodec.GetInternalChild(page, 0);
         }
 
         throw new InvalidDataException("B+ tree depth exceeds the supported maximum or contains a cycle.");
@@ -443,30 +442,31 @@ internal static class StorageBTreeUpdater
             if (page.Kind == StoragePageKind.Leaf)
                 return id;
 
-            StorageTreeInternalPage node =
-                pageReadCache.ReadInternal(files, id, files.PageFileLength);
+            pageReadCache.ValidateInternal(files, id, files.PageFileLength);
             int childIndex = StorageBTreePageCodec.SelectInternalChildIndex(page, key, readKey);
             path?.Add(new StorageTreePathFrame(id, childIndex));
-            id = StorageBTreePageCodec.GetInternalChild(node, childIndex);
+            id = StorageBTreePageCodec.GetInternalChild(page, childIndex);
         }
 
         throw new InvalidDataException("B+ tree depth exceeds the supported maximum or contains a cycle.");
     }
 
     private static void ValidateInternalNode(
-        StorageTreeInternalPage node,
+        StoragePageView page,
         StorageBTreeGenerationFiles files,
         BatchPageReadCache pageReadCache,
         HashSet<ulong> children)
     {
-        // One validation set is reused by the batch-local page cache. Internal
-        // pages are validated once when decoded; allocating a fresh HashSet for
-        // every page creates avoidable Gen0 garbage during large COW batches.
+        // Validate the encoded view directly. FindLeaf only needs child IDs and
+        // separator references; materializing StorageTreeChild[] for every search
+        // page creates avoidable arrays. One batch-local set is reused as before.
         children.Clear();
-        children.Add(node.FirstChild);
+        children.Add(StorageBTreePageCodec.GetInternalFirstChild(page));
         StorageTreeKeyReference? previous = null;
-        foreach (StorageTreeChild separator in node.Separators)
+        int count = StorageBTreePageCodec.GetInternalSeparatorCount(page);
+        for (int i = 0; i < count; i++)
         {
+            StorageTreeChild separator = StorageBTreePageCodec.GetInternalSeparator(page, i);
             if (previous.HasValue &&
                 pageReadCache.ReadKey(files, previous.Value).Span.SequenceCompareTo(pageReadCache.ReadKey(files, separator.FirstKey).Span) >= 0)
                 throw new InvalidDataException("B+ tree internal separators are not strictly ordered.");
@@ -555,10 +555,27 @@ internal static class StorageBTreeUpdater
 
             StoragePageView page = entry.DecodedPage ??
                 (entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId)).Value;
+            if (!entry.InternalValidated)
+            {
+                ValidateInternalNode(page, files, this, _validationChildren);
+                entry.InternalValidated = true;
+            }
             StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
-            ValidateInternalNode(node, files, this, _validationChildren);
             entry.InternalPage = node;
             return node;
+        }
+
+        public void ValidateInternal(
+            StorageBTreeGenerationFiles files,
+            ulong pageId,
+            ulong committedPageFileLength)
+        {
+            PageEntry entry = GetEntry(files, pageId, committedPageFileLength);
+            if (entry.InternalValidated) return;
+            StoragePageView page = entry.DecodedPage ??
+                (entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId)).Value;
+            ValidateInternalNode(page, files, this, _validationChildren);
+            entry.InternalValidated = true;
         }
 
         public bool TryGetFirstKey(ulong pageId, out StorageTreeKeyReference firstKey)
@@ -603,6 +620,7 @@ internal static class StorageBTreeUpdater
             public byte[] Bytes { get; } = bytes;
             public StoragePageView? DecodedPage { get; set; }
             public StorageTreeInternalPage? InternalPage { get; set; }
+            public bool InternalValidated { get; set; }
             public StorageTreeKeyReference? FirstKey { get; set; }
         }
     }
