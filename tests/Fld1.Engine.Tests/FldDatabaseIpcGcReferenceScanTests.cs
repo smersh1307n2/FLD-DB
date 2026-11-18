@@ -335,4 +335,36 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
         id[0] = value;
         return id;
     }
+
+    [Fact]
+    public void Packed_change_id_batch_codec_roundtrips_without_per_identity_arrays()
+    {
+        Guid token = Guid.NewGuid();
+        byte[] packed = new byte[3 * 16];
+        for (int i = 0; i < 3; i++)
+        {
+            packed[i * 16] = checked((byte)(0x31 + i));
+            packed[i * 16 + 15] = checked((byte)(0x71 + i));
+        }
+
+        byte[] payload = FldDatabaseIpcGcProtocol.EncodeChangeIdBatchQuery(
+            token, packed, count: 3);
+        (Guid decodedToken, ReadOnlyMemory<byte> decodedIds, int count) =
+            FldDatabaseIpcGcProtocol.DecodeChangeIdBatchQueryView(payload);
+
+        Assert.Equal(token, decodedToken);
+        Assert.Equal(3, count);
+        Assert.Equal(packed, decodedIds.ToArray());
+
+        // The view aliases the IPC payload rather than materializing byte[][] and
+        // one byte[] per ChangeId on the Host side.
+        Assert.Same(payload, System.Runtime.InteropServices.MemoryMarshal
+            .TryGetArray(decodedIds, out ArraySegment<byte> segment) ? segment.Array : null);
+        Assert.Equal(18, segment.Offset);
+
+        byte[] response = FldDatabaseIpcGcProtocol.EncodeChangeIdBatchResponse(
+            new[] { true, false, true });
+        Assert.Equal(new[] { true, false, true },
+            FldDatabaseIpcGcProtocol.DecodeChangeIdBatchResponse(response, 3));
+    }
 }
