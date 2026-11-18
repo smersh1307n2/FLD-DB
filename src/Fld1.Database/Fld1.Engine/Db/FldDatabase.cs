@@ -1885,8 +1885,8 @@ public sealed partial class FldDatabase : IDisposable
     private ulong CompactUnderLock(TombstoneGcFilter? tombstoneGc = null)
     {
         long gcDiagnosticStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
-        long gcQueueTicks = 0, gcLoopTicks = 0, gcResolveTicks = 0, gcLifecycleResolveTicks = 0, gcOutputTicks = 0, gcFlushTicks = 0;
-        int gcRecords = 0, gcResolveCalls = 0, gcLifecycleResolveCalls = 0, gcOutputFields = 0, gcOutputRuns = 0;
+        long gcQueueTicks = 0, gcLoopTicks = 0, gcResolveTicks = 0, gcOutputTicks = 0, gcFlushTicks = 0;
+        int gcRecords = 0, gcResolveCalls = 0, gcOutputFields = 0, gcOutputRuns = 0;
         EnsureHealthy();
         if (_dirty.Count != 0)
             throw new InvalidOperationException("Compact requires all overlay writes to be committed first.");
@@ -2019,19 +2019,11 @@ public sealed partial class FldDatabase : IDisposable
 
             bool hasRecordTombstone = false;
             bool reclaimRecordTombstone = false;
-            bool hasRecordLifecycleResolution = false;
             CompactionResolved recordTombstone = default;
-            if (tombstoneGc is not null && fieldIds.Contains(FldLifecycle.FieldId))
-            {
-                long gcLifecycleResolveStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-                hasRecordLifecycleResolution =
-                    TryResolveForCompactionUnlocked(recordIdBuffer, FldLifecycle.FieldId, out recordTombstone) &&
-                    recordTombstone.Found;
-                gcLifecycleResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcLifecycleResolveStarted;
-                gcLifecycleResolveCalls++;
-            }
-
-            if (tombstoneGc is not null && hasRecordLifecycleResolution)
+            if (tombstoneGc is not null &&
+                fieldIds.Contains(FldLifecycle.FieldId) &&
+                TryResolveForCompactionUnlocked(recordIdBuffer, FldLifecycle.FieldId, out recordTombstone) &&
+                recordTombstone.Found)
             {
                 if (recordTombstone.IsTombstone || recordTombstone.Value.IsEmpty)
                     throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
@@ -2052,24 +2044,9 @@ public sealed partial class FldDatabase : IDisposable
             for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
             {
                 ushort fieldId = fieldIds[fieldIndex];
-                bool gcResolved;
-                CompactionResolved resolved;
-                if (tombstoneGc is not null &&
-                    fieldId == FldLifecycle.FieldId &&
-                    hasRecordLifecycleResolution)
-                {
-                    // The lifecycle value was already resolved to decide record-level
-                    // tombstone reclamation. Reuse that LWW result instead of searching
-                    // every Run a second time for the same (RecordId, FieldId).
-                    gcResolved = true;
-                    resolved = recordTombstone;
-                }
-                else
-                {
-                    long gcResolveStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
-                    gcResolved = TryResolveForCompactionUnlocked(recordIdBuffer, fieldId, out resolved);
-                    if (tombstoneGc is not null) { gcResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcResolveStarted; gcResolveCalls++; }
-                }
+                long gcResolveStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+                bool gcResolved = TryResolveForCompactionUnlocked(recordIdBuffer, fieldId, out CompactionResolved resolved);
+                if (tombstoneGc is not null) { gcResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcResolveStarted; gcResolveCalls++; }
                 if (!gcResolved || !resolved.Found)
                     continue;
 
@@ -2192,11 +2169,9 @@ public sealed partial class FldDatabase : IDisposable
         if (tombstoneGc is not null)
             WriteGcCompactionDiagnostic(
                 $"Runs={oldRuns.Count} OverlayEntries={overlay.Count} Records={gcRecords} " +
-                $"ResolveCalls={gcResolveCalls + gcLifecycleResolveCalls} LifecycleResolveCalls={gcLifecycleResolveCalls} " +
-                $"OutputFields={gcOutputFields} OutputRuns={gcOutputRuns} " +
+                $"ResolveCalls={gcResolveCalls} OutputFields={gcOutputFields} OutputRuns={gcOutputRuns} " +
                 $"QueueMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcQueueTicks).TotalMilliseconds:F3} " +
                 $"LoopMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcLoopTicks).TotalMilliseconds:F3} " +
-                $"LifecycleResolveMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcLifecycleResolveTicks).TotalMilliseconds:F3} " +
                 $"ResolveMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcResolveTicks).TotalMilliseconds:F3} " +
                 $"OutputMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcOutputTicks).TotalMilliseconds:F3} " +
                 $"FlushMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcFlushTicks).TotalMilliseconds:F3}");

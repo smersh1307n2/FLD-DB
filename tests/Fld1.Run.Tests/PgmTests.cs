@@ -66,4 +66,40 @@ public class PgmTests
         Assert.True(RunVerify.Verify(run).IsOk);
         Assert.True(RunHeader.ReadPgmSegments(run) >= 1);
     }
+
+    [Fact]
+    public void Many_pgm_segments_lookup_all_records()
+    {
+        var author = Author(1);
+        const int count = 4096;
+        var builder = new RunBuilder(0, pgmEpsilon: 8);
+        var ids = new List<byte[]>(count);
+
+        for (int i = 0; i < count; i++)
+        {
+            var id = new byte[16];
+            ulong timestampMs = (ulong)i * (ulong)i;
+            id[0] = (byte)(timestampMs >> 40);
+            id[1] = (byte)(timestampMs >> 32);
+            id[2] = (byte)(timestampMs >> 24);
+            id[3] = (byte)(timestampMs >> 16);
+            id[4] = (byte)(timestampMs >> 8);
+            id[5] = (byte)timestampMs;
+            id[6] = 0x70;
+            id[7] = 0;
+            id[8] = 0x80;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(id.AsSpan(12, 4), (uint)i);
+
+            ids.Add(id);
+            builder.Add(id, 1, new byte[] { (byte)i }, wall: 1000 + (ulong)i, logical: 0, author);
+        }
+
+        var run = builder.Build();
+        Assert.True(RunVerify.Verify(run).IsOk, RunVerify.Verify(run).Detail);
+        Assert.True(RunHeader.ReadPgmSegments(run) > 1);
+
+        var reader = new RunReader(run);
+        foreach (var id in ids)
+            Assert.True(reader.TryGet(id, 1, out var value), $"miss for {Convert.ToHexString(id)}");
+    }
 }

@@ -246,15 +246,22 @@ public readonly struct RunReader
         uint defaultEps = RunHeader.ReadPgmEpsilon(file);
         ulong pgmOff = RunHeader.ReadPgmOff(file);
 
-        // Find segment: last with StartKey <= k, or first
-        int segIdx = 0;
-        for (int s = 0; s < (int)segs; s++)
+        // PGM segments are emitted in ascending StartKey order. Find the
+        // last segment whose StartKey <= k with an upper-bound search; a
+        // linear scan here made every point lookup O(segment-count).
+        int low = 0;
+        int high = (int)segs;
+        while (low < high)
         {
+            int mid = low + ((high - low) >> 1);
             ulong startKey = BinaryPrimitives.ReadUInt64LittleEndian(
-                file.Slice((int)pgmOff + s * RunConstants.PgmSegmentSize, 8));
-            if (startKey <= k) segIdx = s;
-            else break;
+                file.Slice((int)pgmOff + mid * RunConstants.PgmSegmentSize, 8));
+            if (startKey <= k)
+                low = mid + 1;
+            else
+                high = mid;
         }
+        int segIdx = low > 0 ? low - 1 : 0;
 
         int spos = (int)pgmOff + segIdx * RunConstants.PgmSegmentSize;
         ulong segStartKey = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(spos, 8));
