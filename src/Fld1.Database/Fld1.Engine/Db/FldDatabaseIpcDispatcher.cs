@@ -889,7 +889,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
             long started = System.Diagnostics.Stopwatch.GetTimestamp();
             byte[] response =
                 handle.Snapshot.ReadMetadataPagePayload(request.AfterIndex, request.Limit);
-            int count = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(5));
+            int count = response[5] | (response[6] << 8);
             handle.ReadPageCalls++;
             handle.ReadPageEntries = checked(handle.ReadPageEntries + count);
             handle.ReadPageElapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
