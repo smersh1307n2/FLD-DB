@@ -64,13 +64,18 @@ internal static class StorageBTreeUpdater
         // avoidable short-lived garbage. Entries contain only value-type offsets.
         var mergedLeafEntries = new List<StorageTreeLeafEntry>();
 
+        // Reuse the root-to-leaf path buffer across groups. A sorted delete
+        // batch may touch thousands of leaves; each path is consumed by RewritePath
+        // before the next iteration clears and refills this small value-type buffer.
+        var path = new List<StorageTreePathFrame>();
+
         try
         {
             int start = 0;
             while (start < mutations.Count)
             {
                 long phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
-                var path = new List<StorageTreePathFrame>();
+                path.Clear();
                 ulong leafId = rootPageId == 0
                     ? 0
                     : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache, readKey);
