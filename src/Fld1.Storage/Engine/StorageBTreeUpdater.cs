@@ -121,7 +121,7 @@ internal static class StorageBTreeUpdater
                 if (allocationObserver is not null)
                     findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - findAndGroupPhaseStart;
 
-                phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
+                long phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 StorageBTreeLeafPageView existing = leafId == 0
                     ? default
                     : StorageBTreePageCodec.DecodeLeafView(
