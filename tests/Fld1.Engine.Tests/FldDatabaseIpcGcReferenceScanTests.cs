@@ -143,7 +143,7 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
             Assert.Equal(0UL, receiptScan.UnpublishedLocalDraftHorizon.Count);
             Assert.Equal(database.PendingFlushedCommitSeq, database.LastSealedCommitSeq);
             Assert.True(await clientA.HasGcChangeIdReferenceAsync(
-                receiptScan.Token, secondChangeId));
+                receiptScan.Token, retainedChangeId));
             Task<byte[]> receiptBlocked = clientB.GetLocalAuthorAsync();
             await Task.Delay(100);
             Assert.False(receiptBlocked.IsCompleted,
