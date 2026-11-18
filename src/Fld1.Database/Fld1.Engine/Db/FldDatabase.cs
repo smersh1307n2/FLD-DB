@@ -1352,10 +1352,12 @@ public sealed partial class FldDatabase : IDisposable
 
                 try
                 {
+                    bool measureManifest = TryStartCheckpointDiagnostic(out long manifestAllocated, out long manifestStarted);
                     _outbox.MarkMaterialized(applyOnlySeq);
                     _manifestStore.Update(m => CloneManifest(m, lastFlushed: applyOnlySeq,
                         localOperationReceipts: BuildManifestLocalOperationReceipts(m.LocalOperationReceipts),
                         localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients)));
+                    WriteCheckpointDiagnostic("manifest-update", measureManifest, manifestAllocated, manifestStarted);
                 }
                 catch
                 {
@@ -1368,8 +1370,14 @@ public sealed partial class FldDatabase : IDisposable
                 _manifestDirty = false;
                 if (_truncateSealedWal)
                 {
+                    bool measureWal = TryStartCheckpointDiagnostic(out long walAllocated, out long walStarted);
                     _wal.TruncateSealedSegments(applyOnlySeq);
-                    _applyJournal.CompactAcknowledgedRelayPayloads(applyOnlySeq);
+                    WriteCheckpointDiagnostic("wal-truncate", measureWal, walAllocated, walStarted);
+
+                    bool measureJournal = TryStartCheckpointDiagnostic(out long journalAllocated, out long journalStarted);
+                    int compactedRelayFields = _applyJournal.CompactAcknowledgedRelayPayloads(applyOnlySeq);
+                    WriteCheckpointDiagnostic("apply-journal-compact", measureJournal, journalAllocated, journalStarted,
+                        $"RemovedRelayFields={compactedRelayFields}");
                 }
                 return 0;
             }
@@ -3390,6 +3398,41 @@ public sealed partial class FldDatabase : IDisposable
                 }
             }
         }
+    }
+
+    private static bool TryStartCheckpointDiagnostic(out long allocatedBytes, out long startedTicks)
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FLD_TEST_GC_DIAGNOSTICS_FILE")))
+        {
+            allocatedBytes = 0;
+            startedTicks = 0;
+            return false;
+        }
+
+        allocatedBytes = GC.GetTotalAllocatedBytes(precise: true);
+        startedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        return true;
+    }
+
+    private static void WriteCheckpointDiagnostic(
+        string stage, bool enabled, long allocatedBefore, long startedTicks, string? detail = null)
+    {
+        if (!enabled)
+            return;
+        string? path = Environment.GetEnvironmentVariable("FLD_TEST_GC_DIAGNOSTICS_FILE");
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        try
+        {
+            long allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+            double elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(startedTicks).TotalMilliseconds;
+            string line = $"FLD_CHECKPOINT_GC Stage={stage} ElapsedMs={elapsed:F3} " +
+                $"AllocatedBytes={allocated} ManagedHeapBytes={GC.GetTotalMemory(forceFullCollection: false)}" +
+                (string.IsNullOrWhiteSpace(detail) ? string.Empty : " " + detail);
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static void UpdateMaximumHlc(

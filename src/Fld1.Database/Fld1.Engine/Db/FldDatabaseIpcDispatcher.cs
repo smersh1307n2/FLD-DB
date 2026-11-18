@@ -287,7 +287,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 // committed WAL has been sealed. Other GC domains keep their
                 // existing scan semantics. A failed seal is reported as a pin veto.
                 using IDisposable commitLease = _database.AcquireCommitGuard();
+                long walSealAllocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+                long walSealStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                WriteSnapshotGcDiagnostic("tombstone-wal-seal-before", Guid.Empty);
                 tombstoneWalSealSucceeded = _database.TrySealCommittedWalForTombstoneGc();
+                WriteSnapshotGcDiagnostic("tombstone-wal-seal-after", Guid.Empty,
+                    $"ElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(walSealStarted).TotalMilliseconds:F3} " +
+                    $"AllocatedBytes={GC.GetTotalAllocatedBytes(precise: true) - walSealAllocatedBefore} " +
+                    $"Succeeded={tombstoneWalSealSucceeded}");
             }
             Guid token = Guid.NewGuid();
             long referenceAllocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
