@@ -50,8 +50,7 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             Count > MaxEntries - candidates.Count)
             throw new ArgumentOutOfRangeException(nameof(candidates));
 
-        byte[] payload = FldDatabaseIpcProtocol.EncodeTombstoneGcRequest(candidates, candidates.Count);
-        ReadOnlySpan<byte> encoded = payload.AsSpan(4);
+        Span<byte> encoded = stackalloc byte[CandidateBytes];
         for (int i = 0; i < candidates.Count; i++)
         {
             FldTombstoneGcCandidate candidate = candidates[i];
@@ -60,8 +59,8 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
                 throw new InvalidDataException(
                     "Tombstone-GC approval spool identities must be strictly ordered and unique.");
 
-            int offset = i * CandidateBytes;
-            _writer!.Write(encoded.Slice(offset, CandidateBytes));
+            FldDatabaseIpcProtocol.EncodeTombstoneGcCandidate(encoded, candidate);
+            _writer!.Write(encoded);
             candidate.RecordId.Span.CopyTo(_lastRecordId);
             _lastFieldId = candidate.FieldId;
             _hasLastRecordId = true;
@@ -110,36 +109,6 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         return compare != 0 ? compare : leftFieldId.CompareTo(rightFieldId);
     }
 
-    private static FldTombstoneGcCandidate DecodeCandidate(ReadOnlySpan<byte> bytes)
-    {
-        if (bytes.Length != CandidateBytes)
-            throw new InvalidDataException("Tombstone-GC approval spool entry length is invalid.");
-
-        int offset = 0;
-        byte[] identity = new byte[48];
-        bytes[..16].CopyTo(identity);
-        offset = 16;
-        ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(bytes[offset..]);
-        offset += 2;
-        bytes.Slice(offset, 32).CopyTo(identity.AsSpan(16));
-        offset += 32;
-        ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..]);
-        offset += 8;
-        uint logical = BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]);
-        offset += 4;
-        uint authorEpoch = BinaryPrimitives.ReadUInt32LittleEndian(bytes[offset..]);
-        offset += 4;
-        ulong originSequence = BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..]);
-        offset += 8;
-        byte kind = bytes[offset];
-        if (kind is not (1 or 2) || wall == 0 || authorEpoch == 0 || originSequence == 0)
-            throw new InvalidDataException("Tombstone-GC approval spool entry identity is invalid.");
-
-        return FldTombstoneGcCandidate.CreateOwned(
-            identity, 16, 16, fieldId, wall, logical,
-            authorEpoch, originSequence, kind == 1, kind == 2);
-    }
-
     private void ThrowIfUnavailable()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -176,7 +145,6 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         private readonly FileStream _stream;
         private readonly int _count;
         private int _read;
-        private FldTombstoneGcCandidate? _next;
         private readonly byte[] _entryBuffer = new byte[CandidateBytes];
         private bool _hasNext;
         private bool _disposed;
@@ -218,8 +186,8 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             ObjectDisposedException.ThrowIf(_disposed, this);
             while (_hasNext)
             {
-                FldTombstoneGcCandidate next = _next!.Value;
-                if (CompareKey(next.RecordId.Span, next.FieldId,
+                ushort nextFieldId = BinaryPrimitives.ReadUInt16LittleEndian(_entryBuffer.AsSpan(16, 2));
+                if (CompareKey(_entryBuffer.AsSpan(0, 16), nextFieldId,
                     current.RecordId.Span, current.FieldId) >= 0)
                     break;
                 ReadNext();
@@ -228,15 +196,50 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             if (!_hasNext)
                 return false;
 
-            FldTombstoneGcCandidate approved = _next!.Value;
-            int compare = CompareKey(approved.RecordId.Span, approved.FieldId,
+            ushort approvedFieldId = BinaryPrimitives.ReadUInt16LittleEndian(_entryBuffer.AsSpan(16, 2));
+            int compare = CompareKey(_entryBuffer.AsSpan(0, 16), approvedFieldId,
                 current.RecordId.Span, current.FieldId);
             if (compare > 0)
                 return false;
 
-            bool exact = approved.Equals(current);
+            bool exact = MatchesCurrent(current);
             ReadNext();
             return exact;
+        }
+
+        private bool MatchesCurrent(FldTombstoneGcCandidate current)
+        {
+            ReadOnlySpan<byte> entry = _entryBuffer;
+            if (!entry[..16].SequenceEqual(current.RecordId.Span))
+                return false;
+
+            int offset = 16;
+            ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(entry[offset..]);
+            offset += 2;
+            if (fieldId != current.FieldId ||
+                !entry.Slice(offset, 16).SequenceEqual(current.ChangeId.Span))
+                return false;
+            offset += 16;
+            if (!entry.Slice(offset, 16).SequenceEqual(current.AuthorNodeId.Span))
+                return false;
+            offset += 16;
+
+            ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(entry[offset..]);
+            offset += 8;
+            uint logical = BinaryPrimitives.ReadUInt32LittleEndian(entry[offset..]);
+            offset += 4;
+            uint authorEpoch = BinaryPrimitives.ReadUInt32LittleEndian(entry[offset..]);
+            offset += 4;
+            ulong originSequence = BinaryPrimitives.ReadUInt64LittleEndian(entry[offset..]);
+            offset += 8;
+            byte kind = entry[offset];
+
+            return wall == current.HlcWall &&
+                logical == current.HlcLogical &&
+                authorEpoch == current.OriginAuthorEpoch &&
+                originSequence == current.OriginSequence &&
+                (kind == 1) == current.IsRecordTombstone &&
+                (kind == 2) == current.IsFieldTombstone;
         }
 
         private void ReadNext()
@@ -251,7 +254,6 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             }
 
             _stream.ReadExactly(_entryBuffer);
-            _next = DecodeCandidate(_entryBuffer);
             _hasNext = true;
             _read++;
         }

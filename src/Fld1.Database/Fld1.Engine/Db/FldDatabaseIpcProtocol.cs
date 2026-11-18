@@ -957,38 +957,49 @@ public static class FldDatabaseIpcProtocol
         int offset = TombstoneGcRequestHeaderBytes;
         foreach (FldTombstoneGcCandidate candidate in candidates)
         {
-            ReadOnlySpan<byte> recordId = candidate.RecordId.Span;
-            ReadOnlySpan<byte> changeId = candidate.ChangeId.Span;
-            ReadOnlySpan<byte> authorNodeId = candidate.AuthorNodeId.Span;
-            if (recordId.Length != 16 || recordId.IndexOfAnyExcept((byte)0) < 0 ||
-                changeId.Length != 16 || changeId.IndexOfAnyExcept((byte)0) < 0 ||
-                authorNodeId.Length != 16 || authorNodeId.IndexOfAnyExcept((byte)0) < 0 ||
-                candidate.HlcWall == 0 || candidate.OriginAuthorEpoch == 0 ||
-                candidate.OriginSequence == 0 ||
-                candidate.IsRecordTombstone == candidate.IsFieldTombstone ||
-                (candidate.IsRecordTombstone && candidate.FieldId != FldLifecycle.FieldId) ||
-                (candidate.IsFieldTombstone && candidate.FieldId == FldLifecycle.FieldId))
-                throw new ArgumentException("Tombstone GC candidate is not canonical.", nameof(candidates));
-
-            recordId.CopyTo(payload.AsSpan(offset, 16));
-            offset += 16;
-            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(offset), candidate.FieldId);
-            offset += 2;
-            changeId.CopyTo(payload.AsSpan(offset, 16));
-            offset += 16;
-            authorNodeId.CopyTo(payload.AsSpan(offset, 16));
-            offset += 16;
-            BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(offset), candidate.HlcWall);
-            offset += 8;
-            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(offset), candidate.HlcLogical);
-            offset += 4;
-            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(offset), candidate.OriginAuthorEpoch);
-            offset += 4;
-            BinaryPrimitives.WriteUInt64LittleEndian(payload.AsSpan(offset), candidate.OriginSequence);
-            offset += 8;
-            payload[offset++] = candidate.IsRecordTombstone ? (byte)1 : (byte)2;
+            EncodeTombstoneGcCandidate(payload.AsSpan(offset, TombstoneGcCandidateBytes), candidate);
+            offset += TombstoneGcCandidateBytes;
         }
         return payload;
+    }
+
+    internal static void EncodeTombstoneGcCandidate(
+        Span<byte> destination, FldTombstoneGcCandidate candidate)
+    {
+        if (destination.Length != TombstoneGcCandidateBytes)
+            throw new ArgumentException("Tombstone-GC candidate destination length is invalid.", nameof(destination));
+
+        ReadOnlySpan<byte> recordId = candidate.RecordId.Span;
+        ReadOnlySpan<byte> changeId = candidate.ChangeId.Span;
+        ReadOnlySpan<byte> authorNodeId = candidate.AuthorNodeId.Span;
+        if (recordId.Length != 16 || recordId.IndexOfAnyExcept((byte)0) < 0 ||
+            changeId.Length != 16 || changeId.IndexOfAnyExcept((byte)0) < 0 ||
+            authorNodeId.Length != 16 || authorNodeId.IndexOfAnyExcept((byte)0) < 0 ||
+            candidate.HlcWall == 0 || candidate.OriginAuthorEpoch == 0 ||
+            candidate.OriginSequence == 0 ||
+            candidate.IsRecordTombstone == candidate.IsFieldTombstone ||
+            (candidate.IsRecordTombstone && candidate.FieldId != FldLifecycle.FieldId) ||
+            (candidate.IsFieldTombstone && candidate.FieldId == FldLifecycle.FieldId))
+            throw new ArgumentException("Tombstone GC candidate is not canonical.", nameof(candidate));
+
+        int offset = 0;
+        recordId.CopyTo(destination[offset..]);
+        offset += 16;
+        BinaryPrimitives.WriteUInt16LittleEndian(destination[offset..], candidate.FieldId);
+        offset += 2;
+        changeId.CopyTo(destination[offset..]);
+        offset += 16;
+        authorNodeId.CopyTo(destination[offset..]);
+        offset += 16;
+        BinaryPrimitives.WriteUInt64LittleEndian(destination[offset..], candidate.HlcWall);
+        offset += 8;
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], candidate.HlcLogical);
+        offset += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], candidate.OriginAuthorEpoch);
+        offset += 4;
+        BinaryPrimitives.WriteUInt64LittleEndian(destination[offset..], candidate.OriginSequence);
+        offset += 8;
+        destination[offset] = candidate.IsRecordTombstone ? (byte)1 : (byte)2;
     }
 
     public static (int Limit, FldTombstoneGcCandidate[] Candidates) DecodeTombstoneGcRequest(

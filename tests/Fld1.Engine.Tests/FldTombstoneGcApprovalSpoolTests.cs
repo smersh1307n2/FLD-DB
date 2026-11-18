@@ -78,18 +78,57 @@ public sealed class FldTombstoneGcApprovalSpoolTests
         }
     }
 
-    private static FldTombstoneGcCandidate Candidate(byte record, ushort field, byte change)
+    private static FldTombstoneGcCandidate Candidate(
+        byte record, ushort field, byte change, byte author = 0x55,
+        ulong? hlcWall = null, uint hlcLogical = 1,
+        uint originAuthorEpoch = 2, ulong originSequence = 3)
     {
         byte[] recordId = new byte[16];
         byte[] changeId = new byte[16];
         byte[] authorId = new byte[16];
         recordId[0] = record;
         changeId[0] = change;
-        authorId[0] = 0x55;
+        authorId[0] = author;
         return new FldTombstoneGcCandidate(
             recordId, field, changeId, authorId,
-            hlcWall: (ulong)(100 + record), hlcLogical: 1,
-            originAuthorEpoch: 2, originSequence: 3,
+            hlcWall: hlcWall ?? (ulong)(100 + record), hlcLogical: hlcLogical,
+            originAuthorEpoch: originAuthorEpoch, originSequence: originSequence,
             isRecordTombstone: false, isFieldTombstone: true);
+    }
+
+    [Fact]
+    public void Approval_spool_matches_every_identity_and_causality_field_without_materializing_candidates()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "fld-gc-spool-exact-" + Guid.NewGuid().ToString("N"));
+        var expected = Candidate(0x11, 7, 0x31);
+        try
+        {
+            using var spool = new FldTombstoneGcApprovalSpool(directory, Guid.NewGuid());
+            spool.Append(new[] { expected });
+            spool.Seal();
+
+            FldTombstoneGcCandidate[] mismatches =
+            [
+                Candidate(0x11, 7, 0x32),
+                Candidate(0x11, 7, 0x31, author: 0x56),
+                Candidate(0x11, 7, 0x31, hlcWall: 999),
+                Candidate(0x11, 7, 0x31, hlcLogical: 2),
+                Candidate(0x11, 7, 0x31, originAuthorEpoch: 3),
+                Candidate(0x11, 7, 0x31, originSequence: 4)
+            ];
+
+            foreach (FldTombstoneGcCandidate mismatch in mismatches)
+            {
+                using var reader = spool.OpenReader();
+                Assert.False(reader.IsApproved(mismatch));
+            }
+
+            using var exactReader = spool.OpenReader();
+            Assert.True(exactReader.IsApproved(expected));
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
     }
 }
