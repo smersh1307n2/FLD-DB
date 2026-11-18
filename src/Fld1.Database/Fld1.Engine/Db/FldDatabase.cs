@@ -1333,7 +1333,10 @@ public sealed partial class FldDatabase : IDisposable
             if (_dirty.Count != 0)
                 throw new InvalidOperationException("Checkpoint requires all overlay writes to be committed first.");
 
+            bool measureOverlaySnapshot = TryStartCheckpointDiagnostic(out long overlayAllocated, out long overlayStarted);
             var snap = _overlay.Snapshot();
+            WriteCheckpointDiagnostic("overlay-snapshot", measureOverlaySnapshot, overlayAllocated, overlayStarted,
+                $"Entries={snap.Count}");
             if (snap.Count == 0)
             {
                 // APPLY commits can contain only LWW losers. Their durable relay
@@ -1382,6 +1385,7 @@ public sealed partial class FldDatabase : IDisposable
                 return 0;
             }
 
+            bool measureRunAdd = TryStartCheckpointDiagnostic(out long runAddAllocated, out long runAddStarted);
             var builder = new RunBuilder(_namespaceId);
             Span<byte> rec = stackalloc byte[16];
             foreach (var kv in snap)
@@ -1395,15 +1399,25 @@ public sealed partial class FldDatabase : IDisposable
                     kv.Value.ChangeId, kv.Value.OriginAuthorEpoch, kv.Value.OriginSequence);
             }
 
+            WriteCheckpointDiagnostic("run-builder-add", measureRunAdd, runAddAllocated, runAddStarted,
+                $"Entries={snap.Count}");
+            bool measureRunBuild = TryStartCheckpointDiagnostic(out long runBuildAllocated, out long runBuildStarted);
             byte[] runBytes = builder.Build();
+            WriteCheckpointDiagnostic("run-builder-build", measureRunBuild, runBuildAllocated, runBuildStarted,
+                $"RunBytes={runBytes.Length}");
             ulong runId = AllocateRunId();
             string path = Path.Combine(_dbDir, "runs", $"{runId}.fld1");
+            bool measureRunValidate = TryStartCheckpointDiagnostic(out long runValidateAllocated, out long runValidateStarted);
             var builtReader = new RunReader(runBytes);
             if (!builtReader.TryValidate(out var builtVerify) || builtReader.NamespaceId != _namespaceId)
                 throw new InvalidDataException(
                     $"Checkpoint produced invalid Run: {builtVerify.Status} {builtVerify.Detail}");
+            WriteCheckpointDiagnostic("run-reader-validate", measureRunValidate, runValidateAllocated, runValidateStarted);
+            bool measureRunPut = TryStartCheckpointDiagnostic(out long runPutAllocated, out long runPutStarted);
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), runBytes);
+            WriteCheckpointDiagnostic("run-blob-put", measureRunPut, runPutAllocated, runPutStarted);
 
+            bool measureRecordBounds = TryStartCheckpointDiagnostic(out long recordBoundsAllocated, out long recordBoundsStarted);
             var recs = new List<byte[]>(snap.Count);
             foreach (var kv in snap)
             {
@@ -1412,6 +1426,8 @@ public sealed partial class FldDatabase : IDisposable
                 recs.Add(b);
             }
             recs.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
+            WriteCheckpointDiagnostic("record-id-bounds", measureRecordBounds, recordBoundsAllocated, recordBoundsStarted,
+                $"Records={recs.Count}");
 
             ulong seqHi = _pendingFlushedCommitSeq;
             if (seqHi == 0)
@@ -1420,6 +1436,7 @@ public sealed partial class FldDatabase : IDisposable
 
             try
             {
+                bool measureManifest = TryStartCheckpointDiagnostic(out long manifestAllocated, out long manifestStarted);
                 _manifestStore.Update(m =>
                 {
                     var runs = m.Runs.ToList();
@@ -1438,6 +1455,7 @@ public sealed partial class FldDatabase : IDisposable
                         localOperationClients: BuildManifestLocalOperationClients(m.LocalOperationClients));
                 });
                 _outbox.MarkMaterialized(seqHi);
+                WriteCheckpointDiagnostic("manifest-update", measureManifest, manifestAllocated, manifestStarted);
             }
             catch
             {
@@ -1449,17 +1467,29 @@ public sealed partial class FldDatabase : IDisposable
             _pendingFlushedCommitSeq = seqHi;
 
             _runs.Add((runId, path, null));
+            bool measureMapRun = TryStartCheckpointDiagnostic(out long mapRunAllocated, out long mapRunStarted);
             MapRun(_runs.Count - 1);
+            WriteCheckpointDiagnostic("map-run", measureMapRun, mapRunAllocated, mapRunStarted);
             _lastSealedCommitSeq = seqHi;
             _overlay.Clear();
             _dirty.Clear();
             if (_truncateSealedWal)
             {
+                bool measureWal = TryStartCheckpointDiagnostic(out long walAllocated, out long walStarted);
                 _wal.TruncateSealedSegments(seqHi);
-                _applyJournal.CompactAcknowledgedRelayPayloads(seqHi);
+                WriteCheckpointDiagnostic("wal-truncate", measureWal, walAllocated, walStarted);
+
+                bool measureJournal = TryStartCheckpointDiagnostic(out long journalAllocated, out long journalStarted);
+                int compactedRelayFields = _applyJournal.CompactAcknowledgedRelayPayloads(seqHi);
+                WriteCheckpointDiagnostic("apply-journal-compact", measureJournal, journalAllocated, journalStarted,
+                    $"RemovedRelayFields={compactedRelayFields}");
             }
             if (_autoCompactRunCount > 0 && _runs.Count >= _autoCompactRunCount)
+            {
+                bool measureAutoCompact = TryStartCheckpointDiagnostic(out long autoCompactAllocated, out long autoCompactStarted);
                 CompactUnderLock();
+                WriteCheckpointDiagnostic("auto-compact", measureAutoCompact, autoCompactAllocated, autoCompactStarted);
+            }
             return runId;
     }
 
