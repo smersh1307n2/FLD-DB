@@ -2031,7 +2031,7 @@ public sealed partial class FldDatabase : IDisposable
                 gcLifecycleResolveCalls++;
             }
 
-            if (hasRecordLifecycleResolution)
+            if (tombstoneGc is not null && hasRecordLifecycleResolution)
             {
                 if (recordTombstone.IsTombstone || recordTombstone.Value.IsEmpty)
                     throw new InvalidDataException("FLD lifecycle state must be a live canonical lifecycle value.");
