@@ -468,25 +468,44 @@ public sealed class StorageDatabase : IDisposable
 
             StorageBTreeReader currentReader = _btreeReader
                 ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
-            int nextLiveCount = _liveCount < 0 ? CountBTreeValues() : _liveCount;
-            foreach (StorageMutation mutation in mutations)
+
+            // Sort once by the canonical byte-key order and reuse the same bounded
+            // array for WAL encoding and B+ tree application. StorageWriteBatch already
+            // guarantees unique keys.
+            StorageMutation[] orderedMutations = mutations as StorageMutation[] ?? mutations.ToArray();
+            Array.Sort(orderedMutations, StorageMutationComparer.Instance);
+
+            // For large batches, defer the exact live-count refresh. Looking up every
+            // mutation individually walks the B+ tree and allocates page/key buffers;
+            // Count already supports the -1 lazy-recount state. Small batches retain
+            // the incremental fast path.
+            bool deferLiveCount = orderedMutations.Length > 256;
+            int nextLiveCount = deferLiveCount
+                ? -1
+                : _liveCount < 0 ? CountBTreeValues() : _liveCount;
+            if (!deferLiveCount)
             {
-                bool existed = currentReader.TryGet(mutation.Key, out _);
-                if (mutation.IsDelete && existed) nextLiveCount--;
-                else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
+                foreach (StorageMutation mutation in orderedMutations)
+                {
+                    bool existed = currentReader.TryGet(mutation.Key, out _);
+                    if (mutation.IsDelete && existed) nextLiveCount--;
+                    else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
+                }
             }
 
             ReportAllocation("storage-live-count-validation");
-            byte[] payload = EncodeBatch(mutations);
+            byte[] payload = EncodeBatch(orderedMutations);
             ReportAllocation("storage-wal-batch-encoding");
             try
             {
                 StorageBTreeGenerationFiles files = _btreeFiles
                     ?? throw new InvalidOperationException("B+ tree generation files are not open.");
-                StorageTreeMutation[] treeMutations = mutations
-                    .OrderBy(x => new StorageKey(x.Key), StorageKeyComparer.Instance)
-                    .Select(x => new StorageTreeMutation(x.Key, x.Value, x.IsDelete))
-                    .ToArray();
+                var treeMutations = new StorageTreeMutation[orderedMutations.Length];
+                for (int i = 0; i < orderedMutations.Length; i++)
+                {
+                    StorageMutation mutation = orderedMutations[i];
+                    treeMutations[i] = new StorageTreeMutation(mutation.Key, mutation.Value, mutation.IsDelete);
+                }
                 ReportAllocation("storage-tree-mutation-sort");
 
                 StorageBTreeManifestV2 next = StorageBTreeUpdater.ApplyAndPublish(
@@ -557,32 +576,43 @@ public sealed class StorageDatabase : IDisposable
         _lastCommitSeq = commitSeq;
     }
 
-    private static byte[] EncodeBatch(IReadOnlyCollection<StorageMutation> mutations)
+    private static byte[] EncodeBatch(IReadOnlyList<StorageMutation> mutations)
     {
-        using var stream = new MemoryStream();
-        Span<byte> header = stackalloc byte[4];
-        BinaryPrimitives.WriteInt32LittleEndian(header, mutations.Count);
-        stream.Write(header);
-
-        Span<byte> lengths = stackalloc byte[8];
-        foreach (var mutation in mutations.OrderBy(x => new StorageKey(x.Key), StorageKeyComparer.Instance))
+        int payloadLength = sizeof(int);
+        foreach (StorageMutation mutation in mutations)
         {
             if (mutation.Key.Length is 0 or > MaxKeyLength)
                 throw new ArgumentOutOfRangeException(nameof(mutations), "Storage key length is invalid.");
             if (!mutation.IsDelete && mutation.Value.Length > WalConstants.MaxPayloadLen)
                 throw new ArgumentOutOfRangeException(nameof(mutations), "Storage value is too large.");
 
-            stream.WriteByte(mutation.IsDelete ? (byte)2 : (byte)1);
-            BinaryPrimitives.WriteInt32LittleEndian(lengths, mutation.Key.Length);
-            BinaryPrimitives.WriteInt32LittleEndian(lengths.Slice(4), mutation.IsDelete ? 0 : mutation.Value.Length);
-            stream.Write(lengths);
-            stream.Write(mutation.Key);
-            if (!mutation.IsDelete) stream.Write(mutation.Value);
+            payloadLength = checked(payloadLength + 1 + sizeof(int) * 2 +
+                mutation.Key.Length + (mutation.IsDelete ? 0 : mutation.Value.Length));
+            if (payloadLength > WalConstants.MaxPayloadLen)
+                throw new ArgumentOutOfRangeException(nameof(mutations), "Encoded Storage batch exceeds the WAL payload limit.");
         }
 
-        if (stream.Length > WalConstants.MaxPayloadLen)
-            throw new ArgumentOutOfRangeException(nameof(mutations), "Encoded Storage batch exceeds the WAL payload limit.");
-        return stream.ToArray();
+        // Exact-size encoding avoids MemoryStream growth copies and the final ToArray copy.
+        byte[] payload = new byte[payloadLength];
+        BinaryPrimitives.WriteInt32LittleEndian(payload, mutations.Count);
+        int offset = sizeof(int);
+        foreach (StorageMutation mutation in mutations)
+        {
+            payload[offset++] = mutation.IsDelete ? (byte)2 : (byte)1;
+            BinaryPrimitives.WriteInt32LittleEndian(payload.AsSpan(offset), mutation.Key.Length);
+            offset += sizeof(int);
+            int valueLength = mutation.IsDelete ? 0 : mutation.Value.Length;
+            BinaryPrimitives.WriteInt32LittleEndian(payload.AsSpan(offset), valueLength);
+            offset += sizeof(int);
+            mutation.Key.CopyTo(payload, offset);
+            offset += mutation.Key.Length;
+            if (valueLength != 0)
+            {
+                mutation.Value.CopyTo(payload, offset);
+                offset += valueLength;
+            }
+        }
+        return payload;
     }
 
     private static List<StorageMutation> DecodeBatch(ReadOnlySpan<byte> payload)
@@ -645,6 +675,13 @@ public sealed class StorageDatabase : IDisposable
     }
 
     internal readonly record struct StorageMutation(byte[] Key, byte[] Value, bool IsDelete);
+
+    private sealed class StorageMutationComparer : IComparer<StorageMutation>
+    {
+        public static StorageMutationComparer Instance { get; } = new();
+        public int Compare(StorageMutation x, StorageMutation y)
+            => x.Key.AsSpan().SequenceCompareTo(y.Key);
+    }
 
     internal readonly struct StorageKey : IEquatable<StorageKey>
     {
