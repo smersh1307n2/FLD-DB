@@ -35,16 +35,18 @@ jobs:
           dotnet restore "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj"
           dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
       - name: Benchmark baseline on the same runner
-        run: dotnet run --project "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj" --configuration Release --no-restore -- --storage-write-batch-only --artifacts "$RUNNER_TEMP/bdn-baseline"
+        working-directory: ${{ runner.temp }}/fld-baseline
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only
       - name: Benchmark candidate on the same runner
-        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only --artifacts "$RUNNER_TEMP/bdn-candidate"
+        working-directory: ${{ github.workspace }}
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only
       - name: Upload BenchmarkDotNet reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: storage-write-batch-benchmark-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/bdn-baseline/**
-            ${{ runner.temp }}/bdn-candidate/**
+            ${{ runner.temp }}/fld-baseline/BenchmarkDotNet.Artifacts/**
+            BenchmarkDotNet.Artifacts/**
           if-no-files-found: warn
           retention-days: 30
