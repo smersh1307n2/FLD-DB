@@ -59,6 +59,11 @@ internal static class StorageBTreeUpdater
         ulong nextPageId = checked(current.CommittedPageFileLength / StoragePageCodec.PageSize + 1);
         ulong rootPageId = current.RootPageId;
 
+        // Reuse the leaf merge buffer across groups. A batch may touch thousands
+        // of leaves; allocating a fresh List and backing array for every leaf creates
+        // avoidable short-lived garbage. Entries contain only value-type offsets.
+        var mergedLeafEntries = new List<StorageTreeLeafEntry>();
+
         try
         {
             int start = 0;
@@ -88,12 +93,14 @@ internal static class StorageBTreeUpdater
                     ? default
                     : StorageBTreePageCodec.DecodeLeafView(
                         pageReadCache.Read(files, leafId, files.PageFileLength), files.Generation, leafId);
-                List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files, pageReadCache);
+                mergedLeafEntries.Clear();
+                mergedLeafEntries.EnsureCapacity(existing.Count + end - start);
+                MergeLeaf(existing, mutations, start, end, files, pageReadCache, mergedLeafEntries);
                 if (allocationObserver is not null)
                     leafMergeAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
                 phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
-                List<StorageTreeChild> replacements = WriteLeafLevel(merged, files, ref nextPageId);
+                List<StorageTreeChild> replacements = WriteLeafLevel(mergedLeafEntries, files, ref nextPageId);
                 if (allocationObserver is not null)
                     leafWriteAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
@@ -172,15 +179,15 @@ internal static class StorageBTreeUpdater
         return next;
     }
 
-    private static List<StorageTreeLeafEntry> MergeLeaf(
+    private static void MergeLeaf(
         StorageBTreeLeafPageView existing,
         IReadOnlyList<StorageTreeMutation> mutations,
         int mutationStart,
         int mutationEnd,
         StorageBTreeGenerationFiles files,
-        BatchPageReadCache pageReadCache)
+        BatchPageReadCache pageReadCache,
+        List<StorageTreeLeafEntry> merged)
     {
-        var merged = new List<StorageTreeLeafEntry>(existing.Count + mutationEnd - mutationStart);
         int e = 0;
         int m = mutationStart;
         bool currentLoaded = false;
@@ -238,7 +245,6 @@ internal static class StorageBTreeUpdater
             }
         }
 
-        return merged;
     }
 
     private static StorageTreeLeafEntry CreateNewEntry(
