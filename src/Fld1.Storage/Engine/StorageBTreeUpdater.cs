@@ -83,16 +83,9 @@ internal static class StorageBTreeUpdater
                     ? 0
                     : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache, readKey);
 
-                int end = start + 1;
-                while (end < mutations.Count)
-                {
-                    ulong candidate = rootPageId == 0
-                        ? 0
-                        : FindLeaf(rootPageId, mutations[end].Key.Span, files, path: null, pageReadCache, readKey);
-                    if (candidate != leafId)
-                        break;
-                    end++;
-                }
+                int end = rootPageId == 0
+                    ? mutations.Count
+                    : FindMutationGroupEnd(mutations, start, path, files, pageReadCache);
                 if (allocationObserver is not null)
                     findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
@@ -187,6 +180,50 @@ internal static class StorageBTreeUpdater
         StorageBTreeManifestV2 next = ApplyBatch(current, files, mutations, allocationObserver);
         StorageBTreeRootPublisher.Publish(databaseDirectory, next, files, faultInjector);
         return next;
+    }
+
+    /// <summary>
+    /// Finds the end of the sorted mutation run that belongs to the located leaf.
+    /// The search path already identifies the next separator boundary: use the
+    /// nearest ancestor with a following sibling and binary-search the mutation
+    /// batch once, instead of traversing the B+ tree again for every mutation.
+    /// </summary>
+    private static int FindMutationGroupEnd(
+        IReadOnlyList<StorageTreeMutation> mutations,
+        int start,
+        List<StorageTreePathFrame> path,
+        StorageBTreeGenerationFiles files,
+        BatchPageReadCache pageReadCache)
+    {
+        for (int depth = path.Count - 1; depth >= 0; depth--)
+        {
+            StorageTreePathFrame frame = path[depth];
+            StorageTreeInternalPage parent =
+                pageReadCache.ReadInternal(files, frame.PageId, files.PageFileLength);
+            if ((uint)frame.ChildIndex > (uint)parent.Separators.Length)
+                throw new InvalidDataException("B+ tree search path contains an invalid child index.");
+
+            if (frame.ChildIndex == parent.Separators.Length)
+                continue;
+
+            ReadOnlySpan<byte> upperBound = pageReadCache.ReadKey(
+                files, parent.Separators[frame.ChildIndex].FirstKey).Span;
+            int low = start + 1;
+            int high = mutations.Count;
+            while (low < high)
+            {
+                int middle = low + ((high - low) >> 1);
+                if (mutations[middle].Key.Span.SequenceCompareTo(upperBound) < 0)
+                    low = middle + 1;
+                else
+                    high = middle;
+            }
+
+            return low;
+        }
+
+        // The located leaf is the final leaf in the tree (or the root itself).
+        return mutations.Count;
     }
 
     private static void MergeLeaf(
