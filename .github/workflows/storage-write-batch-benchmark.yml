@@ -29,7 +29,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Prepare same-runner baseline worktree
-        run: git worktree add --detach "$RUNNER_TEMP/fld-baseline" 186885291258698676952fdcc7c88552db1fb171
+        run: git worktree add --detach "$RUNNER_TEMP/fld-baseline" ba00242777ba0a69302fe0b43de00459d946207d
       - name: Restore baseline and candidate
         run: |
           dotnet restore "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj"
