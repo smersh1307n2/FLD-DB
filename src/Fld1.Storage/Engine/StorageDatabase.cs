@@ -500,13 +500,12 @@ public sealed class StorageDatabase : IDisposable
             {
                 StorageBTreeGenerationFiles files = _btreeFiles
                     ?? throw new InvalidOperationException("B+ tree generation files are not open.");
-                var treeMutations = new StorageTreeMutation[orderedMutations.Length];
-                for (int i = 0; i < orderedMutations.Length; i++)
-                {
-                    StorageMutation mutation = orderedMutations[i];
-                    treeMutations[i] = new StorageTreeMutation(mutation.Key, mutation.Value, mutation.IsDelete);
-                }
-                ReportAllocation("storage-tree-mutation-sort");
+                // The ordered StorageMutation array already owns stable immutable
+                // key/value buffers. Expose it as the tree-mutation list instead of
+                // allocating and filling a second array of ReadOnlyMemory wrappers.
+                IReadOnlyList<StorageTreeMutation> treeMutations =
+                    new StorageTreeMutationView(orderedMutations);
+                ReportAllocation("storage-tree-mutation-view");
 
                 Action<string, long>? btreeAllocationObserver = observer is null
                     ? null
@@ -683,6 +682,39 @@ public sealed class StorageDatabase : IDisposable
     }
 
     internal readonly record struct StorageMutation(byte[] Key, byte[] Value, bool IsDelete);
+
+    /// <summary>
+    /// Zero-copy indexed projection over the already sorted batch. Storage mutations
+    /// own immutable byte arrays until ApplyAndPublish returns, so the tree updater
+    /// can borrow their buffers without materializing a parallel mutation array.
+    /// </summary>
+    private sealed class StorageTreeMutationView : IReadOnlyList<StorageTreeMutation>
+    {
+        private readonly StorageMutation[] _mutations;
+
+        public StorageTreeMutationView(StorageMutation[] mutations)
+            => _mutations = mutations ?? throw new ArgumentNullException(nameof(mutations));
+
+        public int Count => _mutations.Length;
+
+        public StorageTreeMutation this[int index]
+        {
+            get
+            {
+                StorageMutation mutation = _mutations[index];
+                return new StorageTreeMutation(mutation.Key, mutation.Value, mutation.IsDelete);
+            }
+        }
+
+        public IEnumerator<StorageTreeMutation> GetEnumerator()
+        {
+            for (int i = 0; i < _mutations.Length; i++)
+                yield return this[i];
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+            => GetEnumerator();
+    }
 
     private sealed class StorageMutationComparer : IComparer<StorageMutation>
     {
