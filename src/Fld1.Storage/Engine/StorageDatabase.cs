@@ -487,7 +487,7 @@ public sealed class StorageDatabase : IDisposable
             {
                 foreach (StorageMutation mutation in orderedMutations)
                 {
-                    bool existed = currentReader.TryGet(mutation.Key, out _);
+                    bool existed = currentReader.TryGet(mutation.Key.Span, out _);
                     if (mutation.IsDelete && existed) nextLiveCount--;
                     else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
                 }
@@ -557,7 +557,7 @@ public sealed class StorageDatabase : IDisposable
         int nextLiveCount = _liveCount;
         foreach (StorageMutation mutation in mutations)
         {
-            bool existed = currentReader.TryGet(mutation.Key, out _);
+            bool existed = currentReader.TryGet(mutation.Key.Span, out _);
             if (mutation.IsDelete && existed) nextLiveCount--;
             else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
         }
@@ -611,7 +611,7 @@ public sealed class StorageDatabase : IDisposable
             int valueLength = mutation.IsDelete ? 0 : mutation.Value.Length;
             BinaryPrimitives.WriteInt32LittleEndian(payload.AsSpan(offset), valueLength);
             offset += sizeof(int);
-            mutation.Key.CopyTo(payload, offset);
+            mutation.Key.Span.CopyTo(payload.AsSpan(offset));
             offset += mutation.Key.Length;
             if (valueLength != 0)
             {
@@ -681,7 +681,7 @@ public sealed class StorageDatabase : IDisposable
         }
     }
 
-    internal readonly record struct StorageMutation(byte[] Key, byte[] Value, bool IsDelete);
+    internal readonly record struct StorageMutation(ReadOnlyMemory<byte> Key, byte[] Value, bool IsDelete);
 
     /// <summary>
     /// Zero-copy indexed projection over the already sorted batch. Storage mutations
@@ -720,29 +720,35 @@ public sealed class StorageDatabase : IDisposable
     {
         public static StorageMutationComparer Instance { get; } = new();
         public int Compare(StorageMutation x, StorageMutation y)
-            => x.Key.AsSpan().SequenceCompareTo(y.Key);
+            => x.Key.Span.SequenceCompareTo(y.Key.Span);
     }
 
     internal readonly struct StorageKey : IEquatable<StorageKey>
     {
-        private readonly byte[] _bytes;
+        private readonly ReadOnlyMemory<byte> _bytes;
         public StorageKey(ReadOnlySpan<byte> bytes) => _bytes = bytes.ToArray();
-        private StorageKey(byte[] ownedBytes, bool takeOwnership) => _bytes = ownedBytes;
+        private StorageKey(ReadOnlyMemory<byte> bytes) => _bytes = bytes;
         internal static StorageKey FromOwned(byte[] ownedBytes)
         {
             ArgumentNullException.ThrowIfNull(ownedBytes);
             if (ownedBytes.Length == 0)
                 throw new ArgumentException("Storage key must not be empty.", nameof(ownedBytes));
-            return new StorageKey(ownedBytes, takeOwnership: true);
+            return new StorageKey((ReadOnlyMemory<byte>)ownedBytes);
         }
-        internal byte[] Bytes => _bytes;
-        public ReadOnlySpan<byte> Span => _bytes;
-        public bool Equals(StorageKey other) => _bytes.AsSpan().SequenceEqual(other._bytes);
+        internal static StorageKey FromBorrowed(ReadOnlyMemory<byte> borrowedBytes)
+        {
+            if (borrowedBytes.IsEmpty)
+                throw new ArgumentException("Storage key must not be empty.", nameof(borrowedBytes));
+            return new StorageKey(borrowedBytes);
+        }
+        internal ReadOnlyMemory<byte> Memory => _bytes;
+        public ReadOnlySpan<byte> Span => _bytes.Span;
+        public bool Equals(StorageKey other) => _bytes.Span.SequenceEqual(other._bytes.Span);
         public override bool Equals(object? obj) => obj is StorageKey other && Equals(other);
         public override int GetHashCode()
         {
             var hash = new HashCode();
-            foreach (byte value in _bytes) hash.Add(value);
+            foreach (byte value in _bytes.Span) hash.Add(value);
             return hash.ToHashCode();
         }
     }
@@ -846,6 +852,18 @@ public sealed class StorageWriteBatch : IDisposable
     {
         EnsureOpen();
         var storageKey = StorageDatabase.StorageKey.FromOwned(key);
+        _mutations[storageKey] =
+            new StorageDatabase.StorageMutation(key, Array.Empty<byte>(), true);
+    }
+
+    /// <summary>
+    /// Stages an immutable key slice without copying it. The backing memory must remain
+    /// immutable and alive until Commit returns; it is borrowed only for this batch.
+    /// </summary>
+    internal void DeleteShared(ReadOnlyMemory<byte> key)
+    {
+        EnsureOpen();
+        var storageKey = StorageDatabase.StorageKey.FromBorrowed(key);
         _mutations[storageKey] =
             new StorageDatabase.StorageMutation(key, Array.Empty<byte>(), true);
     }
