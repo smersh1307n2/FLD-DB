@@ -46,7 +46,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
 
     private sealed record GcReferenceScanHandle(
         Guid ClientId, ulong SessionGeneration, FldReferenceSnapshot Snapshot,
-        bool TombstoneWalSealSucceeded);
+        bool CommittedWalSealSucceeded);
 
     private sealed class IpcSnapshotHandle(
         Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot, bool isTransient)
@@ -272,29 +272,32 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private byte[] HandleOpenGcReferenceScan(
         StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
     {
-        bool sealCommittedWal = payload.Length == 1 && payload.Span[0] == 1;
-        if (!payload.IsEmpty && !sealCommittedWal)
+        byte sealMode = payload.IsEmpty ? (byte)0 : payload.Length == 1 ? payload.Span[0] : byte.MaxValue;
+        if (sealMode is not (0 or 1 or 2))
             throw new InvalidDataException("FLD GC reference-scan open payload is invalid.");
+        bool sealCommittedWal = sealMode != 0;
+        string sealDomain = sealMode switch { 1 => "tombstone", 2 => "receipt", _ => "none" };
         lock (_gcLeaseGate)
         {
             EnsureGcLeaseOwner(context);
             if (_gcReferenceScans.Count != 0)
                 throw new InvalidOperationException("The Host GC lease already owns an active reference scan.");
-            bool tombstoneWalSealSucceeded = false;
+            bool committedWalSealSucceeded = false;
             if (sealCommittedWal)
             {
-                // Tombstone sweep captures its final reference horizon only after
-                // committed WAL has been sealed. Other GC domains keep their
-                // existing scan semantics. A failed seal is reported as a pin veto.
+                // Receipt and tombstone GC both require a sealed committed WAL prefix.
+                // The caller selects the GC domain; this operation only seals the
+                // committed prefix and opens a stable reference snapshot. It never
+                // performs physical tombstone reclamation.
                 using IDisposable commitLease = _database.AcquireCommitGuard();
                 long walSealAllocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
                 long walSealStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-                WriteSnapshotGcDiagnostic("tombstone-wal-seal-before", Guid.Empty);
-                tombstoneWalSealSucceeded = _database.TrySealCommittedWalForTombstoneGc();
-                WriteSnapshotGcDiagnostic("tombstone-wal-seal-after", Guid.Empty,
+                WriteSnapshotGcDiagnostic($"{sealDomain}-wal-seal-before", Guid.Empty);
+                committedWalSealSucceeded = _database.TrySealCommittedWalForGc();
+                WriteSnapshotGcDiagnostic($"{sealDomain}-wal-seal-after", Guid.Empty,
                     $"ElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(walSealStarted).TotalMilliseconds:F3} " +
                     $"AllocatedBytes={GC.GetTotalAllocatedBytes(precise: true) - walSealAllocatedBefore} " +
-                    $"Succeeded={tombstoneWalSealSucceeded}");
+                    $"Succeeded={committedWalSealSucceeded}");
             }
             Guid token = Guid.NewGuid();
             long referenceAllocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
@@ -308,11 +311,11 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 $"AllocatedBytes={referenceAllocatedBytes}");
             _gcReferenceScans.Add(token,
                 new GcReferenceScanHandle(context.ClientId, context.SessionGeneration,
-                    snapshot, tombstoneWalSealSucceeded));
+                    snapshot, committedWalSealSucceeded));
             return FldDatabaseIpcGcProtocol.EncodeScanResponse(
                 new FldDatabaseIpcGcReferenceScan(
                     token, snapshot.UnpublishedLocalDraftHorizon,
-                    snapshot.HasSnapshotPin || (sealCommittedWal && !tombstoneWalSealSucceeded),
+                    snapshot.HasSnapshotPin || (sealCommittedWal && !committedWalSealSucceeded),
                     checked((ushort)_database.NamespaceId)));
         }
     }
@@ -604,7 +607,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 // was acquired. Opening a second reference snapshot here would make
                 // the first scan look like an external pin and veto every commit.
                 FldReferenceSnapshot references = referenceScan.Snapshot;
-                if (!referenceScan.TombstoneWalSealSucceeded)
+                if (!referenceScan.CommittedWalSealSucceeded)
                     return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
                 WriteSnapshotGcDiagnostic("tombstone-commit-before-guard", token);
                 using IDisposable commitLease = _database.AcquireCommitGuard();

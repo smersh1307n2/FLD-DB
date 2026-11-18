@@ -1302,11 +1302,11 @@ public sealed partial class FldDatabase : IDisposable
 
 
     /// <summary>
-    /// Seal the already committed WAL prefix before a tombstone-GC reference scan.
+    /// Seal the already committed WAL prefix before a physical-GC reference scan.
     /// Returns false when an uncommitted overlay write prevents checkpointing.
     /// The caller must hold the composed application/Metadata commit boundary.
     /// </summary>
-    internal bool TrySealCommittedWalForTombstoneGc()
+    internal bool TrySealCommittedWalForGc()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_commitLock)

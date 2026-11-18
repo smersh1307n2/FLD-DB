@@ -132,6 +132,25 @@ public sealed class FldDatabaseIpcGcReferenceScanTests
                 unsealedScan.Token, Id(0x62)));
             await clientA.ReleaseGcReferenceScanAsync(unsealedScan.Token);
             await clientA.ReleaseGcLeaseAsync(secondLease);
+
+            // Receipt GC has its own explicit WAL-sealing scan mode. The Host
+            // dispatcher is configured with physical Tombstone GC disabled above;
+            // opening this scan seals the committed prefix but never deletes rows.
+            Guid receiptLease = await clientA.AcquireGcLeaseAsync();
+            FldDatabaseIpcGcReferenceScan receiptScan =
+                await clientA.OpenReceiptGcReferenceScanAsync();
+            Assert.False(receiptScan.HasSnapshotPin);
+            Assert.Equal(0UL, receiptScan.UnpublishedLocalDraftHorizon.Count);
+            Assert.Equal(database.PendingFlushedCommitSeq, database.LastSealedCommitSeq);
+            Assert.True(await clientA.HasGcChangeIdReferenceAsync(
+                receiptScan.Token, secondChangeId));
+            Task<byte[]> receiptBlocked = clientB.GetLocalAuthorAsync();
+            await Task.Delay(100);
+            Assert.False(receiptBlocked.IsCompleted,
+                "The Receipt GC reference snapshot must retain the Host-wide commit boundary.");
+            await clientA.ReleaseGcReferenceScanAsync(receiptScan.Token);
+            await clientA.ReleaseGcLeaseAsync(receiptLease);
+            Assert.Equal(author, await receiptBlocked.WaitAsync(TimeSpan.FromSeconds(5)));
         }
         finally
         {

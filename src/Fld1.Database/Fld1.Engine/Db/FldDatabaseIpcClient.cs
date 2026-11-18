@@ -456,6 +456,19 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcGcProtocol.DecodeScanResponse(response);
     }
 
+    /// <summary>
+    /// Seals the committed WAL prefix and opens a stable reference scan for Receipt GC.
+    /// This does not enable or execute physical tombstone reclamation.
+    /// </summary>
+    public async Task<FldDatabaseIpcGcReferenceScan> OpenReceiptGcReferenceScanAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.OpenGcReferenceScan,
+            new byte[] { 2 }, cancellationToken).ConfigureAwait(false);
+        return FldDatabaseIpcGcProtocol.DecodeScanResponse(response);
+    }
+
     public async Task<bool> HasGcChangeIdReferenceAsync(
         Guid token, ReadOnlyMemory<byte> changeId,
         CancellationToken cancellationToken = default)
