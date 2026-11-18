@@ -490,7 +490,7 @@ public sealed class FldProviderSnapshot : IDisposable
         ushort bestKeyEpoch = 0;
         bool bestTombstone = false;
 
-        if (TryGetOverlayValue(fieldId, out MemFieldValue? mem))
+        if (TryGetOverlayValue(fieldId, out MemFieldValue? mem) && mem is not null)
         {
             have = true;
             bestWall = mem.Wall;
