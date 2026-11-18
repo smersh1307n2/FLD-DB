@@ -2,7 +2,8 @@ namespace Fld1.Run.Builder;
 
 /// <summary>
 /// One logical field version to place into a STATE run.
-/// Value is copied; max inline 256, larger → external (later).
+/// Value is copied by the public constructor; checkpoint-only borrowed buffers
+/// remain immutable for the lifetime of the builder.
 /// </summary>
 public sealed class FieldWrite
 {
@@ -31,6 +32,62 @@ public sealed class FieldWrite
         uint originAuthorEpoch = 0,
         ulong originSequence = 0)
     {
+        Validate(recordId, value, wall, authorNodeId, changeId, originAuthorEpoch, originSequence);
+        RecordId = recordId.ToArray();
+        FieldId = fieldId;
+        Value = value.ToArray();
+        Wall = wall;
+        Logical = logical;
+        AuthorNodeId = authorNodeId.ToArray();
+        KeyEpoch = keyEpoch;
+        IsTombstone = isTombstone;
+        ChangeId = changeId.ToArray();
+        OriginAuthorEpoch = originAuthorEpoch;
+        OriginSequence = originSequence;
+    }
+
+    // Internal checkpoint path. Overlay snapshots keep these arrays alive and immutable
+    // until RunBuilder.Build() completes, so only the value-type key's RecordId is copied.
+    internal FieldWrite(
+        byte[] recordId,
+        ushort fieldId,
+        byte[] value,
+        ulong wall,
+        uint logical,
+        byte[] authorNodeId,
+        ushort keyEpoch,
+        bool isTombstone,
+        byte[] changeId,
+        uint originAuthorEpoch,
+        ulong originSequence)
+    {
+        ArgumentNullException.ThrowIfNull(recordId);
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(authorNodeId);
+        ArgumentNullException.ThrowIfNull(changeId);
+        Validate(recordId, value, wall, authorNodeId, changeId, originAuthorEpoch, originSequence);
+        RecordId = recordId;
+        FieldId = fieldId;
+        Value = value;
+        Wall = wall;
+        Logical = logical;
+        AuthorNodeId = authorNodeId;
+        KeyEpoch = keyEpoch;
+        IsTombstone = isTombstone;
+        ChangeId = changeId;
+        OriginAuthorEpoch = originAuthorEpoch;
+        OriginSequence = originSequence;
+    }
+
+    private static void Validate(
+        ReadOnlySpan<byte> recordId,
+        ReadOnlySpan<byte> value,
+        ulong wall,
+        ReadOnlySpan<byte> authorNodeId,
+        ReadOnlySpan<byte> changeId,
+        uint originAuthorEpoch,
+        ulong originSequence)
+    {
         if (recordId.Length != 16) throw new ArgumentException("RecordId must be 16 bytes");
         if (authorNodeId.Length != 16) throw new ArgumentException("AuthorNodeId must be 16 bytes");
         if (value.Length > Format.RunConstants.MaxBlobLen)
@@ -52,17 +109,5 @@ public sealed class FieldWrite
             throw new ArgumentException("Origin sequence requires an author epoch.");
         if (originAuthorEpoch != 0 && changeId.IsEmpty)
             throw new ArgumentException("OperationOrigin requires a stable ChangeId.");
-
-        RecordId = recordId.ToArray();
-        FieldId = fieldId;
-        Value = value.ToArray();
-        Wall = wall;
-        Logical = logical;
-        AuthorNodeId = authorNodeId.ToArray();
-        KeyEpoch = keyEpoch;
-        IsTombstone = isTombstone;
-        ChangeId = changeId.ToArray();
-        OriginAuthorEpoch = originAuthorEpoch;
-        OriginSequence = originSequence;
     }
 }

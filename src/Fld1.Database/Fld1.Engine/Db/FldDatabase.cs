@@ -1391,9 +1391,9 @@ public sealed partial class FldDatabase : IDisposable
             foreach (var kv in snap)
             {
                 kv.Key.WriteRecordId(rec);
-                builder.Add(
+                builder.AddBorrowed(
                     rec, kv.Key.FieldId,
-                    kv.Value.IsTombstone ? ReadOnlySpan<byte>.Empty : kv.Value.Value,
+                    kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value,
                     kv.Value.Wall, kv.Value.Logical, kv.Value.AuthorNodeId,
                     kv.Value.KeyEpoch, kv.Value.IsTombstone,
                     kv.Value.ChangeId, kv.Value.OriginAuthorEpoch, kv.Value.OriginSequence);

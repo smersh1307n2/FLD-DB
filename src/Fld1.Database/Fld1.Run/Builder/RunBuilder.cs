@@ -44,6 +44,28 @@ public sealed class RunBuilder
         return this;
     }
 
+    /// <summary>
+    /// Checkpoint-only fast path. Caller guarantees overlay buffers remain immutable
+    /// until Build completes; FieldWrite materializes only the RecordId bytes.
+    /// </summary>
+    internal RunBuilder AddBorrowed(
+        ReadOnlySpan<byte> recordId,
+        ushort fieldId,
+        byte[] value,
+        ulong wall,
+        uint logical,
+        byte[] authorNodeId,
+        ushort keyEpoch,
+        bool isTombstone,
+        byte[] changeId,
+        uint originAuthorEpoch,
+        ulong originSequence)
+    {
+        _writes.Add(new FieldWrite(recordId.ToArray(), fieldId, value, wall, logical,
+            authorNodeId, keyEpoch, isTombstone, changeId, originAuthorEpoch, originSequence));
+        return this;
+    }
+
     public RunBuilder Add(
         ReadOnlySpan<byte> recordId,
         ushort fieldId,
