@@ -773,13 +773,33 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                     MaxActiveSnapshotHandlesPerClient)
                 throw new InvalidOperationException("The active FLD snapshot handle limit has been reached.");
 
+            WriteSnapshotGcDiagnostic("open-before", operationId);
             FldProviderSnapshot snapshot = _database.OpenProviderSnapshotForIpc(clientId, _hostGeneration);
             var handle = new IpcSnapshotHandle(clientId, operationId, snapshot);
             _snapshotHandles.Add(snapshot.Generation, handle);
             _snapshotOpenOperations.Add(operationKey, snapshot.Generation);
+            int recordCount = snapshot.RecordCount;
+            WriteSnapshotGcDiagnostic("open-after", operationId);
             return FldDatabaseIpcProtocol.EncodeSnapshotOpenResponse(
-                _hostGeneration, snapshot.Generation, snapshot.SourceFeedWatermark, snapshot.RecordCount);
+                _hostGeneration, snapshot.Generation, snapshot.SourceFeedWatermark, recordCount);
         }
+    }
+
+    private static void WriteSnapshotGcDiagnostic(string stage, Guid operationId)
+    {
+        string? path = Environment.GetEnvironmentVariable("FLD_TEST_GC_DIAGNOSTICS_FILE");
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        try
+        {
+            string line = $"FLD_HOST_GC_DIAG Stage={stage} Operation={operationId:N} " +
+                $"AllocatedBytes={GC.GetTotalAllocatedBytes(precise: true)} " +
+                $"ManagedHeapBytes={GC.GetTotalMemory(forceFullCollection: false)}";
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private byte[] HandleReadSnapshotPage(Guid clientId, ReadOnlyMemory<byte> payload)
@@ -832,8 +852,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             if (!handle.Released)
             {
+                WriteSnapshotGcDiagnostic("release-before", handle.OpenOperationId);
                 handle.Released = true;
                 _database.ReleaseProviderSnapshot(handle.Snapshot.Generation);
+                WriteSnapshotGcDiagnostic("release-after", handle.OpenOperationId);
             }
         }
         return FldDatabaseIpcProtocol.EncodeSnapshotReleaseResponse(true);
