@@ -1975,7 +1975,7 @@ public sealed partial class FldDatabase : IDisposable
         while (runQueue.Count != 0 || overlayIndex < overlay.Count)
         {
             long gcIterationStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
-            gcRecords++;
+            if (tombstoneGc is not null) gcRecords++;
             bool hasRun = runQueue.TryPeek(out _, out (ulong High, ulong Low) runPriority);
             bool hasOverlay = overlayIndex < overlay.Count;
             (ulong High, ulong Low) overlayPriority = default;
