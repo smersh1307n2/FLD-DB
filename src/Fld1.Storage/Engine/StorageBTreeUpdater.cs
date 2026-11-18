@@ -199,6 +199,7 @@ internal static class StorageBTreeUpdater
         StorageTreeLeafEntry current = default;
         ReadOnlyMemory<byte> existingKey = default;
         ReadOnlyMemory<byte> previousExistingKey = default;
+        int currentKeyScratch = 0;
 
         while (e < existing.Count || m < mutationEnd)
         {
@@ -211,7 +212,9 @@ internal static class StorageBTreeUpdater
             if (!currentLoaded)
             {
                 current = existing.GetEntry(e);
-                existingKey = pageReadCache.ReadKey(files, current.Key);
+                byte[] keyScratch = pageReadCache.ReadKeyIntoScratch(
+                    files, current.Key, currentKeyScratch);
+                existingKey = keyScratch.AsMemory(0, current.Key.Length);
                 if (e > 0 && previousExistingKey.Span.SequenceCompareTo(existingKey.Span) >= 0)
                     throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
                 currentLoaded = true;
@@ -221,6 +224,7 @@ internal static class StorageBTreeUpdater
             {
                 merged.Add(current);
                 previousExistingKey = existingKey;
+                currentKeyScratch ^= 1;
                 e++;
                 currentLoaded = false;
                 continue;
@@ -232,6 +236,7 @@ internal static class StorageBTreeUpdater
             {
                 merged.Add(current);
                 previousExistingKey = existingKey;
+                currentKeyScratch ^= 1;
                 e++;
                 currentLoaded = false;
             }
@@ -244,6 +249,7 @@ internal static class StorageBTreeUpdater
             {
                 merged.Add(new StorageTreeLeafEntry(current.Key, CreateValueReference(mutation, files)));
                 previousExistingKey = existingKey;
+                currentKeyScratch ^= 1;
                 e++;
                 m++;
                 currentLoaded = false;
@@ -478,6 +484,19 @@ internal static class StorageBTreeUpdater
         private const int MaxCachedKeyLength = 256;
         private readonly Dictionary<(ulong Offset, int Length), byte[]> _keys = new();
         private readonly Queue<(ulong Offset, int Length)> _keyOrder = new();
+        private byte[] _keyScratchA = Array.Empty<byte>();
+        private byte[] _keyScratchB = Array.Empty<byte>();
+
+        public byte[] ReadKeyIntoScratch(
+            StorageBTreeGenerationFiles files, StorageTreeKeyReference reference, int scratchIndex)
+        {
+            ref byte[] scratch = ref (scratchIndex == 0 ? ref _keyScratchA : ref _keyScratchB);
+            if (scratch.Length < reference.Length)
+                scratch = new byte[reference.Length];
+            files.ReadDataInto(
+                reference.Offset, reference.Length, files.DataFileLength, scratch);
+            return scratch;
+        }
 
         public ReadOnlyMemory<byte> ReadKey(StorageBTreeGenerationFiles files, StorageTreeKeyReference reference)
         {
