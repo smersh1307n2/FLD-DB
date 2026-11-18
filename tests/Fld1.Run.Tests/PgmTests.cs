@@ -102,4 +102,37 @@ public class PgmTests
         foreach (var id in ids)
             Assert.True(reader.TryGet(id, 1, out var value), $"miss for {Convert.ToHexString(id)}");
     }
+
+    [Fact]
+    public void Duplicate_projected_key_group_uses_exact_sorted_record_range()
+    {
+        var author = Author(2);
+        const int count = 4096;
+        var builder = new RunBuilder(0, pgmEpsilon: 8);
+        var ids = new List<byte[]>(count);
+
+        for (int i = 0; i < count; i++)
+        {
+            var id = new byte[16];
+            id[6] = 0x70;
+            id[8] = 0x80;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(id.AsSpan(12, 4), (uint)i);
+            ids.Add(id);
+            builder.Add(id, 2, new byte[] { (byte)i }, wall: 2000 + (ulong)i, logical: 0, author);
+        }
+
+        byte[] run = builder.Build();
+        Assert.True(RunVerify.Verify(run).IsOk, RunVerify.Verify(run).Detail);
+        Assert.Equal(1u, RunHeader.ReadPgmSegments(run));
+
+        var reader = new RunReader(run);
+        foreach (byte[] id in ids)
+            Assert.True(reader.TryGet(id, 2, out _), $"miss for {Convert.ToHexString(id)}");
+
+        var missing = new byte[16];
+        missing[6] = 0x70;
+        missing[8] = 0x80;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(missing.AsSpan(12, 4), count + 1);
+        Assert.False(reader.TryGet(missing, 2, out _));
+    }
 }
