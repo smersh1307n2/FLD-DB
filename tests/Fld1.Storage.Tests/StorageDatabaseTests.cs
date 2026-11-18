@@ -572,7 +572,7 @@ public sealed class StorageDatabaseTests : IDisposable
             Path.Combine(_dir, "page-cache-default"), 119);
         Assert.Equal(2L * 1024 * 1024, defaultDatabase.PageCacheCapacityBytes);
 
-        const long customBudget = 8L * 1024;
+        long customBudget = StoragePageCodec.PageSize * 2L;
         using var customDatabase = StorageDatabase.Open(
             Path.Combine(_dir, "page-cache-custom"), 120,
             pageCacheCapacityBytes: customBudget);

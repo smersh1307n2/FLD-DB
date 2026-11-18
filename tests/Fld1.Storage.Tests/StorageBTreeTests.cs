@@ -61,13 +61,13 @@ public sealed class StorageBTreeTests
             Assert.False(second.TryGet(key, out _));
         }
 
-        Assert.Equal(16_384, shared.HotLookupCount);
-        Assert.Equal(8_192, first.HotLookupCount);
-        Assert.Equal(8_192, second.HotLookupCount);
+        Assert.Equal(4_096, shared.HotLookupCount);
+        Assert.Equal(2_048, first.HotLookupCount);
+        Assert.Equal(2_048, second.HotLookupCount);
         shared.EvictGeneration(31);
-        Assert.Equal(8_192, shared.HotLookupCount);
+        Assert.Equal(2_048, shared.HotLookupCount);
         Assert.Equal(0, first.HotLookupCount);
-        Assert.Equal(8_192, second.HotLookupCount);
+        Assert.Equal(2_048, second.HotLookupCount);
     }
 
     [Fact]
