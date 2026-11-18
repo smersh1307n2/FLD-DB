@@ -29,8 +29,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Prepare same-runner baseline worktree
-        run: git worktree add --detach "$RUNNER_TEMP/fld-baseline" ba00242777ba0a69302fe0b43de00459d946207d
+      - name: Prepare same-runner pre-change baseline worktree
+        run: git worktree add --detach "$RUNNER_TEMP/fld-baseline" 57b534d31db64debe2a440d62ebfdbbbbcddf512
       - name: Restore baseline and candidate
         run: |
           dotnet restore "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj"
