@@ -1418,16 +1418,28 @@ public sealed partial class FldDatabase : IDisposable
             WriteCheckpointDiagnostic("run-blob-put", measureRunPut, runPutAllocated, runPutStarted);
 
             bool measureRecordBounds = TryStartCheckpointDiagnostic(out long recordBoundsAllocated, out long recordBoundsStarted);
-            var recs = new List<byte[]>(snap.Count);
+            byte[] minRec = new byte[16];
+            byte[] maxRec = new byte[16];
+            Span<byte> currentRec = stackalloc byte[16];
+            bool firstRecord = true;
             foreach (var kv in snap)
             {
-                var b = new byte[16];
-                kv.Key.WriteRecordId(b);
-                recs.Add(b);
+                kv.Key.WriteRecordId(currentRec);
+                if (firstRecord)
+                {
+                    currentRec.CopyTo(minRec);
+                    currentRec.CopyTo(maxRec);
+                    firstRecord = false;
+                    continue;
+                }
+
+                if (Fld1.Core.Util.ByteUtil.CompareUnsigned16(currentRec, minRec) < 0)
+                    currentRec.CopyTo(minRec);
+                if (Fld1.Core.Util.ByteUtil.CompareUnsigned16(currentRec, maxRec) > 0)
+                    currentRec.CopyTo(maxRec);
             }
-            recs.Sort((x, y) => Fld1.Core.Util.ByteUtil.CompareUnsigned16(x, y));
             WriteCheckpointDiagnostic("record-id-bounds", measureRecordBounds, recordBoundsAllocated, recordBoundsStarted,
-                $"Records={recs.Count}");
+                $"Entries={snap.Count}");
 
             ulong seqHi = _pendingFlushedCommitSeq;
             if (seqHi == 0)
@@ -1445,8 +1457,8 @@ public sealed partial class FldDatabase : IDisposable
                         RunId = runId,
                         Level = 0,
                         Ns = _namespaceId,
-                        MinRec = recs[0],
-                        MaxRec = recs[^1],
+                        MinRec = minRec,
+                        MaxRec = maxRec,
                         SeqLo = _lastSealedCommitSeq + 1,
                         SeqHi = seqHi
                     });
