@@ -1385,13 +1385,26 @@ public sealed partial class FldDatabase : IDisposable
                 return 0;
             }
 
+            bool measureOverlaySort = TryStartCheckpointDiagnostic(out long overlaySortAllocated, out long overlaySortStarted);
+            snap.Sort(static (left, right) =>
+            {
+                int compare = BinaryPrimitives.ReverseEndianness(left.Key.RecLo)
+                    .CompareTo(BinaryPrimitives.ReverseEndianness(right.Key.RecLo));
+                if (compare != 0) return compare;
+                compare = BinaryPrimitives.ReverseEndianness(left.Key.RecHi)
+                    .CompareTo(BinaryPrimitives.ReverseEndianness(right.Key.RecHi));
+                return compare != 0 ? compare : left.Key.FieldId.CompareTo(right.Key.FieldId);
+            });
+            WriteCheckpointDiagnostic("overlay-sort", measureOverlaySort, overlaySortAllocated, overlaySortStarted,
+                $"Entries={snap.Count}");
+
             bool measureRunAdd = TryStartCheckpointDiagnostic(out long runAddAllocated, out long runAddStarted);
             var builder = new RunBuilder(_namespaceId);
             Span<byte> rec = stackalloc byte[16];
             foreach (var kv in snap)
             {
                 kv.Key.WriteRecordId(rec);
-                builder.AddBorrowed(
+                builder.AddBorrowedSortedUnique(
                     rec, kv.Key.FieldId,
                     kv.Value.IsTombstone ? Array.Empty<byte>() : kv.Value.Value,
                     kv.Value.Wall, kv.Value.Logical, kv.Value.AuthorNodeId,

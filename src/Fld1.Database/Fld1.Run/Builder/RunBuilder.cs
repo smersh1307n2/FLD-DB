@@ -17,6 +17,7 @@ public sealed class RunBuilder
 {
     private readonly uint _namespaceId;
     private readonly List<FieldWrite> _writes = new();
+    private bool _writesAreSortedUnique = true;
     private readonly uint _inlinePolicy;
     private readonly uint _pgmEpsilon;
 
@@ -40,15 +41,16 @@ public sealed class RunBuilder
     {
         if (write.Value.Length > RunConstants.MaxBlobLen)
             throw new ArgumentException("value > 4 MB");
+        _writesAreSortedUnique = false;
         _writes.Add(write);
         return this;
     }
 
     /// <summary>
-    /// Checkpoint-only fast path. Caller guarantees overlay buffers remain immutable
-    /// until Build completes; FieldWrite materializes only the RecordId bytes.
+    /// Checkpoint-only fast path for canonical (RecordId, FieldId) order.
+    /// Caller guarantees overlay buffers remain immutable until Build completes.
     /// </summary>
-    internal RunBuilder AddBorrowed(
+    internal RunBuilder AddBorrowedSortedUnique(
         ReadOnlySpan<byte> recordId,
         ushort fieldId,
         byte[] value,
@@ -61,6 +63,18 @@ public sealed class RunBuilder
         uint originAuthorEpoch,
         ulong originSequence)
     {
+        if (_writesAreSortedUnique && _writes.Count != 0)
+        {
+            FieldWrite previous = _writes[^1];
+            int compare = ByteUtil.CompareUnsigned16(previous.RecordId, recordId);
+            if (compare > 0 || (compare == 0 && previous.FieldId >= fieldId))
+                throw new InvalidOperationException("Borrowed checkpoint writes must be strictly sorted and unique.");
+        }
+        else if (_writes.Count != 0)
+        {
+            _writesAreSortedUnique = false;
+        }
+
         _writes.Add(new FieldWrite(recordId.ToArray(), fieldId, value, wall, logical,
             authorNodeId, keyEpoch, isTombstone, changeId, originAuthorEpoch, originSequence));
         return this;
@@ -89,27 +103,41 @@ public sealed class RunBuilder
         if (_writes.Count == 0)
             return EmptyRunBuilder.Create(_namespaceId);
 
-        // LWW: one winner per (RecordId, FieldId).
-        var winners = new Dictionary<(IdKey, ushort), FieldWrite>();
-        foreach (var write in _writes)
+        List<FieldWrite> sortedWinners;
+        if (_writesAreSortedUnique)
         {
-            var key = (new IdKey(write.RecordId), write.FieldId);
-            if (!winners.TryGetValue(key, out var current) || CompareHlc(write, current) > 0)
-                winners[key] = write;
+            // The FLD overlay is already LWW-resolved and keyed uniquely. Its checkpoint
+            // path sorts keys before adding, so no duplicate winner map or second sort is needed.
+            sortedWinners = _writes;
+            MarkBuildDiagnostic("winner-map", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+                $"Writes={_writes.Count} Winners={_writes.Count} Bypassed=true");
+            MarkBuildDiagnostic("winner-sort", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+                $"Winners={sortedWinners.Count} AlreadySorted=true");
         }
-        MarkBuildDiagnostic("winner-map", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
-            $"Writes={_writes.Count} Winners={winners.Count}");
-
-        // Sort winners once by RecordId/FieldId. Avoid GroupBy + per-record OrderBy/ToList:
-        // those allocated one grouping and one field list for every record during compaction.
-        var sortedWinners = winners.Values.ToList();
-        sortedWinners.Sort(static (left, right) =>
+        else
         {
-            int compare = ByteUtil.CompareUnsigned16(left.RecordId, right.RecordId);
-            return compare != 0 ? compare : left.FieldId.CompareTo(right.FieldId);
-        });
-        MarkBuildDiagnostic("winner-sort", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
-            $"Winners={sortedWinners.Count}");
+            // General public API: resolve LWW and sort arbitrary input.
+            var winners = new Dictionary<(IdKey, ushort), FieldWrite>();
+            foreach (var write in _writes)
+            {
+                var key = (new IdKey(write.RecordId), write.FieldId);
+                if (!winners.TryGetValue(key, out var current) || CompareHlc(write, current) > 0)
+                    winners[key] = write;
+            }
+            MarkBuildDiagnostic("winner-map", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+                $"Writes={_writes.Count} Winners={winners.Count}");
+
+            // Sort winners once by RecordId/FieldId. Avoid GroupBy + per-record OrderBy/ToList:
+            // those allocated one grouping and one field list for every record during compaction.
+            sortedWinners = winners.Values.ToList();
+            sortedWinners.Sort(static (left, right) =>
+            {
+                int compare = ByteUtil.CompareUnsigned16(left.RecordId, right.RecordId);
+                return compare != 0 ? compare : left.FieldId.CompareTo(right.FieldId);
+            });
+            MarkBuildDiagnostic("winner-sort", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+                $"Winners={sortedWinners.Count}");
+        }
 
         // Intern authors ASC.
         var authorSet = new SortedSet<IdKey>(AuthorIdComparer.Instance);
