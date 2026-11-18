@@ -70,10 +70,14 @@ public sealed class FldProviderSnapshot : IDisposable
     private Dictionary<(ulong Low, ulong High), ushort[]>? _overlayFieldsByRecord;
     private readonly int _recordCount;
     private PriorityQueue<RunRecordIdCursor, RecordIdPriority> _recordIdQueue;
-    private byte[]? _lastEmittedRecordId;
+    private bool _hasLastEmittedRecordId;
+    private ulong _lastEmittedRecordHigh;
+    private ulong _lastEmittedRecordLow;
+    private readonly byte[] _currentRecordIdBuffer = new byte[16];
+    private readonly List<ushort> _fieldIdsScratch = new(4);
     private int _nextIndex;
     private byte[]? _currentRecordId;
-    private ushort[]? _currentFieldIds;
+    private List<ushort>? _currentFieldIds;
     private int _fieldIndex;
     private int _lastPageStart = -1;
     private int _lastPageLimit;
@@ -155,7 +159,7 @@ public sealed class FldProviderSnapshot : IDisposable
                    TryReadNextEntry(includeValues: true, out FldProviderSnapshotEntry? entry, out _, out _))
                 entries.Add(entry!);
 
-            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
+            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Count)
                 || _recordIdQueue.Count != 0;
             var page = new FldProviderSnapshotPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
@@ -255,7 +259,7 @@ public sealed class FldProviderSnapshot : IDisposable
                     resolvedValue = ReadOnlyMemory<byte>.Empty;
                     return false;
                 }
-                if (_currentFieldIds!.Length == 0)
+                if (_currentFieldIds!.Count == 0)
                     continue;
             }
 
@@ -271,7 +275,9 @@ public sealed class FldProviderSnapshot : IDisposable
     private void ResetCursor()
     {
         _recordIdQueue = CreateRecordIdQueue(_runs!);
-        _lastEmittedRecordId = null;
+        _hasLastEmittedRecordId = false;
+        _lastEmittedRecordHigh = 0;
+        _lastEmittedRecordLow = 0;
         _nextIndex = 0;
         _currentRecordId = null;
         _currentFieldIds = null;
@@ -293,7 +299,9 @@ public sealed class FldProviderSnapshot : IDisposable
             _overlayByKey = null;
             _overlayFieldsByRecord = null;
             _recordIdQueue.Clear();
-            _lastEmittedRecordId = null;
+            _hasLastEmittedRecordId = false;
+            _lastEmittedRecordHigh = 0;
+            _lastEmittedRecordLow = 0;
             _currentRecordId = null;
             _currentFieldIds = null;
             _lastPage = null;
@@ -370,55 +378,70 @@ public sealed class FldProviderSnapshot : IDisposable
         return count;
     }
 
-    private bool TryReadNextUniqueRecordId(out byte[]? recordId)
+    private bool TryReadNextUniqueRecordId()
     {
         while (_recordIdQueue.TryDequeue(
             out RunRecordIdCursor? cursor, out RecordIdPriority priority))
         {
             if (cursor is null)
                 throw new InvalidDataException("Provider snapshot Run cursor queue contained a null entry.");
-            bool duplicate = _lastEmittedRecordId is not null &&
-                priority.High == BinaryPrimitives.ReadUInt64BigEndian(_lastEmittedRecordId) &&
-                priority.Low == BinaryPrimitives.ReadUInt64BigEndian(_lastEmittedRecordId.AsSpan(8));
-            byte[]? current = duplicate ? null : cursor.RecordId.ToArray();
+            bool duplicate = _hasLastEmittedRecordId &&
+                priority.High == _lastEmittedRecordHigh &&
+                priority.Low == _lastEmittedRecordLow;
+            if (!duplicate)
+            {
+                cursor.RecordId.CopyTo(_currentRecordIdBuffer, 0);
+                _hasLastEmittedRecordId = true;
+                _lastEmittedRecordHigh = priority.High;
+                _lastEmittedRecordLow = priority.Low;
+            }
             if (cursor.MoveNext())
                 _recordIdQueue.Enqueue(
                     cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
             if (duplicate)
                 continue;
 
-            recordId = current!;
-            _lastEmittedRecordId = recordId;
             return true;
         }
-        recordId = null;
         return false;
     }
 
     private bool TryLoadNextRecord()
     {
         EnsureOpen();
-        if (!TryReadNextUniqueRecordId(out byte[]? recordId))
+        if (!TryReadNextUniqueRecordId())
         {
             _currentRecordId = null;
             _currentFieldIds = null;
             return false;
         }
 
-        byte[] currentRecordId = recordId!;
-        var fields = new HashSet<ushort>();
+        byte[] currentRecordId = _currentRecordIdBuffer;
         ulong low = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId);
         ulong high = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId.AsSpan(8));
+        _fieldIdsScratch.Clear();
         if (_overlayFieldsByRecord!.TryGetValue((low, high), out ushort[]? overlayFields))
-        {
-            foreach (ushort fieldId in overlayFields)
-                fields.Add(fieldId);
-        }
+            _fieldIdsScratch.AddRange(overlayFields);
         foreach (RunReader run in _runs!)
-            run.ScanFieldIds(currentRecordId, fieldId => { fields.Add(fieldId); });
+        {
+            FieldIdEnumerator fields = run.GetFieldIds(currentRecordId);
+            while (fields.MoveNext())
+                _fieldIdsScratch.Add(fields.Current);
+        }
+
+        _fieldIdsScratch.Sort();
+        int uniqueCount = 0;
+        for (int i = 0; i < _fieldIdsScratch.Count; i++)
+        {
+            ushort fieldId = _fieldIdsScratch[i];
+            if (uniqueCount == 0 || _fieldIdsScratch[uniqueCount - 1] != fieldId)
+                _fieldIdsScratch[uniqueCount++] = fieldId;
+        }
+        if (uniqueCount < _fieldIdsScratch.Count)
+            _fieldIdsScratch.RemoveRange(uniqueCount, _fieldIdsScratch.Count - uniqueCount);
 
         _currentRecordId = currentRecordId;
-        _currentFieldIds = fields.Order().ToArray();
+        _currentFieldIds = _fieldIdsScratch;
         _fieldIndex = 0;
         return true;
     }
