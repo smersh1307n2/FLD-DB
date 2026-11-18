@@ -56,23 +56,21 @@ public sealed record FldProviderSnapshotValueChunk(
 
 /// <summary>
 /// Immutable, ordered FLD current-state view for BIN-SYNC provider snapshots.
-/// The snapshot retains immutable Run buffers referenced by a durable generation
-/// manifest plus a compact snapshot Overlay Run. RecordIds are enumerated by a
-/// bounded k-way merge over the sorted source Run cluster indexes; no namespace-wide
-/// RecordId array or deduplication set is retained.
+/// The snapshot retains immutable Run buffers and a sorted immutable overlay view.
+/// RecordIds are enumerated by a bounded k-way merge over Run cluster indexes and
+/// overlay keys; no namespace-wide RecordId array or per-record dictionary is retained.
 /// </summary>
 public sealed class FldProviderSnapshot : IDisposable
 {
     private readonly object _gate = new();
     private readonly Action<FldProviderSnapshot>? _onDispose;
     private RunReader[]? _runs;
-    private Dictionary<MemFieldKey, MemFieldValue>? _overlayByKey;
-    private Dictionary<(ulong Low, ulong High), ushort[]>? _overlayFieldsByRecord;
+    private KeyValuePair<MemFieldKey, MemFieldValue>[]? _overlayEntries;
+    private int _overlayEntryIndex;
+    private int _currentOverlayStart = -1;
+    private int _currentOverlayEnd = -1;
     private readonly int _recordCount;
     private PriorityQueue<RunRecordIdCursor, RecordIdPriority> _recordIdQueue;
-    private bool _hasLastEmittedRecordId;
-    private ulong _lastEmittedRecordHigh;
-    private ulong _lastEmittedRecordLow;
     private readonly byte[] _currentRecordIdBuffer = new byte[16];
     private readonly List<ushort> _fieldIdsScratch = new(4);
     private int _nextIndex;
@@ -96,23 +94,9 @@ public sealed class FldProviderSnapshot : IDisposable
         Generation = generation;
         SourceFeedWatermark = sourceFeedWatermark;
         _runs = runs;
-        _overlayByKey = new Dictionary<MemFieldKey, MemFieldValue>(overlay.Length);
-        var overlayFields = new Dictionary<(ulong Low, ulong High), List<ushort>>();
-        foreach (var pair in overlay)
-        {
-            _overlayByKey.Add(pair.Key, pair.Value);
-            var recordKey = (pair.Key.RecLo, pair.Key.RecHi);
-            if (!overlayFields.TryGetValue(recordKey, out List<ushort>? fields))
-                overlayFields.Add(recordKey, fields = new List<ushort>(4));
-            fields.Add(pair.Key.FieldId);
-        }
-        _overlayFieldsByRecord = new Dictionary<(ulong Low, ulong High), ushort[]>(overlayFields.Count);
-        foreach (var pair in overlayFields)
-        {
-            pair.Value.Sort();
-            _overlayFieldsByRecord.Add(pair.Key, pair.Value.ToArray());
-        }
-        _recordCount = CountDistinctRecordIds(runs);
+        Array.Sort(overlay, static (left, right) => CompareOverlayKeys(left.Key, right.Key));
+        _overlayEntries = overlay;
+        _recordCount = CountDistinctRecordIds(runs, overlay);
         _recordIdQueue = CreateRecordIdQueue(runs);
         _onDispose = onDispose;
     }
@@ -275,9 +259,9 @@ public sealed class FldProviderSnapshot : IDisposable
     private void ResetCursor()
     {
         _recordIdQueue = CreateRecordIdQueue(_runs!);
-        _hasLastEmittedRecordId = false;
-        _lastEmittedRecordHigh = 0;
-        _lastEmittedRecordLow = 0;
+        _overlayEntryIndex = 0;
+        _currentOverlayStart = -1;
+        _currentOverlayEnd = -1;
         _nextIndex = 0;
         _currentRecordId = null;
         _currentFieldIds = null;
@@ -296,12 +280,11 @@ public sealed class FldProviderSnapshot : IDisposable
             if (_disposed) return;
             _disposed = true;
             _runs = null;
-            _overlayByKey = null;
-            _overlayFieldsByRecord = null;
+            _overlayEntries = null;
+            _overlayEntryIndex = 0;
+            _currentOverlayStart = -1;
+            _currentOverlayEnd = -1;
             _recordIdQueue.Clear();
-            _hasLastEmittedRecordId = false;
-            _lastEmittedRecordHigh = 0;
-            _lastEmittedRecordLow = 0;
             _currentRecordId = null;
             _currentFieldIds = null;
             _lastPage = null;
@@ -357,53 +340,92 @@ public sealed class FldProviderSnapshot : IDisposable
             BinaryPrimitives.ReadUInt64BigEndian(recordId.Slice(8)),
             runIndex);
 
-    private static int CountDistinctRecordIds(RunReader[] runs)
+    private static int CountDistinctRecordIds(
+        RunReader[] runs,
+        KeyValuePair<MemFieldKey, MemFieldValue>[] overlay)
     {
         var queue = CreateRecordIdQueue(runs);
-        RecordIdPriority? previous = null;
+        int overlayIndex = 0;
         int count = 0;
-        while (queue.TryDequeue(out RunRecordIdCursor? cursor, out RecordIdPriority priority))
+        while (true)
         {
-            if (cursor is null)
-                throw new InvalidDataException("Provider snapshot Run cursor queue contained a null entry.");
-            if (previous is null || priority.High != previous.Value.High ||
-                priority.Low != previous.Value.Low)
+            bool hasRun = queue.TryPeek(out _, out RecordIdPriority runPriority);
+            bool hasOverlay = overlayIndex < overlay.Length;
+            if (!hasRun && !hasOverlay)
+                return count;
+
+            RecordIdPriority overlayPriority = hasOverlay
+                ? GetPriority(overlay[overlayIndex].Key, int.MaxValue)
+                : default;
+            RecordIdPriority selected = hasRun &&
+                (!hasOverlay || CompareRecordIds(runPriority, overlayPriority) <= 0)
+                ? runPriority
+                : overlayPriority;
+            count = checked(count + 1);
+
+            while (queue.TryPeek(out RunRecordIdCursor? cursor, out RecordIdPriority priority) &&
+                   priority.High == selected.High && priority.Low == selected.Low)
             {
-                count = checked(count + 1);
-                previous = priority;
+                queue.Dequeue();
+                if (cursor is null)
+                    throw new InvalidDataException("Provider snapshot Run cursor queue contained a null entry.");
+                if (cursor.MoveNext())
+                    queue.Enqueue(cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
             }
-            if (cursor.MoveNext())
-                queue.Enqueue(cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
+
+            while (overlayIndex < overlay.Length)
+            {
+                RecordIdPriority priority = GetPriority(overlay[overlayIndex].Key, int.MaxValue);
+                if (priority.High != selected.High || priority.Low != selected.Low)
+                    break;
+                overlayIndex++;
+            }
         }
-        return count;
     }
 
     private bool TryReadNextUniqueRecordId()
     {
-        while (_recordIdQueue.TryDequeue(
-            out RunRecordIdCursor? cursor, out RecordIdPriority priority))
+        bool hasRun = _recordIdQueue.TryPeek(
+            out RunRecordIdCursor? runCursor, out RecordIdPriority runPriority);
+        bool hasOverlay = _overlayEntryIndex < _overlayEntries!.Length;
+        if (!hasRun && !hasOverlay)
+            return false;
+
+        RecordIdPriority overlayPriority = hasOverlay
+            ? GetPriority(_overlayEntries[_overlayEntryIndex].Key, int.MaxValue)
+            : default;
+        RecordIdPriority selected = hasRun &&
+            (!hasOverlay || CompareRecordIds(runPriority, overlayPriority) <= 0)
+            ? runPriority
+            : overlayPriority;
+        if (hasRun && CompareRecordIds(runPriority, selected) == 0)
+            runCursor!.RecordId.CopyTo(_currentRecordIdBuffer, 0);
+        else
+            _overlayEntries![_overlayEntryIndex].Key.WriteRecordId(_currentRecordIdBuffer);
+
+        while (_recordIdQueue.TryPeek(
+                   out RunRecordIdCursor? cursor, out RecordIdPriority priority) &&
+               priority.High == selected.High && priority.Low == selected.Low)
         {
+            _recordIdQueue.Dequeue();
             if (cursor is null)
                 throw new InvalidDataException("Provider snapshot Run cursor queue contained a null entry.");
-            bool duplicate = _hasLastEmittedRecordId &&
-                priority.High == _lastEmittedRecordHigh &&
-                priority.Low == _lastEmittedRecordLow;
-            if (!duplicate)
-            {
-                cursor.RecordId.CopyTo(_currentRecordIdBuffer, 0);
-                _hasLastEmittedRecordId = true;
-                _lastEmittedRecordHigh = priority.High;
-                _lastEmittedRecordLow = priority.Low;
-            }
             if (cursor.MoveNext())
-                _recordIdQueue.Enqueue(
-                    cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
-            if (duplicate)
-                continue;
-
-            return true;
+                _recordIdQueue.Enqueue(cursor, GetPriority(cursor.RecordId, cursor.RunIndex));
         }
-        return false;
+
+        _currentOverlayStart = _overlayEntryIndex;
+        while (_overlayEntryIndex < _overlayEntries!.Length)
+        {
+            RecordIdPriority priority = GetPriority(_overlayEntries[_overlayEntryIndex].Key, int.MaxValue);
+            if (priority.High != selected.High || priority.Low != selected.Low)
+                break;
+            _overlayEntryIndex++;
+        }
+        _currentOverlayEnd = _overlayEntryIndex;
+        if (_currentOverlayStart == _currentOverlayEnd)
+            _currentOverlayStart = _currentOverlayEnd = -1;
+        return true;
     }
 
     private bool TryLoadNextRecord()
@@ -420,8 +442,11 @@ public sealed class FldProviderSnapshot : IDisposable
         ulong low = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId);
         ulong high = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId.AsSpan(8));
         _fieldIdsScratch.Clear();
-        if (_overlayFieldsByRecord!.TryGetValue((low, high), out ushort[]? overlayFields))
-            _fieldIdsScratch.AddRange(overlayFields);
+        if (_currentOverlayStart >= 0)
+        {
+            for (int i = _currentOverlayStart; i < _currentOverlayEnd; i++)
+                _fieldIdsScratch.Add(_overlayEntries![i].Key.FieldId);
+        }
         foreach (RunReader run in _runs!)
         {
             FieldIdEnumerator fields = run.GetFieldIds(currentRecordId);
@@ -467,8 +492,7 @@ public sealed class FldProviderSnapshot : IDisposable
         ushort bestKeyEpoch = 0;
         bool bestTombstone = false;
 
-        var key = new MemFieldKey(recordId, fieldId);
-        if (_overlayByKey!.TryGetValue(key, out MemFieldValue? mem))
+        if (TryGetOverlayValue(fieldId, out MemFieldValue? mem))
         {
             have = true;
             bestWall = mem.Wall;
@@ -571,6 +595,51 @@ public sealed class FldProviderSnapshot : IDisposable
             metadata = null;
         }
         return true;
+    }
+
+    private bool TryGetOverlayValue(ushort fieldId, out MemFieldValue? value)
+    {
+        KeyValuePair<MemFieldKey, MemFieldValue>[] entries = _overlayEntries!;
+        int low = _currentOverlayStart;
+        int high = _currentOverlayEnd - 1;
+        while (low <= high)
+        {
+            int middle = low + ((high - low) >> 1);
+            ushort candidate = entries[middle].Key.FieldId;
+            if (candidate < fieldId)
+                low = middle + 1;
+            else if (candidate > fieldId)
+                high = middle - 1;
+            else
+            {
+                value = entries[middle].Value;
+                return true;
+            }
+        }
+        value = null;
+        return false;
+    }
+
+    private static int CompareOverlayKeys(MemFieldKey left, MemFieldKey right)
+    {
+        int high = BinaryPrimitives.ReverseEndianness(left.RecLo)
+            .CompareTo(BinaryPrimitives.ReverseEndianness(right.RecLo));
+        if (high != 0) return high;
+        int low = BinaryPrimitives.ReverseEndianness(left.RecHi)
+            .CompareTo(BinaryPrimitives.ReverseEndianness(right.RecHi));
+        return low != 0 ? low : left.FieldId.CompareTo(right.FieldId);
+    }
+
+    private static RecordIdPriority GetPriority(MemFieldKey key, int runIndex)
+        => new(
+            BinaryPrimitives.ReverseEndianness(key.RecLo),
+            BinaryPrimitives.ReverseEndianness(key.RecHi),
+            runIndex);
+
+    private static int CompareRecordIds(RecordIdPriority left, RecordIdPriority right)
+    {
+        int high = left.High.CompareTo(right.High);
+        return high != 0 ? high : left.Low.CompareTo(right.Low);
     }
 
     private void EnsureOpen() => ObjectDisposedException.ThrowIf(_disposed, this);
