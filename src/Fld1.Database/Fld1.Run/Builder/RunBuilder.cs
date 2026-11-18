@@ -164,9 +164,7 @@ public sealed class RunBuilder
         }
 
         // First pass plans cluster layout without allocating one byte[] per cluster.
-        var provenanceEntries = new List<FieldWrite>(provenanceCount);
         var clusterPlans = new List<ClusterPlan>(clusterCount);
-        var clusterRecordIds = new List<byte[]>(clusterCount);
         uint totalFields = 0;
         uint aliveFields = 0;
         bool anyHlcOverride = false;
@@ -187,14 +185,6 @@ public sealed class RunBuilder
 
             ReadOnlySpan<FieldWrite> fields = sortedSpan.Slice(groupStart, recordEnd - groupStart);
             recordStart = recordEnd;
-            clusterRecordIds.Add(recordId);
-
-            foreach (FieldWrite field in fields)
-            {
-                if (field.ChangeId.Length == 16)
-                    provenanceEntries.Add(field);
-            }
-
             totalFields += (uint)fields.Length;
             var mode = ComputeMode(fields, authorToIntern);
 
@@ -253,7 +243,7 @@ public sealed class RunBuilder
 
         var externalEntries = new List<ExternalEntry>(externalCount);
         MarkBuildDiagnostic("cluster-build", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
-            $"Clusters={clusterPlans.Count} Fields={totalFields} Provenance={provenanceEntries.Count}");
+            $"Clusters={clusterPlans.Count} Fields={totalFields} Provenance={provenanceCount}");
 
         // Sort external entries by (RecordId, FieldId) for ValueRef catalog — already insertion order
         // matches FieldId ASC within RecordId ASC because we iterate byRecord sorted + fields sorted.
@@ -264,7 +254,7 @@ public sealed class RunBuilder
         int internBytes = authors.Count * RunConstants.InternEntrySize;
 
         // PGM multi-segment
-        var pgmSegs = BuildPgm(clusterRecordIds, _pgmEpsilon);
+        var pgmSegs = BuildPgm(sortedSpan, clusterCount, _pgmEpsilon);
         MarkBuildDiagnostic("pgm-build", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
             $"Segments={pgmSegs.Count}");
         ulong pgmOff = internOff + (ulong)internBytes;
@@ -311,10 +301,10 @@ public sealed class RunBuilder
 
         ulong provenanceOff = footerOff;
         ulong provenanceLen = 0;
-        if (provenanceEntries.Count != 0)
+        if (provenanceCount != 0)
         {
             provenanceOff = (footerOff + 7) & ~7UL;
-            provenanceLen = checked((ulong)provenanceEntries.Count * RunConstants.ProvenanceEntrySize);
+            provenanceLen = checked((ulong)provenanceCount * RunConstants.ProvenanceEntrySize);
             footerOff = checked(provenanceOff + provenanceLen);
         }
 
@@ -345,7 +335,7 @@ public sealed class RunBuilder
         {
             int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
             BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice(slotPos, 8), (ulong)slotDataCursor);
-            clusterRecordIds[i].AsSpan(12, 4).CopyTo(fs.Slice(slotPos + 8, 4));
+            sortedSpan[clusterPlans[i].Start].RecordId.AsSpan(12, 4).CopyTo(fs.Slice(slotPos + 8, 4));
             slotDataCursor += clusterPlans[i].Size;
         }
 
@@ -472,11 +462,13 @@ public sealed class RunBuilder
             // remaining pad already zero
         }
 
-        if (provenanceEntries.Count != 0)
+        if (provenanceCount != 0)
         {
             int pos = checked((int)provenanceOff);
-            foreach (FieldWrite entry in provenanceEntries)
+            foreach (FieldWrite entry in sortedSpan)
             {
+                if (entry.ChangeId.Length != 16)
+                    continue;
                 entry.RecordId.CopyTo(fs.Slice(pos, 16));
                 BinaryPrimitives.WriteUInt16LittleEndian(fs.Slice(pos + 16, 2), entry.FieldId);
                 // bytes 18..19 are reserved and remain zero.
@@ -520,13 +512,13 @@ public sealed class RunBuilder
             digest,
             summaryXor: default,
             summarySum: default,
-            binaryVersion: provenanceEntries.Count == 0
+            binaryVersion: provenanceCount == 0
                 ? RunConstants.BinaryVersion
                 : RunConstants.ProvenanceBinaryVersion,
-            provenanceOff: provenanceEntries.Count == 0 ? 0UL : provenanceOff,
+            provenanceOff: provenanceCount == 0 ? 0UL : provenanceOff,
             provenanceLen,
-            provenanceCount: (uint)provenanceEntries.Count,
-            provenanceEntrySize: provenanceEntries.Count == 0 ? 0u : RunConstants.ProvenanceEntrySize);
+            provenanceCount: (uint)provenanceCount,
+            provenanceEntrySize: provenanceCount == 0 ? 0u : RunConstants.ProvenanceEntrySize);
 
         ulong xh = Hashes.XxHash64(fs.Slice(0, (int)footerOff));
         BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)footerOff, 8), xh);
@@ -572,14 +564,21 @@ public sealed class RunBuilder
     /// <summary>
     /// Greedy PGM segments with dup-group indivisibility. Spec §2.1 / [K-PGM-DUP-RANGE].
     /// </summary>
-    private static List<PgmSeg> BuildPgm(List<byte[]> recordIds, uint defaultEps)
+    private static List<PgmSeg> BuildPgm(
+        ReadOnlySpan<FieldWrite> sortedWinners, int clusterCount, uint defaultEps)
     {
         var segs = new List<PgmSeg>();
-        if (recordIds.Count == 0) return segs;
+        if (clusterCount == 0) return segs;
 
-        var keys = new ulong[recordIds.Count];
-        for (int i = 0; i < recordIds.Count; i++)
-            keys[i] = Uuid7.ProjectK(recordIds[i]);
+        var keys = new ulong[clusterCount];
+        int keyIndex = 0;
+        for (int i = 0; i < sortedWinners.Length; i++)
+        {
+            if (i == 0 || !ByteUtil.Equals16(sortedWinners[i - 1].RecordId, sortedWinners[i].RecordId))
+                keys[keyIndex++] = Uuid7.ProjectK(sortedWinners[i].RecordId);
+        }
+        if (keyIndex != clusterCount)
+            throw new InvalidOperationException("RunBuilder cluster count changed during PGM planning.");
 
         // Build dup-group boundaries: [start, end) ranges of equal K
         var groups = new List<(int start, int end)>();
