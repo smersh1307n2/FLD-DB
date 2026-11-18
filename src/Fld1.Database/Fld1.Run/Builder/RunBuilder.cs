@@ -588,6 +588,12 @@ public sealed class RunBuilder
         ReadOnlySpan<FieldWrite> fields,
         Dictionary<IdKey, uint> authorToIntern)
     {
+        if (fields.Length == 1)
+        {
+            FieldWrite only = fields[0];
+            return (only.Wall, only.Logical, authorToIntern[new IdKey(only.AuthorNodeId)]);
+        }
+
         var counts = new Dictionary<(ulong, uint, uint), int>();
         (ulong, uint, uint) first = default;
         bool hasFirst = false;
