@@ -51,6 +51,19 @@ public sealed class MemOverlay
             return _map.ToList();
     }
 
+    /// <summary>Compact immutable snapshot for transient readers; copies dictionary entries once.</summary>
+    public KeyValuePair<MemFieldKey, MemFieldValue>[] SnapshotArray()
+    {
+        lock (_lock)
+        {
+            var result = new KeyValuePair<MemFieldKey, MemFieldValue>[_map.Count];
+            int index = 0;
+            foreach (var pair in _map)
+                result[index++] = pair;
+            return result;
+        }
+    }
+
     public void Clear()
     {
         lock (_lock) _map.Clear();

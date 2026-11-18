@@ -439,8 +439,6 @@ public sealed class FldProviderSnapshot : IDisposable
         }
 
         byte[] currentRecordId = _currentRecordIdBuffer;
-        ulong low = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId);
-        ulong high = BinaryPrimitives.ReadUInt64LittleEndian(currentRecordId.AsSpan(8));
         _fieldIdsScratch.Clear();
         if (_currentOverlayStart >= 0)
         {

@@ -196,15 +196,31 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
     /// Opens an immutable provider snapshot. Persist and reuse operationId when retrying
     /// an uncertain open request on the same Database host generation.
     /// </summary>
-    public async Task<FldDatabaseIpcSnapshotHandle> OpenSnapshotAsync(
+    public Task<FldDatabaseIpcSnapshotHandle> OpenSnapshotAsync(
         Guid operationId,
         CancellationToken cancellationToken = default)
+        => OpenSnapshotCoreAsync(operationId, transient: false, cancellationToken);
+
+    /// <summary>
+    /// Opens a process-local snapshot for disposable Tombstone-GC candidate discovery.
+    /// It is not restored after Host restart; the final GC commit revalidates candidates.
+    /// </summary>
+    public Task<FldDatabaseIpcSnapshotHandle> OpenTransientSnapshotAsync(
+        Guid operationId,
+        CancellationToken cancellationToken = default)
+        => OpenSnapshotCoreAsync(operationId, transient: true, cancellationToken);
+
+    private async Task<FldDatabaseIpcSnapshotHandle> OpenSnapshotCoreAsync(
+        Guid operationId,
+        bool transient,
+        CancellationToken cancellationToken)
     {
         if (operationId == Guid.Empty)
             throw new ArgumentException("Snapshot-open operation id must be nonzero.", nameof(operationId));
+        byte[] payload = FldDatabaseIpcProtocol.EncodeSnapshotOpenPayload(transient);
         ReadOnlyMemory<byte> response = await SendAsync(
             operationId, FldDatabaseIpcOperationCodes.OpenSnapshot,
-            ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+            payload, cancellationToken).ConfigureAwait(false);
         return FldDatabaseIpcProtocol.DecodeSnapshotOpenResponse(response);
     }
 

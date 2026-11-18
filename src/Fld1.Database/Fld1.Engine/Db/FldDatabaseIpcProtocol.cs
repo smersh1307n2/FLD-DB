@@ -641,6 +641,19 @@ public static class FldDatabaseIpcProtocol
             result[0] == 1 ? result.Slice(5, (int)rawLength).ToArray() : null);
     }
 
+    /// <summary>Empty means durable snapshot; a single 1 byte requests a process-local transient snapshot.</summary>
+    public static byte[] EncodeSnapshotOpenPayload(bool transient)
+        => transient ? new byte[] { 1 } : Array.Empty<byte>();
+
+    public static bool DecodeSnapshotOpenPayload(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.IsEmpty)
+            return false;
+        if (payload.Length == 1 && payload.Span[0] == 1)
+            return true;
+        throw new InvalidDataException("FLD snapshot-open request payload is invalid.");
+    }
+
     public static byte[] EncodeSnapshotOpenResponse(
         Guid hostGeneration,
         Guid snapshotToken,

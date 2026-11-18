@@ -37,11 +37,13 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         Guid ClientId, ulong SessionGeneration, FldReferenceSnapshot Snapshot,
         bool TombstoneWalSealSucceeded);
 
-    private sealed class IpcSnapshotHandle(Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot)
+    private sealed class IpcSnapshotHandle(
+        Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot, bool isTransient)
     {
         public Guid ClientId { get; } = clientId;
         public Guid OpenOperationId { get; } = openOperationId;
         public FldProviderSnapshot Snapshot { get; } = snapshot;
+        public bool IsTransient { get; } = isTransient;
         public object Gate { get; } = new();
         public bool Released { get; set; }
     }
@@ -746,8 +748,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
 
     private byte[] HandleOpenSnapshot(Guid clientId, Guid operationId, ReadOnlyMemory<byte> payload)
     {
-        if (!payload.IsEmpty)
-            throw new InvalidDataException("FLD snapshot-open request payload must be empty.");
+        bool transient = FldDatabaseIpcProtocol.DecodeSnapshotOpenPayload(payload);
         if (operationId == Guid.Empty)
             throw new InvalidDataException("FLD snapshot-open operation id must be nonzero.");
 
@@ -761,6 +762,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                     existing.Released)
                     throw new InvalidOperationException(
                         "The snapshot associated with this open operation was already released; use a new operation id.");
+                if (existing.IsTransient != transient)
+                    throw new InvalidOperationException(
+                        "A snapshot-open operation id cannot be reused with a different durability mode.");
                 return FldDatabaseIpcProtocol.EncodeSnapshotOpenResponse(
                     _hostGeneration,
                     existing.Snapshot.Generation,
@@ -774,8 +778,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 throw new InvalidOperationException("The active FLD snapshot handle limit has been reached.");
 
             WriteSnapshotGcDiagnostic("open-before", operationId);
-            FldProviderSnapshot snapshot = _database.OpenProviderSnapshotForIpc(clientId, _hostGeneration);
-            var handle = new IpcSnapshotHandle(clientId, operationId, snapshot);
+            FldProviderSnapshot snapshot = transient
+                ? _database.OpenTransientProviderSnapshotForIpc(clientId, _hostGeneration)
+                : _database.OpenProviderSnapshotForIpc(clientId, _hostGeneration);
+            var handle = new IpcSnapshotHandle(clientId, operationId, snapshot, transient);
             _snapshotHandles.Add(snapshot.Generation, handle);
             _snapshotOpenOperations.Add(operationKey, snapshot.Generation);
             int recordCount = snapshot.RecordCount;

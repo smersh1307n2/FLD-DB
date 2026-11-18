@@ -133,6 +133,45 @@ public sealed partial class FldDatabase
     }
 
     /// <summary>
+    /// Opens a process-local snapshot for disposable GC candidate discovery. It pins
+    /// immutable Run buffers and copies the current overlay, but deliberately creates
+    /// no durable snapshot directory or overlay Run. GC's final approval commit
+    /// revalidates every candidate against the current database state.
+    /// </summary>
+    internal FldProviderSnapshot OpenTransientProviderSnapshotForIpc(
+        Guid clientId, Guid hostGeneration)
+    {
+        if (clientId == Guid.Empty)
+            throw new ArgumentException("IPC client id is required.", nameof(clientId));
+        if (hostGeneration == Guid.Empty)
+            throw new ArgumentException("IPC host generation is required.", nameof(hostGeneration));
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_commitLock)
+        {
+            EnsureHealthy();
+            Guid generation = Guid.NewGuid();
+            ulong sourceFeedWatermark = _outbox.HighWatermark;
+            var readers = new List<RunReader>(_runs.Count);
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                ReadOnlyMemory<byte> bytes = EnsureRunCached(i);
+                var reader = new RunReader(bytes);
+                if (!reader.TryValidate(out _) || reader.NamespaceId != _namespaceId)
+                    throw new InvalidDataException(
+                        "A source Run failed validation while opening a transient provider snapshot.");
+                readers.Add(reader);
+            }
+
+            KeyValuePair<MemFieldKey, MemFieldValue>[] overlay = _overlay.SnapshotArray();
+            var snapshot = new FldProviderSnapshot(
+                generation, sourceFeedWatermark, readers.ToArray(), overlay,
+                OnProviderSnapshotDisposed);
+            _providerSnapshots.Add(generation, snapshot);
+            return snapshot;
+        }
+    }
+
+    /// <summary>
     /// Reopens an immutable FULL_REPLACE source generation after process restart.
     /// Its manifest pins the source Run IDs and a durable overlay Run.
     /// </summary>
