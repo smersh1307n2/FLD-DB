@@ -61,6 +61,9 @@ public sealed class RunBuilder
 
     public byte[] Build()
     {
+        string? diagnosticsPath = Environment.GetEnvironmentVariable("FLD_TEST_GC_DIAGNOSTICS_FILE");
+        long phaseAllocated = string.IsNullOrWhiteSpace(diagnosticsPath) ? 0 : GC.GetTotalAllocatedBytes(precise: true);
+        long phaseStarted = string.IsNullOrWhiteSpace(diagnosticsPath) ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
         if (_writes.Count == 0)
             return EmptyRunBuilder.Create(_namespaceId);
 
@@ -72,6 +75,8 @@ public sealed class RunBuilder
             if (!winners.TryGetValue(key, out var current) || CompareHlc(write, current) > 0)
                 winners[key] = write;
         }
+        MarkBuildDiagnostic("winner-map", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+            $"Writes={_writes.Count} Winners={winners.Count}");
 
         // Sort winners once by RecordId/FieldId. Avoid GroupBy + per-record OrderBy/ToList:
         // those allocated one grouping and one field list for every record during compaction.
@@ -81,6 +86,8 @@ public sealed class RunBuilder
             int compare = ByteUtil.CompareUnsigned16(left.RecordId, right.RecordId);
             return compare != 0 ? compare : left.FieldId.CompareTo(right.FieldId);
         });
+        MarkBuildDiagnostic("winner-sort", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+            $"Winners={sortedWinners.Count}");
 
         // Intern authors ASC.
         var authorSet = new SortedSet<IdKey>(AuthorIdComparer.Instance);
@@ -90,6 +97,8 @@ public sealed class RunBuilder
         var authorToIntern = new Dictionary<IdKey, uint>(IdKeyComparer.Instance);
         for (int i = 0; i < authors.Count; i++)
             authorToIntern[authors[i]] = (uint)(i + 1);
+        MarkBuildDiagnostic("author-intern", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+            $"Authors={authors.Count}");
 
         // External value refs collected in (RecordId, FieldId) order during cluster build.
         var externalEntries = new List<ExternalEntry>();
@@ -250,6 +259,8 @@ public sealed class RunBuilder
             clusterBlobs.Add(blob);
             clusterRecordIds.Add(recordId);
         }
+        MarkBuildDiagnostic("cluster-build", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+            $"Clusters={clusterBlobs.Count} Fields={totalFields} Provenance={provenanceEntries.Count}");
 
         // Sort external entries by (RecordId, FieldId) for ValueRef catalog — already insertion order
         // matches FieldId ASC within RecordId ASC because we iterate byRecord sorted + fields sorted.
@@ -261,6 +272,8 @@ public sealed class RunBuilder
 
         // PGM multi-segment
         var pgmSegs = BuildPgm(clusterRecordIds, _pgmEpsilon);
+        MarkBuildDiagnostic("pgm-build", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+            $"Segments={pgmSegs.Count}");
         ulong pgmOff = internOff + (ulong)internBytes;
         int pgmBytes = pgmSegs.Count * RunConstants.PgmSegmentSize;
 
@@ -438,7 +451,29 @@ public sealed class RunBuilder
 
         ulong xh = Hashes.XxHash64(fs.Slice(0, (int)footerOff));
         BinaryPrimitives.WriteUInt64LittleEndian(fs.Slice((int)footerOff, 8), xh);
+        MarkBuildDiagnostic("run-file-write", diagnosticsPath, ref phaseAllocated, ref phaseStarted,
+            $"RunBytes={file.Length}");
         return file;
+    }
+
+    private static void MarkBuildDiagnostic(
+        string stage, string? path, ref long allocatedBefore, ref long startedTicks, string? detail = null)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        try
+        {
+            long allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+            double elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(startedTicks).TotalMilliseconds;
+            string line = $"FLD_RUN_BUILDER_GC Stage={stage} ElapsedMs={elapsed:F3} " +
+                $"AllocatedBytes={allocated} ManagedHeapBytes={GC.GetTotalMemory(forceFullCollection: false)}" +
+                (string.IsNullOrWhiteSpace(detail) ? string.Empty : " " + detail);
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+        startedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
     }
 
     /// <summary>
