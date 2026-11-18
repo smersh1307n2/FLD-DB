@@ -279,14 +279,10 @@ internal static class StorageBTreeUpdater
         for (int group = 0; group < groupCount; group++)
         {
             int count = baseSize + (group < extra ? 1 : 0);
-            var pageEntries = new StorageTreeLeafEntry[count];
-            for (int i = 0; i < count; i++)
-                pageEntries[i] = entries[start + i];
-
             ulong pageId = Allocate(ref nextPageId);
             files.AppendPage(pageId,
-                StorageBTreePageCodec.EncodeLeaf(files.Generation, pageId, 0, pageEntries));
-            result.Add(new StorageTreeChild(pageId, pageEntries[0].Key));
+                StorageBTreePageCodec.EncodeLeaf(files.Generation, pageId, 0, entries, start, count));
+            result.Add(new StorageTreeChild(pageId, entries[start].Key));
             start += count;
         }
 
@@ -350,16 +346,10 @@ internal static class StorageBTreeUpdater
         for (int group = 0; group < groupCount; group++)
         {
             int count = baseSize + (group < extra ? 1 : 0);
-            var pageChildren = new StorageTreeChild[count];
-            for (int i = 0; i < count; i++)
-                pageChildren[i] = children[start + i];
-
             ulong pageId = Allocate(ref nextPageId);
-            var separators = new StorageTreeChild[pageChildren.Length - 1];
-            Array.Copy(pageChildren, 1, separators, 0, separators.Length);
             files.AppendPage(pageId,
-                StorageBTreePageCodec.EncodeInternal(files.Generation, pageId, pageChildren[0].PageId, separators));
-            result.Add(new StorageTreeChild(pageId, pageChildren[0].FirstKey));
+                StorageBTreePageCodec.EncodeInternal(files.Generation, pageId, children, start, count));
+            result.Add(new StorageTreeChild(pageId, children[start].FirstKey));
             start += count;
         }
 
