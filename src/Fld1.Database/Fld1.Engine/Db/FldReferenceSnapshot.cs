@@ -42,6 +42,8 @@ public sealed class FldReferenceSnapshot : IDisposable
 
     /// <summary>Gets the conservative unpublished local-operation horizon captured with this reference index.</summary>
     public FldDraftHorizon UnpublishedLocalDraftHorizon { get; }
+    public int ChangeIdCount => _changeIds.Count;
+    public int RecordIdCount => _recordIds.Count;
 
     /// <summary>
     /// Gets whether any in-memory or persisted provider-snapshot generation is pinned.

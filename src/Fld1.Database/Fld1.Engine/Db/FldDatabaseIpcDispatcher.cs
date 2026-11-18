@@ -289,8 +289,16 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 using IDisposable commitLease = _database.AcquireCommitGuard();
                 tombstoneWalSealSucceeded = _database.TrySealCommittedWalForTombstoneGc();
             }
-            FldReferenceSnapshot snapshot = _database.OpenReferenceSnapshot();
             Guid token = Guid.NewGuid();
+            long referenceAllocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+            long referenceStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            WriteSnapshotGcDiagnostic("reference-snapshot-open-before", token);
+            FldReferenceSnapshot snapshot = _database.OpenReferenceSnapshot();
+            long referenceAllocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - referenceAllocatedBefore;
+            WriteSnapshotGcDiagnostic("reference-snapshot-open-after", token,
+                $"ChangeIds={snapshot.ChangeIdCount} RecordIds={snapshot.RecordIdCount} " +
+                $"ElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(referenceStarted).TotalMilliseconds:F3} " +
+                $"AllocatedBytes={referenceAllocatedBytes}");
             _gcReferenceScans.Add(token,
                 new GcReferenceScanHandle(context.ClientId, context.SessionGeneration,
                     snapshot, tombstoneWalSealSucceeded));
@@ -591,13 +599,17 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 FldReferenceSnapshot references = referenceScan.Snapshot;
                 if (!referenceScan.TombstoneWalSealSucceeded)
                     return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
+                WriteSnapshotGcDiagnostic("tombstone-commit-before-guard", token);
                 using IDisposable commitLease = _database.AcquireCommitGuard();
+                WriteSnapshotGcDiagnostic("tombstone-commit-after-guard", token);
                 FldDraftHorizon draftHorizon = references.UnpublishedLocalDraftHorizon;
                 if (references.HasSnapshotPin || draftHorizon.Count != 0 ||
                     draftHorizon.MaxHlcWall != 0 || draftHorizon.MaxHlcLogical != 0)
                     return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
 
+                WriteSnapshotGcDiagnostic("tombstone-commit-before-spool-reader", token);
                 using FldTombstoneGcApprovalSpool.Reader approved = handle.Spool.OpenReader();
+                WriteSnapshotGcDiagnostic("tombstone-commit-after-spool-reader", token);
                 long approvalTicks = 0;
                 long changeIdTicks = 0;
                 long recordIdTicks = 0;
@@ -624,10 +636,12 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                     return !hasRecordReference;
                 }
 
+                WriteSnapshotGcDiagnostic("tombstone-commit-before-compact", token);
                 long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
                 long commitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 int reclaimed = _database.CompactTombstones(CanReclaim);
                 long commitTicks = System.Diagnostics.Stopwatch.GetTimestamp() - commitStarted;
+                WriteSnapshotGcDiagnostic("tombstone-commit-after-compact", token);
                 long commitAllocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
                 WriteSnapshotGcDiagnostic("tombstone-commit-summary", token,
                     $"Candidates={handle.Spool.Count} PredicateCalls={predicateCalls} Reclaimed={reclaimed} " +
