@@ -1,0 +1,39 @@
+name: Storage B+ tree update performance
+
+on:
+  push:
+    branches:
+      - fix/crash-consistency-outbox
+    paths:
+      - 'bench/Fld1.Engine.Bench/StorageBTreeUpdateBench.cs'
+      - 'bench/Fld1.Engine.Bench/Program.cs'
+      - '.github/workflows/storage-write-batch-benchmark.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-write-batch-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  storage-write-batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
+      - name: Benchmark durable B+ tree update batches
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only
+      - name: Upload BenchmarkDotNet reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-write-batch-benchmark-${{ github.sha }}
+          path: BenchmarkDotNet.Artifacts/**
+          if-no-files-found: warn
+          retention-days: 30
