@@ -388,8 +388,9 @@ internal static class StorageBTreeUpdater
         for (int i = path.Count - 1; i >= 0; i--)
         {
             StorageTreePathFrame frame = path[i];
-            StorageTreeInternalPage parent =
-                pageReadCache.ReadInternal(files, frame.PageId, files.PageFileLength);
+            StoragePageView parent =
+                pageReadCache.Decode(files, frame.PageId, files.PageFileLength);
+            pageReadCache.ValidateInternal(files, frame.PageId, files.PageFileLength);
 
             if (StorageBTreePageCodec.GetInternalChild(parent, frame.ChildIndex) != oldChildId)
                 throw new InvalidDataException("B+ tree COW path no longer points at the expected child.");
@@ -447,15 +448,18 @@ internal static class StorageBTreeUpdater
     }
 
     private static List<StorageTreeChild> ExpandChildren(
-        StorageTreeInternalPage node,
+        StoragePageView page,
         StorageBTreeGenerationFiles files,
         BatchPageReadCache pageReadCache)
     {
-        var children = new List<StorageTreeChild>(node.Separators.Length + 1)
+        int separatorCount = StorageBTreePageCodec.GetInternalSeparatorCount(page);
+        ulong firstChild = StorageBTreePageCodec.GetInternalFirstChild(page);
+        var children = new List<StorageTreeChild>(separatorCount + 1)
         {
-            new StorageTreeChild(node.FirstChild, FindFirstKey(node.FirstChild, files, pageReadCache))
+            new StorageTreeChild(firstChild, FindFirstKey(firstChild, files, pageReadCache))
         };
-        children.AddRange(node.Separators);
+        for (int i = 0; i < separatorCount; i++)
+            children.Add(StorageBTreePageCodec.GetInternalSeparator(page, i));
         return children;
     }
 
@@ -606,27 +610,6 @@ internal static class StorageBTreeUpdater
             return entry.DecodedPage.Value;
         }
 
-        public StorageTreeInternalPage ReadInternal(
-            StorageBTreeGenerationFiles files,
-            ulong pageId,
-            ulong committedPageFileLength)
-        {
-            PageEntry entry = GetEntry(files, pageId, committedPageFileLength);
-            if (entry.InternalPage is not null)
-                return entry.InternalPage;
-
-            StoragePageView page = entry.DecodedPage ??
-                (entry.DecodedPage = StoragePageCodec.Decode(entry.Bytes, files.Generation, pageId)).Value;
-            if (!entry.InternalValidated)
-            {
-                ValidateInternalNode(page, files, this, _validationChildren);
-                entry.InternalValidated = true;
-            }
-            StorageTreeInternalPage node = StorageBTreePageCodec.DecodeInternal(page);
-            entry.InternalPage = node;
-            return node;
-        }
-
         public void ValidateInternal(
             StorageBTreeGenerationFiles files,
             ulong pageId,
@@ -681,7 +664,6 @@ internal static class StorageBTreeUpdater
         {
             public byte[] Bytes { get; } = bytes;
             public StoragePageView? DecodedPage { get; set; }
-            public StorageTreeInternalPage? InternalPage { get; set; }
             public bool InternalValidated { get; set; }
             public StorageTreeKeyReference? FirstKey { get; set; }
         }
