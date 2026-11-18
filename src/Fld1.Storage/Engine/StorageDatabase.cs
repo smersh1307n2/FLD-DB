@@ -825,10 +825,23 @@ public sealed class StorageWriteBatch : IDisposable
     {
         EnsureOpen();
         _completed = true;
-        return _database.Commit(_mutations.Values.ToArray(), _baseCommitSeq);
+        try
+        {
+            return _database.Commit(_mutations.Values.ToArray(), _baseCommitSeq);
+        }
+        finally
+        {
+            // A completed batch cannot be retried. Drop staged key/value references
+            // even when the caller keeps the disposed batch object alive.
+            _mutations.Clear();
+        }
     }
 
-    public void Dispose() => _completed = true;
+    public void Dispose()
+    {
+        _completed = true;
+        _mutations.Clear();
+    }
 
     private void EnsureOpen()
     {
