@@ -131,4 +131,35 @@ public sealed class FldTombstoneGcApprovalSpoolTests
             try { Directory.Delete(directory, recursive: true); } catch { }
         }
     }
+
+    [Fact]
+    public void Packed_approval_spool_append_view_preserves_exact_candidates_without_decoding_arrays()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "fld-gc-spool-packed-" + Guid.NewGuid().ToString("N"));
+        Guid token = Guid.NewGuid();
+        var first = Candidate(0x11, 7, 0x31);
+        var second = Candidate(0x22, 8, 0x32);
+        try
+        {
+            byte[] encoded = FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolAppend(
+                token, new[] { first, second });
+            var view = FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolAppendView(encoded);
+            Assert.Equal(token, view.Token);
+            Assert.Equal(2, view.Count);
+            Assert.Equal(2 * FldDatabaseIpcProtocol.TombstoneGcCandidateBytes, view.PackedCandidates.Length);
+
+            using var spool = new FldTombstoneGcApprovalSpool(directory, token);
+            spool.AppendPacked(view.PackedCandidates.Span, view.Count);
+            spool.Seal();
+
+            using var reader = spool.OpenReader();
+            Assert.True(reader.IsApproved(first));
+            Assert.True(reader.IsApproved(second));
+            Assert.False(reader.IsApproved(Candidate(0x33, 9, 0x33)));
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
 }

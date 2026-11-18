@@ -288,6 +288,18 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
             throw new InvalidDataException("Tombstone-GC approval-spool append response must be empty.");
     }
 
+    public async Task AppendTombstoneGcApprovalSpoolPayloadAsync(
+        ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default)
+    {
+        if (payload.Length < FldDatabaseIpcProtocol.TombstoneGcApprovalSpoolAppendHeaderBytes)
+            throw new ArgumentException("Tombstone-GC approval-spool append payload is truncated.", nameof(payload));
+        ReadOnlyMemory<byte> response = await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.AppendTombstoneGcApprovalSpool,
+            payload, cancellationToken).ConfigureAwait(false);
+        if (!response.IsEmpty)
+            throw new InvalidDataException("Tombstone-GC approval-spool append response must be empty.");
+    }
+
     public async Task<(int Count, byte[] Digest)> SealTombstoneGcApprovalSpoolAsync(
         Guid token, CancellationToken cancellationToken = default)
     {

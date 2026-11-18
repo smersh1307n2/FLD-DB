@@ -54,18 +54,57 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
         for (int i = 0; i < candidates.Count; i++)
         {
             FldTombstoneGcCandidate candidate = candidates[i];
-            if (_hasLastRecordId &&
-                CompareKey(_lastRecordId, _lastFieldId, candidate.RecordId.Span, candidate.FieldId) >= 0)
-                throw new InvalidDataException(
-                    "Tombstone-GC approval spool identities must be strictly ordered and unique.");
-
             FldDatabaseIpcProtocol.EncodeTombstoneGcCandidate(encoded, candidate);
-            _writer!.Write(encoded);
-            candidate.RecordId.Span.CopyTo(_lastRecordId);
-            _lastFieldId = candidate.FieldId;
-            _hasLastRecordId = true;
-            Count++;
+            AppendEncodedEntry(encoded);
         }
+    }
+
+    public void AppendPacked(ReadOnlySpan<byte> packedCandidates, int count)
+    {
+        ThrowIfUnavailable();
+        if (_sealed)
+            throw new InvalidOperationException("A sealed tombstone-GC approval spool cannot be appended.");
+        if (count is < 1 or > FldDatabaseIpcProtocol.MaxTombstoneGcCandidates ||
+            packedCandidates.Length != checked(count * CandidateBytes) ||
+            Count > MaxEntries - count)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        for (int i = 0; i < count; i++)
+            AppendEncodedEntry(packedCandidates.Slice(i * CandidateBytes, CandidateBytes));
+    }
+
+    private void AppendEncodedEntry(ReadOnlySpan<byte> encoded)
+    {
+        if (encoded.Length != CandidateBytes)
+            throw new InvalidDataException("Tombstone-GC approval spool entry length is invalid.");
+
+        ReadOnlySpan<byte> recordId = encoded[..16];
+        ushort fieldId = BinaryPrimitives.ReadUInt16LittleEndian(encoded[16..]);
+        ReadOnlySpan<byte> changeId = encoded.Slice(18, 16);
+        ReadOnlySpan<byte> authorNodeId = encoded.Slice(34, 16);
+        ulong wall = BinaryPrimitives.ReadUInt64LittleEndian(encoded[50..]);
+        uint authorEpoch = BinaryPrimitives.ReadUInt32LittleEndian(encoded[62..]);
+        ulong originSequence = BinaryPrimitives.ReadUInt64LittleEndian(encoded[66..]);
+        byte kind = encoded[74];
+        if (recordId.IndexOfAnyExcept((byte)0) < 0 ||
+            changeId.IndexOfAnyExcept((byte)0) < 0 ||
+            authorNodeId.IndexOfAnyExcept((byte)0) < 0 ||
+            wall == 0 || authorEpoch == 0 || originSequence == 0 ||
+            kind is not (1 or 2) ||
+            (kind == 1 && fieldId != FldLifecycle.FieldId) ||
+            (kind == 2 && fieldId == FldLifecycle.FieldId))
+            throw new InvalidDataException("Tombstone-GC approval spool entry identity is invalid.");
+
+        if (_hasLastRecordId &&
+            CompareKey(_lastRecordId, _lastFieldId, recordId, fieldId) >= 0)
+            throw new InvalidDataException(
+                "Tombstone-GC approval spool identities must be strictly ordered and unique.");
+
+        _writer!.Write(encoded);
+        recordId.CopyTo(_lastRecordId);
+        _lastFieldId = fieldId;
+        _hasLastRecordId = true;
+        Count++;
     }
 
     public byte[] Seal()

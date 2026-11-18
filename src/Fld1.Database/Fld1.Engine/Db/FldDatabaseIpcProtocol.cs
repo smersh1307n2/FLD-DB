@@ -940,7 +940,8 @@ public static class FldDatabaseIpcProtocol
     }
 
     private const int TombstoneGcRequestHeaderBytes = 4;
-    private const int TombstoneGcCandidateBytes = 75;
+    public const int TombstoneGcCandidateBytes = 75;
+    public const int TombstoneGcApprovalSpoolAppendHeaderBytes = 20;
     public const int MaxTombstoneGcCandidates = 4096;
 
     public static byte[] EncodeTombstoneGcRequest(
@@ -1067,6 +1068,39 @@ public static class FldDatabaseIpcProtocol
         token.TryWriteBytes(payload.AsSpan(0, 16), bigEndian: true, out _);
         encoded.CopyTo(payload, 16);
         return payload;
+    }
+
+    public static byte[] CreateTombstoneGcApprovalSpoolAppendBuffer(Guid token, int count)
+    {
+        if (token == Guid.Empty)
+            throw new ArgumentException("Tombstone-GC approval-spool token must be nonzero.", nameof(token));
+        if (count is < 1 or > MaxTombstoneGcCandidates)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        byte[] payload = new byte[checked(TombstoneGcApprovalSpoolAppendHeaderBytes + count * TombstoneGcCandidateBytes)];
+        token.TryWriteBytes(payload.AsSpan(0, 16), bigEndian: true, out _);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(16), checked((ushort)count));
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(18), checked((ushort)count));
+        return payload;
+    }
+
+    public static (Guid Token, ReadOnlyMemory<byte> PackedCandidates, int Count)
+        DecodeTombstoneGcApprovalSpoolAppendView(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length < TombstoneGcApprovalSpoolAppendHeaderBytes)
+            throw new InvalidDataException("Tombstone-GC approval-spool append is truncated.");
+        Guid token = new(payload.Span[..16], bigEndian: true);
+        if (token == Guid.Empty)
+            throw new InvalidDataException("Tombstone-GC approval-spool token must be nonzero.");
+
+        int limit = BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[16..]);
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[18..]);
+        if (limit is < 1 or > MaxTombstoneGcCandidates ||
+            count is < 1 || count > limit ||
+            payload.Length != TombstoneGcApprovalSpoolAppendHeaderBytes + count * TombstoneGcCandidateBytes)
+            throw new InvalidDataException("Tombstone-GC approval-spool append limit or length is invalid.");
+
+        return (token, payload.Slice(TombstoneGcApprovalSpoolAppendHeaderBytes), count);
     }
 
     public static (Guid Token, FldTombstoneGcCandidate[] Candidates)

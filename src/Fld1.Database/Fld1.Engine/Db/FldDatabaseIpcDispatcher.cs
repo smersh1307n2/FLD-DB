@@ -526,14 +526,14 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     {
         long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
         long started = System.Diagnostics.Stopwatch.GetTimestamp();
-        (Guid token, FldTombstoneGcCandidate[] candidates) =
-            FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolAppend(payload);
+        (Guid token, ReadOnlyMemory<byte> packedCandidates, int count) =
+            FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolAppendView(payload);
         lock (_gcLeaseGate)
         {
             GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
-            handle.Spool.Append(candidates);
+            handle.Spool.AppendPacked(packedCandidates.Span, count);
             handle.AppendCalls++;
-            handle.AppendedCandidates = checked(handle.AppendedCandidates + candidates.Length);
+            handle.AppendedCandidates = checked(handle.AppendedCandidates + count);
             handle.AppendElapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
             handle.AppendAllocatedBytes += GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
         }
