@@ -317,9 +317,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private byte[] HandleQueryGcChangeIdBatch(
         StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
     {
-        (Guid token, byte[][] changeIds) =
-            FldDatabaseIpcGcProtocol.DecodeChangeIdBatchQuery(payload);
-        var referenced = new bool[changeIds.Length];
+        (Guid token, ReadOnlyMemory<byte> packedChangeIds, int count) =
+            FldDatabaseIpcGcProtocol.DecodeChangeIdBatchQueryView(payload);
+        var referenced = new bool[count];
         lock (_gcLeaseGate)
         {
             EnsureGcLeaseOwner(context);
@@ -327,8 +327,9 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 handle.ClientId != context.ClientId ||
                 handle.SessionGeneration != context.SessionGeneration)
                 throw new InvalidDataException("FLD GC reference-scan token is unknown or belongs to another IPC session.");
-            for (int i = 0; i < changeIds.Length; i++)
-                referenced[i] = handle.Snapshot.HasChangeIdReference(changeIds[i]);
+            ReadOnlySpan<byte> ids = packedChangeIds.Span;
+            for (int i = 0; i < count; i++)
+                referenced[i] = handle.Snapshot.HasChangeIdReference(ids.Slice(i * 16, 16));
         }
         return FldDatabaseIpcGcProtocol.EncodeChangeIdBatchResponse(referenced);
     }
