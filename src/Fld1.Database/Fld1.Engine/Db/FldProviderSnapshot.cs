@@ -609,7 +609,7 @@ public sealed class FldProviderSnapshot : IDisposable
 
             destination.Clear();
             int offset = 0;
-            _currentRecordId.CopyTo(destination);
+            _currentRecordId.AsSpan().CopyTo(destination);
             offset += 16;
             BinaryPrimitives.WriteUInt16LittleEndian(destination[offset..], fieldId);
             offset += 2;
