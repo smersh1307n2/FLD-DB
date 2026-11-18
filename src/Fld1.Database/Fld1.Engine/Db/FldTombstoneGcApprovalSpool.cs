@@ -248,7 +248,6 @@ internal sealed class FldTombstoneGcApprovalSpool : IDisposable
             {
                 if (_stream.ReadByte() != -1)
                     throw new InvalidDataException("Tombstone-GC approval spool contains trailing bytes.");
-                _next = null;
                 _hasNext = false;
                 return;
             }
