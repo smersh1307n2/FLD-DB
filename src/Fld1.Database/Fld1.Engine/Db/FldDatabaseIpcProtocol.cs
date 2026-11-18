@@ -123,8 +123,8 @@ public static class FldDatabaseIpcProtocol
     public const int MaxOutboxChunkBytes = StorageIpcProtocol.MaxPayloadBytes - OutboxChunkResponseHeaderBytes;
     private const int SnapshotOpenResponseBytes = 44;
     private const int SnapshotPageRequestBytes = 38;
-    private const int SnapshotPageResponseHeaderBytes = 7;
-    private const int SnapshotPageEntryBytes = 81;
+    public const int SnapshotPageResponseHeaderBytes = 7;
+    public const int SnapshotPageEntryBytes = 81;
     private const int SnapshotValueChunkRequestBytes = 58;
     private const int SnapshotValueChunkResponseHeaderBytes = 13;
     private const int SnapshotReleasePayloadBytes = 32;
@@ -769,6 +769,39 @@ public static class FldDatabaseIpcProtocol
             offset += 8;
         }
         return response;
+    }
+
+    public static (int NextIndex, bool HasMore, int Count, ReadOnlyMemory<byte> Entries)
+        DecodeSnapshotPageResponseView(ReadOnlyMemory<byte> response)
+    {
+        ReadOnlySpan<byte> span = response.Span;
+        if (span.Length < SnapshotPageResponseHeaderBytes)
+            throw new InvalidDataException("FLD snapshot-page response is truncated.");
+        int nextIndex = BinaryPrimitives.ReadInt32LittleEndian(span);
+        byte hasMore = span[4];
+        ushort count = BinaryPrimitives.ReadUInt16LittleEndian(span[5..]);
+        long expectedLength = SnapshotPageResponseHeaderBytes + (long)count * SnapshotPageEntryBytes;
+        if (nextIndex < 0 || hasMore > 1 || count > MaxSnapshotPageEntries || expectedLength != span.Length)
+            throw new InvalidDataException("FLD snapshot-page response header or length is invalid.");
+
+        for (int i = 0; i < count; i++)
+        {
+            ReadOnlySpan<byte> entry = span.Slice(
+                SnapshotPageResponseHeaderBytes + i * SnapshotPageEntryBytes, SnapshotPageEntryBytes);
+            uint valueLength = BinaryPrimitives.ReadUInt32LittleEndian(entry[18..]);
+            byte flags = entry[34];
+            ushort keyEpoch = BinaryPrimitives.ReadUInt16LittleEndian(entry[51..]);
+            bool isTombstone = (flags & 1) != 0;
+            bool isRecordTombstone = (flags & 2) != 0;
+            if ((flags & 0xF0) != 0 ||
+                entry[..16].IndexOfAnyExcept((byte)0) < 0 ||
+                ((isTombstone || isRecordTombstone) && valueLength != 0) ||
+                (isRecordTombstone && (isTombstone || keyEpoch != 0)))
+                throw new InvalidDataException("FLD snapshot tombstone entry fields are invalid.");
+        }
+
+        return (nextIndex, hasMore == 1, count,
+            response.Slice(SnapshotPageResponseHeaderBytes, count * SnapshotPageEntryBytes));
     }
 
     public static FldProviderSnapshotMetadataPage DecodeSnapshotPageResponse(ReadOnlyMemory<byte> response)

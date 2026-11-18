@@ -224,6 +224,19 @@ public sealed class FldDatabaseIpcClient : IAsyncDisposable
         return FldDatabaseIpcProtocol.DecodeSnapshotOpenResponse(response);
     }
 
+    /// <summary>Reads a bounded metadata page without materializing per-entry identity arrays.</summary>
+    public async Task<ReadOnlyMemory<byte>> ReadSnapshotPagePayloadAsync(
+        FldDatabaseIpcSnapshotHandle handle,
+        int afterIndex,
+        int limit = FldDatabaseIpcProtocol.MaxSnapshotPageEntries,
+        CancellationToken cancellationToken = default)
+    {
+        byte[] payload = FldDatabaseIpcProtocol.EncodeSnapshotPagePayload(handle, afterIndex, limit);
+        return await SendAsync(
+            Guid.NewGuid(), FldDatabaseIpcOperationCodes.ReadSnapshotPage,
+            payload, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Reads a bounded metadata page from the immutable snapshot generation.</summary>
     public async Task<FldProviderSnapshotMetadataPage> ReadSnapshotPageAsync(
         FldDatabaseIpcSnapshotHandle handle,
