@@ -46,7 +46,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
 
     private sealed record GcReferenceScanHandle(
         Guid ClientId, ulong SessionGeneration, FldReferenceSnapshot Snapshot,
-        bool CommittedWalSealSucceeded);
+        byte SealMode, bool CommittedWalSealSucceeded);
 
     private sealed class IpcSnapshotHandle(
         Guid clientId, Guid openOperationId, FldProviderSnapshot snapshot, bool isTransient)
@@ -311,7 +311,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 $"AllocatedBytes={referenceAllocatedBytes}");
             _gcReferenceScans.Add(token,
                 new GcReferenceScanHandle(context.ClientId, context.SessionGeneration,
-                    snapshot, committedWalSealSucceeded));
+                    snapshot, sealMode, committedWalSealSucceeded));
             return FldDatabaseIpcGcProtocol.EncodeScanResponse(
                 new FldDatabaseIpcGcReferenceScan(
                     token, snapshot.UnpublishedLocalDraftHorizon,
@@ -607,7 +607,7 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                 // was acquired. Opening a second reference snapshot here would make
                 // the first scan look like an external pin and veto every commit.
                 FldReferenceSnapshot references = referenceScan.Snapshot;
-                if (!referenceScan.CommittedWalSealSucceeded)
+                if (referenceScan.SealMode != 1 || !referenceScan.CommittedWalSealSucceeded)
                     return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
                 WriteSnapshotGcDiagnostic("tombstone-commit-before-guard", token);
                 using IDisposable commitLease = _database.AcquireCommitGuard();
