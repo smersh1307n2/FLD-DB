@@ -727,7 +727,7 @@ public sealed class StorageDatabase : IDisposable
     {
         private readonly ReadOnlyMemory<byte> _bytes;
         public StorageKey(ReadOnlySpan<byte> bytes) => _bytes = bytes.ToArray();
-        private StorageKey(ReadOnlyMemory<byte> bytes) => _bytes = bytes;
+        internal StorageKey(ReadOnlyMemory<byte> bytes) => _bytes = bytes;
         internal static StorageKey FromOwned(byte[] ownedBytes)
         {
             ArgumentNullException.ThrowIfNull(ownedBytes);
