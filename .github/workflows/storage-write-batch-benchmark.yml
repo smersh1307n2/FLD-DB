@@ -26,15 +26,23 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Restore
-        run: dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
-      - name: Benchmark durable B+ tree update batches
-        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only
+      - name: Prepare same-runner baseline worktree
+        run: git worktree add --detach "$RUNNER_TEMP/fld-baseline" 186885291258698676952fdcc7c88552db1fb171
+      - name: Restore baseline and candidate
+        run: |
+          dotnet restore "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj"
+          dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
+      - name: Benchmark baseline on the same runner
+        run: dotnet run --project "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj" --configuration Release --no-restore -- --storage-write-batch-only --artifacts "$RUNNER_TEMP/bdn-baseline"
+      - name: Benchmark candidate on the same runner
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only --artifacts "$RUNNER_TEMP/bdn-candidate"
       - name: Upload BenchmarkDotNet reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: storage-write-batch-benchmark-${{ github.sha }}
-          path: BenchmarkDotNet.Artifacts/**
+          path: |
+            ${{ runner.temp }}/bdn-baseline/**
+            ${{ runner.temp }}/bdn-candidate/**
           if-no-files-found: warn
           retention-days: 30
