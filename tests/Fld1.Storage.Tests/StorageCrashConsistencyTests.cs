@@ -487,6 +487,58 @@ public sealed class StorageCrashConsistencyTests
     }
 
     [Theory]
+    [InlineData((int)StorageFaultPoint.AfterWalAppendBeforeFlush)]
+    [InlineData((int)StorageFaultPoint.AfterWalFlushBeforePublish)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeDataFlush)]
+    [InlineData((int)StorageFaultPoint.AfterBTreePageFlushBeforeManifest)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeManifestFileFlushBeforeReplace)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeManifestReplace)]
+    [InlineData((int)StorageFaultPoint.BeforeBTreeManifestDirectoryFsync)]
+    [InlineData((int)StorageFaultPoint.AfterBTreeManifestDirectoryFsync)]
+    public void Multi_key_batch_is_all_or_none_across_wal_and_btree_publication_crash_points(
+        int faultPointValue)
+    {
+        StorageFaultPoint faultPoint = (StorageFaultPoint)faultPointValue;
+        const ulong partitionId = 926;
+        string directory = Path.Combine(_root, "multi-key-commit-fault-" + faultPoint);
+
+        try
+        {
+            using (var database = StorageDatabase.OpenForTesting(directory, partitionId, point =>
+            {
+                if (point == faultPoint)
+                    throw new IOException("Injected multi-key StorageWriteBatch durability boundary failure.");
+            }))
+            {
+                using var batch = database.BeginWriteBatch();
+                batch.Put("operator-policy"u8, "generation=1;enabled=true"u8);
+                batch.Put("operator-audit"u8, "sequence=1;generation=1"u8);
+                Assert.Throws<IOException>(() => batch.Commit());
+                Assert.Throws<InvalidOperationException>(() =>
+                    database.TryGet("operator-policy"u8, out _));
+            }
+
+            using (var recovered = StorageDatabase.Open(directory, partitionId))
+            {
+                Assert.Equal(1UL, recovered.LastCommitSeq);
+                Assert.True(recovered.TryGet("operator-policy"u8, out var policy));
+                Assert.Equal("generation=1;enabled=true"u8.ToArray(), policy);
+                Assert.True(recovered.TryGet("operator-audit"u8, out var audit));
+                Assert.Equal("sequence=1;generation=1"u8.ToArray(), audit);
+            }
+
+            using var reopened = StorageDatabase.Open(directory, partitionId);
+            Assert.Equal(1UL, reopened.LastCommitSeq);
+            Assert.True(reopened.TryGet("operator-policy"u8, out _));
+            Assert.True(reopened.TryGet("operator-audit"u8, out _));
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Theory]
     [InlineData((int)StorageFaultPoint.AfterBTreeDataFlush)]
     [InlineData((int)StorageFaultPoint.AfterBTreePageFlushBeforeManifest)]
     [InlineData((int)StorageFaultPoint.AfterBTreeManifestFileFlushBeforeReplace)]
