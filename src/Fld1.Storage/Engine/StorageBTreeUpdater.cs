@@ -389,7 +389,8 @@ internal static class StorageBTreeUpdater
 
     private static void ValidateInternalNode(
         StorageTreeInternalPage node,
-        StorageBTreeGenerationFiles files)
+        StorageBTreeGenerationFiles files,
+        BatchPageReadCache pageReadCache)
     {
         var children = new HashSet<ulong> { node.FirstChild };
         StorageTreeKeyReference? previous = null;
@@ -406,7 +407,8 @@ internal static class StorageBTreeUpdater
 
     private static void ValidateLeafEntries(
         StorageTreeLeafEntry[] entries,
-        StorageBTreeGenerationFiles files)
+        StorageBTreeGenerationFiles files,
+        BatchPageReadCache pageReadCache)
     {
         for (int i = 1; i < entries.Length; i++)
         {
