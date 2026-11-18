@@ -785,6 +785,39 @@ public sealed class StorageWriteBatch : IDisposable
             new StorageDatabase.StorageMutation(keyBytes, Array.Empty<byte>(), true);
     }
 
+    /// <summary>
+    /// Reserves the expected mutation count before a large batch is staged.
+    /// Internal callers use this to avoid repeated dictionary growth.
+    /// </summary>
+    internal void ReserveCapacity(int capacity)
+    {
+        EnsureOpen();
+        if (capacity < 0) throw new ArgumentOutOfRangeException(nameof(capacity));
+        _mutations.EnsureCapacity(capacity);
+    }
+
+    /// <summary>
+    /// Stages immutable key/value arrays without copying them. The caller must not mutate
+    /// either array after this call; storage and the caller may retain read-only references.
+    /// </summary>
+    internal void PutShared(byte[] key, byte[] value)
+    {
+        EnsureOpen();
+        ArgumentNullException.ThrowIfNull(value);
+        var storageKey = StorageDatabase.StorageKey.FromOwned(key);
+        _mutations[storageKey] =
+            new StorageDatabase.StorageMutation(key, value, false);
+    }
+
+    /// <summary>Stages an immutable key array for deletion without copying it.</summary>
+    internal void DeleteShared(byte[] key)
+    {
+        EnsureOpen();
+        var storageKey = StorageDatabase.StorageKey.FromOwned(key);
+        _mutations[storageKey] =
+            new StorageDatabase.StorageMutation(key, Array.Empty<byte>(), true);
+    }
+
     internal bool IsBoundTo(StorageDatabase database)
         => ReferenceEquals(_database, database);
 
