@@ -117,6 +117,41 @@ internal static class StorageBTreePageCodec
         return StoragePageCodec.Encode(generation, pageId, StoragePageKind.Internal, p);
     }
 
+    /// <summary>Encodes an internal node directly into caller-owned page memory.</summary>
+    public static void EncodeInternalInto(
+        Span<byte> page, ulong generation, ulong pageId,
+        IReadOnlyList<StorageTreeChild> children, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(children);
+        if (page.Length != StoragePageCodec.PageSize)
+            throw new ArgumentException("Page buffer must have the fixed Storage page size.", nameof(page));
+        if (start < 0 || count is < 2 || count > MaxInternalChildren ||
+            count > children.Count || start > children.Count - count)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        ulong first = children[start].PageId;
+        if (first == 0) throw new InvalidDataException("Null B+ tree first child.");
+        int separatorCount = count - 1;
+        int payloadLength = Header + separatorCount * InternalEntry;
+        page.Clear();
+        Span<byte> payload = page.Slice(StoragePageCodec.HeaderSize, payloadLength);
+        payload[0] = Version;
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.Slice(2), checked((ushort)separatorCount));
+        BinaryPrimitives.WriteUInt64LittleEndian(payload.Slice(4), first);
+        int o = Header;
+        for (int i = 1; i < count; i++)
+        {
+            StorageTreeChild child = children[start + i];
+            if (child.PageId == 0) throw new InvalidDataException("Null B+ tree child.");
+            WriteKey(payload.Slice(o, 12), child.FirstKey);
+            BinaryPrimitives.WriteUInt64LittleEndian(payload.Slice(o + 12), child.PageId);
+            o += InternalEntry;
+        }
+
+        StoragePageCodec.EncodeInPlace(
+            page, generation, pageId, StoragePageKind.Internal, payloadLength);
+    }
+
     public static byte[] EncodeInternal(
         ulong generation, ulong pageId,
         IReadOnlyList<StorageTreeChild> children, int start, int count)
@@ -126,23 +161,9 @@ internal static class StorageBTreePageCodec
             count > children.Count || start > children.Count - count)
             throw new ArgumentOutOfRangeException(nameof(count));
 
-        ulong first = children[start].PageId;
-        if (first == 0) throw new InvalidDataException("Null B+ tree first child.");
-        int separatorCount = count - 1;
-        byte[] p = new byte[Header + separatorCount * InternalEntry];
-        p[0] = Version;
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), checked((ushort)separatorCount));
-        BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(4), first);
-        int o = Header;
-        for (int i = 1; i < count; i++)
-        {
-            StorageTreeChild child = children[start + i];
-            if (child.PageId == 0) throw new InvalidDataException("Null B+ tree child.");
-            WriteKey(p.AsSpan(o, 12), child.FirstKey);
-            BinaryPrimitives.WriteUInt64LittleEndian(p.AsSpan(o + 12), child.PageId);
-            o += InternalEntry;
-        }
-        return StoragePageCodec.Encode(generation, pageId, StoragePageKind.Internal, p);
+        byte[] page = new byte[StoragePageCodec.PageSize];
+        EncodeInternalInto(page, generation, pageId, children, start, count);
+        return page;
     }
     public static ulong SelectInternalChild(
         ReadOnlyMemory<byte> bytes, ulong generation, ulong pageId, ReadOnlySpan<byte> searchKey,
