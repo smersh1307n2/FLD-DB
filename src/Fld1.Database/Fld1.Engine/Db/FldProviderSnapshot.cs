@@ -144,7 +144,8 @@ public sealed class FldProviderSnapshot : IDisposable
                 entries.Add(entry!);
 
             bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Count)
-                || _recordIdQueue.Count != 0;
+                || _recordIdQueue.Count != 0
+                || _overlayEntryIndex < _overlayEntries!.Length;
             var page = new FldProviderSnapshotPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
             _lastPageLimit = limit;
@@ -185,7 +186,8 @@ public sealed class FldProviderSnapshot : IDisposable
                 entries.Add(metadata!);
 
             bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Count)
-                || _recordIdQueue.Count != 0;
+                || _recordIdQueue.Count != 0
+                || _overlayEntryIndex < _overlayEntries!.Length;
             var page = new FldProviderSnapshotMetadataPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
             _lastPageLimit = limit;
