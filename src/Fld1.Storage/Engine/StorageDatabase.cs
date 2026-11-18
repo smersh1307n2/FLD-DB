@@ -761,16 +761,20 @@ public sealed class StorageWriteBatch : IDisposable
     {
         EnsureOpen();
         if (key.IsEmpty) throw new ArgumentException("Storage key must not be empty.", nameof(key));
-        _mutations[new StorageDatabase.StorageKey(key)] =
-            new StorageDatabase.StorageMutation(key.ToArray(), value.ToArray(), false);
+        byte[] keyBytes = key.ToArray();
+        var storageKey = StorageDatabase.StorageKey.FromOwned(keyBytes);
+        _mutations[storageKey] =
+            new StorageDatabase.StorageMutation(keyBytes, value.ToArray(), false);
     }
 
     public void Delete(ReadOnlySpan<byte> key)
     {
         EnsureOpen();
         if (key.IsEmpty) throw new ArgumentException("Storage key must not be empty.", nameof(key));
-        _mutations[new StorageDatabase.StorageKey(key)] =
-            new StorageDatabase.StorageMutation(key.ToArray(), Array.Empty<byte>(), true);
+        byte[] keyBytes = key.ToArray();
+        var storageKey = StorageDatabase.StorageKey.FromOwned(keyBytes);
+        _mutations[storageKey] =
+            new StorageDatabase.StorageMutation(keyBytes, Array.Empty<byte>(), true);
     }
 
     internal bool IsBoundTo(StorageDatabase database)
