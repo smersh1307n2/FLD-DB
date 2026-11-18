@@ -1,22 +1,22 @@
 # FLD Storage Core — paged ordered index design
 
-Status: B+ tree is the authoritative StorageDatabase index; WAL/root recovery, snapshots, generation reclamation and shared cache budgets are integrated. Exact-head cross-platform CI and benchmark are the remaining verification gates.
-Date: 2026-11-17
+Status: implemented in Fld1.Storage. The B+ tree is the authoritative StorageDatabase index; WAL/root recovery, immutable snapshots, generation pinning/reclamation and shared cache budgets are integrated. FLD exact-head .NET CI and Windows crash/recovery pass; BIN-SYNC cross-repository Host/Storage integration passes against the exact gitlink. Remaining gates are large-cardinality peak-memory validation, Windows NTFS power-loss testing, and streaming FLD Run access.
+Date: 2026-11-18
 Scope: Fld1.Storage physical key/value engine only. No BIN-SYNC protocol changes and no FLD field/tombstone policy changes.
 
-## 1. Why the current engine must change
+## 1. Current implementation and remaining constraints
 
-The current implementation is correct for small embedded datasets but is not out-of-core:
+The original dictionary-plus-monolithic-snapshot design has been replaced by the paged Storage Core:
 
-- StorageDatabase owns every live key/value in Dictionary<StorageKey, byte[]>.
-- Opening a partition loads the complete v1 snapshot and replays the WAL into that dictionary.
-- OpenSnapshot constructs a complete SortedList copy of the key index. Cached snapshots avoid repeated sorting, but the first snapshot is O(N) memory and construction.
-- Checkpoint makes another sorted copy and StorageSnapshotFile.EncodeSnapshot materializes the complete encoded snapshot in a MemoryStream, then a second complete byte array.
-- StorageSnapshotFile.Load uses File.ReadAllBytes for both manifest and snapshot.
-- WAL open/recovery currently supplies a materialized record collection; this must be revisited before bounded recovery can be claimed.
-- A StorageSnapshot is currently a managed sorted-list view. It does not pin a disk generation because no disk-backed index is used yet.
+- `StorageDatabase` uses the copy-on-write B+ tree as its authoritative ordered index; the manifest/root and WAL define commit/recovery state.
+- Immutable page/data generations back stable snapshots. Snapshot/cursor pins prevent old-generation reclamation while readers are active.
+- Point lookup and ordered scans traverse pages through the shared bounded page cache. Cache budgets and reader metadata limits are explicit and database-wide.
+- Multi-key commits build new pages and publish one root only after WAL/page durability ordering is satisfied. The tree is single-writer; readers use immutable roots.
+- Existing v1 snapshots remain readable through the compatibility path.
 
-The existing 64 MiB FLD Run cache and mmap Run work do not bound this independent Storage Core heap.
+The remaining unbounded path is above the Storage Core: `FldDatabase.EnsureRunCached` still materializes complete Run blobs into managed byte arrays and keeps legacy `.fld1` mirrors. Do not remove those mirrors until a streaming/range-capable Run reader can validate and query immutable Storage blobs without `ReadAllBytes`, with crash-safe manifest cutover, legacy-read migration, rollback and old-format fixtures.
+
+The design below records the physical format and invariants that the implementation must continue to preserve. It is not a claim that Run mirroring or every power-loss scenario is already closed.
 
 ## 2. Target properties
 
@@ -31,7 +31,7 @@ The existing 64 MiB FLD Run cache and mmap Run work do not bound this independen
 9. Large keys and values remain supported within existing format/API limits; no silent narrowing of limits.
 10. No background maintenance thread is required for correctness. Compaction can be explicitly scheduled by the owning database/host.
 
-## 3. Proposed on-disk structure
+## 3. On-disk structure
 
 Use a copy-on-write B+ tree rooted by a small atomic manifest. The tree is immutable after a root is published; commits append new pages and publish a new root. This gives snapshots a stable root without copying the entire key set.
 
@@ -57,6 +57,7 @@ Keeping variable-length key/value bytes in the data file avoids imposing a page-
 - Leaf sibling links are generation-local and support forward range scans; cursors must still validate page identity and ordering.
 - Splits and root growth create new pages. Unchanged subtrees are shared by the new root.
 - A multi-key batch builds all changed paths before publishing one new root. No root is visible until every referenced page and data record has been flushed.
+- Sorted mutation batches up to 512 retain direct cached leaf descent. Larger batches locate the first leaf once, use the nearest next separator boundary and binary-search the sorted mutations to group the leaf's run. This changes neither the page format nor commit atomicity.
 - Page cache entries are keyed by (generation, pageId), never by page ID alone.
 
 The first version is single-writer, consistent with the existing partition writer fence. Readers use immutable roots. No concurrent in-place page mutation is permitted.
