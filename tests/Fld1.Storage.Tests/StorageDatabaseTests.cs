@@ -528,4 +528,41 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Equal("wal-value"u8.ToArray(), value);
     }
 
+    [Fact]
+    public void Large_checkpoint_streams_entries_and_reopens_without_materialized_input_array()
+    {
+        const ulong partition = 118;
+        const int count = 20_000;
+        string directory = Path.Combine(_dir, "streamed-large-checkpoint");
+
+        using (var db = StorageDatabase.Open(directory, partition))
+        {
+            for (int start = 0; start < count; start += 1_000)
+            {
+                using var batch = db.BeginWriteBatch();
+                int end = Math.Min(count, start + 1_000);
+                for (int i = start; i < end; i++)
+                {
+                    byte[] key = System.Text.Encoding.ASCII.GetBytes($"key-{i:D8}");
+                    byte[] value = BitConverter.GetBytes(i);
+                    batch.Put(key, value);
+                }
+                batch.Commit();
+            }
+
+            Assert.Equal(count, db.Count);
+            db.Checkpoint();
+            Assert.Equal(count, db.Count);
+            Assert.True(db.TryGet("key-00000000"u8, out byte[]? first));
+            Assert.Equal(BitConverter.GetBytes(0), first);
+            Assert.True(db.TryGet("key-00019999"u8, out byte[]? last));
+            Assert.Equal(BitConverter.GetBytes(count - 1), last);
+        }
+
+        using var reopened = StorageDatabase.Open(directory, partition);
+        Assert.Equal(count, reopened.Count);
+        Assert.True(reopened.TryGet("key-00010000"u8, out byte[]? middle));
+        Assert.Equal(BitConverter.GetBytes(10_000), middle);
+    }
+
 }

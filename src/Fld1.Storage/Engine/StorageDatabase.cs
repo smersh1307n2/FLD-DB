@@ -268,7 +268,7 @@ public sealed class StorageDatabase : IDisposable
             pair.Value,
             IsTombstone: false)).ToArray();
 
-    private StorageTreeBuildInput[] CreateBTreeBuildInputsFromCurrentTree()
+    private IEnumerable<StorageTreeBuildInput> CreateBTreeBuildInputsFromCurrentTree()
     {
         StorageBTreeGenerationFiles files = _btreeFiles
             ?? throw new InvalidOperationException("B+ tree generation files are not open.");
@@ -280,7 +280,6 @@ public sealed class StorageDatabase : IDisposable
             key => files.ReadData(key.Offset, key.Length, manifest.CommittedDataFileLength),
             _readerCache);
 
-        var entries = new List<StorageTreeBuildInput>();
         using StorageBTreePrefixCursor cursor = reader.OpenAllCursor(includeTombstones: true);
         while (cursor.TryReadNext(out StorageTreeEntry entry))
         {
@@ -288,18 +287,16 @@ public sealed class StorageDatabase : IDisposable
                 entry.Key.Offset, entry.Key.Length, manifest.CommittedDataFileLength);
             if (entry.Value.IsTombstone)
             {
-                entries.Add(new StorageTreeBuildInput(
-                    key, ReadOnlyMemory<byte>.Empty, IsTombstone: true));
+                yield return new StorageTreeBuildInput(
+                    key, ReadOnlyMemory<byte>.Empty, IsTombstone: true);
             }
             else
             {
                 byte[] value = files.ReadData(
                     entry.Value.Offset, entry.Value.Length, manifest.CommittedDataFileLength);
-                entries.Add(new StorageTreeBuildInput(key, value, IsTombstone: false));
+                yield return new StorageTreeBuildInput(key, value, IsTombstone: false);
             }
         }
-
-        return entries.ToArray();
     }
 
     public StorageWriteBatch BeginWriteBatch()
