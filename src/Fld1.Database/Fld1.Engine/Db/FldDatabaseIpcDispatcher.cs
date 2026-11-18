@@ -30,8 +30,19 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private const int MaxActiveGcApprovalSpools = 4;
     private readonly Dictionary<Guid, GcApprovalSpoolHandle> _gcApprovalSpools = new();
 
-    private sealed record GcApprovalSpoolHandle(
-        Guid ClientId, ulong SessionGeneration, FldTombstoneGcApprovalSpool Spool);
+    private sealed class GcApprovalSpoolHandle(
+        Guid clientId, ulong sessionGeneration, FldTombstoneGcApprovalSpool spool)
+    {
+        public Guid ClientId { get; } = clientId;
+        public ulong SessionGeneration { get; } = sessionGeneration;
+        public FldTombstoneGcApprovalSpool Spool { get; } = spool;
+        public int AppendCalls;
+        public int AppendedCandidates;
+        public long AppendElapsedTicks;
+        public long AppendAllocatedBytes;
+        public long SealElapsedTicks;
+        public long SealAllocatedBytes;
+    }
 
     private sealed record GcReferenceScanHandle(
         Guid ClientId, ulong SessionGeneration, FldReferenceSnapshot Snapshot,
@@ -46,6 +57,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         public bool IsTransient { get; } = isTransient;
         public object Gate { get; } = new();
         public bool Released { get; set; }
+        public int ReadPageCalls;
+        public int ReadPageEntries;
+        public long ReadPageElapsedTicks;
+        public long ReadPageAllocatedBytes;
     }
 
     public FldDatabaseIpcDispatcher(
@@ -509,12 +524,18 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
     private byte[] HandleAppendTombstoneGcApprovalSpool(
         StorageIpcRequestContext context, ReadOnlyMemory<byte> payload)
     {
+        long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
         (Guid token, FldTombstoneGcCandidate[] candidates) =
             FldDatabaseIpcProtocol.DecodeTombstoneGcApprovalSpoolAppend(payload);
         lock (_gcLeaseGate)
         {
             GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
             handle.Spool.Append(candidates);
+            handle.AppendCalls++;
+            handle.AppendedCandidates = checked(handle.AppendedCandidates + candidates.Length);
+            handle.AppendElapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            handle.AppendAllocatedBytes += GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
         }
         return Array.Empty<byte>();
     }
@@ -526,9 +547,21 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         lock (_gcLeaseGate)
         {
             GcApprovalSpoolHandle handle = GetApprovalSpool(context, token);
+            long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
             byte[] digest = handle.Spool.Seal();
-            return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolSealResponse(
+            byte[] response = FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolSealResponse(
                 handle.Spool.Count, digest);
+            handle.SealElapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            handle.SealAllocatedBytes += GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+            WriteSnapshotGcDiagnostic("spool-summary", token,
+                $"Count={handle.Spool.Count} AppendCalls={handle.AppendCalls} " +
+                $"AppendedCandidates={handle.AppendedCandidates} " +
+                $"AppendElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, handle.AppendElapsedTicks).TotalMilliseconds:F3} " +
+                $"AppendAllocatedBytes={handle.AppendAllocatedBytes} " +
+                $"SealElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, handle.SealElapsedTicks).TotalMilliseconds:F3} " +
+                $"SealAllocatedBytes={handle.SealAllocatedBytes}");
+            return response;
         }
     }
 
@@ -565,10 +598,44 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
                     return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(0);
 
                 using FldTombstoneGcApprovalSpool.Reader approved = handle.Spool.OpenReader();
-                int reclaimed = _database.CompactTombstones(candidate =>
-                    approved.IsApproved(candidate) &&
-                    !references.HasChangeIdReference(candidate.ChangeId.Span) &&
-                    !references.HasRecordReference(candidate.RecordId.Span, candidate.ChangeId.Span));
+                long approvalTicks = 0;
+                long changeIdTicks = 0;
+                long recordIdTicks = 0;
+                int predicateCalls = 0;
+                bool CanReclaim(FldTombstoneGcCandidate candidate)
+                {
+                    predicateCalls++;
+                    long started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    bool isApproved = approved.IsApproved(candidate);
+                    approvalTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                    if (!isApproved)
+                        return false;
+
+                    started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    bool hasChangeReference = references.HasChangeIdReference(candidate.ChangeId.Span);
+                    changeIdTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                    if (hasChangeReference)
+                        return false;
+
+                    started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    bool hasRecordReference = references.HasRecordReference(
+                        candidate.RecordId.Span, candidate.ChangeId.Span);
+                    recordIdTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                    return !hasRecordReference;
+                }
+
+                long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+                long commitStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                int reclaimed = _database.CompactTombstones(CanReclaim);
+                long commitTicks = System.Diagnostics.Stopwatch.GetTimestamp() - commitStarted;
+                long commitAllocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+                WriteSnapshotGcDiagnostic("tombstone-commit-summary", token,
+                    $"Candidates={handle.Spool.Count} PredicateCalls={predicateCalls} Reclaimed={reclaimed} " +
+                    $"CommitElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, commitTicks).TotalMilliseconds:F3} " +
+                    $"CommitAllocatedBytes={commitAllocatedBytes} " +
+                    $"ApprovalElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, approvalTicks).TotalMilliseconds:F3} " +
+                    $"ChangeIdCheckElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, changeIdTicks).TotalMilliseconds:F3} " +
+                    $"RecordIdCheckElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, recordIdTicks).TotalMilliseconds:F3}");
                 return FldDatabaseIpcProtocol.EncodeTombstoneGcApprovalSpoolCommitResponse(reclaimed);
             }
             finally
@@ -791,7 +858,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         }
     }
 
-    private static void WriteSnapshotGcDiagnostic(string stage, Guid operationId)
+    private static void WriteSnapshotGcDiagnostic(
+        string stage, Guid operationId, string? detail = null)
     {
         string? path = Environment.GetEnvironmentVariable("FLD_TEST_GC_DIAGNOSTICS_FILE");
         if (string.IsNullOrWhiteSpace(path))
@@ -801,7 +869,8 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             string line = $"FLD_HOST_GC_DIAG Stage={stage} Operation={operationId:N} " +
                 $"AllocatedBytes={GC.GetTotalAllocatedBytes(precise: true)} " +
-                $"ManagedHeapBytes={GC.GetTotalMemory(forceFullCollection: false)}";
+                $"ManagedHeapBytes={GC.GetTotalMemory(forceFullCollection: false)}" +
+                (string.IsNullOrWhiteSpace(detail) ? string.Empty : " " + detail);
             File.AppendAllText(path, line + Environment.NewLine);
         }
         catch (IOException) { }
@@ -816,9 +885,16 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             if (handle.Released)
                 throw new InvalidOperationException("FLD snapshot handle has been released.");
+            long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
             FldProviderSnapshotMetadataPage page =
                 handle.Snapshot.ReadMetadataPage(request.AfterIndex, request.Limit);
-            return FldDatabaseIpcProtocol.EncodeSnapshotPageResponse(page);
+            byte[] response = FldDatabaseIpcProtocol.EncodeSnapshotPageResponse(page);
+            handle.ReadPageCalls++;
+            handle.ReadPageEntries = checked(handle.ReadPageEntries + page.Entries.Count);
+            handle.ReadPageElapsedTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            handle.ReadPageAllocatedBytes += GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+            return response;
         }
     }
 
@@ -858,6 +934,10 @@ public sealed class FldDatabaseIpcDispatcher : IDisposable
         {
             if (!handle.Released)
             {
+                WriteSnapshotGcDiagnostic("snapshot-page-summary", handle.OpenOperationId,
+                    $"Calls={handle.ReadPageCalls} Entries={handle.ReadPageEntries} " +
+                    $"ElapsedMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, handle.ReadPageElapsedTicks).TotalMilliseconds:F3} " +
+                    $"AllocatedBytes={handle.ReadPageAllocatedBytes}");
                 WriteSnapshotGcDiagnostic("release-before", handle.OpenOperationId);
                 handle.Released = true;
                 _database.ReleaseProviderSnapshot(handle.Snapshot.Generation);
