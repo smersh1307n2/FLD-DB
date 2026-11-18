@@ -140,6 +140,27 @@ internal sealed class StorageBTreeGenerationFiles : IDisposable
         }
     }
 
+    /// <summary>Reads a committed data slice into caller-owned scratch memory without allocating.</summary>
+    public void ReadDataInto(
+        ulong offset, int length, ulong committedDataFileLength, Span<byte> destination)
+    {
+        if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+        if (destination.Length < length)
+            throw new ArgumentException("Destination buffer is smaller than the requested data slice.", nameof(destination));
+        lock (_gate)
+        {
+            EnsureUsable();
+            long physicalLength = _data.Length;
+            if (committedDataFileLength > (ulong)physicalLength)
+                throw new InvalidDataException("Manifest data-file length exceeds the physical file length.");
+            ulong end = checked(offset + (ulong)length);
+            if (end > committedDataFileLength || offset > long.MaxValue)
+                throw new InvalidDataException("B+ tree data reference is outside the committed manifest range.");
+            if (length != 0)
+                _data.ReadExactly(checked((long)offset), destination[..length]);
+        }
+    }
+
     public void FlushToDisk(
         Action? beforeDataFlush = null,
         Action? afterDataFlush = null,
