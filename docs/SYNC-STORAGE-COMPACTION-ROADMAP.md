@@ -1,5 +1,17 @@
 > **BIN-SYNC v3.0.0 alignment (2026-11-08):** This roadmap is the FLD storage/compaction work log. For protocol ownership, BIN-SYNC-SPECIFICATION.txt v3.0.0 is authoritative. FLD OutboxSeq, FLD ApplyJournal JournalSeq and WAL CommitSeq are local coordinates, not OriginSequence. BIN-SYNC Metadata Store allocates OriginSequence at durable freeze and owns published ChangeId/Origin, receipts, per-peer delivery state and relay payload. Do not add a duplicate PendingLocal journal or a second authoritative per-source relay history. Tombstones/ghosts remain until the independent v3 membership/full-resync proof authorizes reclamation; TTL/HLC age alone is insufficient. The two runtime DLLs remain Fld1.Storage.dll and Fld1.Database.dll.
 
+## Current status — 2026-11-18
+
+This checkpoint supersedes older dated status statements below wherever they conflict.
+
+- **Runtime split remains two DLLs:** `Fld1.Storage.dll` is the protocol-neutral durable storage engine; `Fld1.Database.dll` is the FLD database/overlay layer. Do not split this into a third runtime DLL.
+- **Storage Core is no longer the old dictionary-only prototype.** The authoritative `StorageDatabase` index is the copy-on-write B+ tree with WAL/root recovery, immutable snapshots, generation pins/reclamation and bounded shared cache budgets. BIN-SYNC consumes the exact FLD source through the `external/Fld1.Storage` gitlink; its current source pin is `3226a6af97b122d8c1e543b3ba34ce4e83a82f16`, not a divergent vendored copy.
+- **Cross-repository verification:** BIN-SYNC at gitlink commit `08892fdd92dd85889c4fb48423d00778c789aa1b` passed BinSync.Net, FLD Storage Integration, composed Host GC smoke/scale and ChangeId GC allocation workflows. Host adapter integration passed 74/74 tests. FLD Storage .NET CI passed 159 Storage + 131 Engine tests; Windows crash/recovery matrix passed. The durable GC operator policy Windows suite passed 39/39.
+- **Durable GC policy is implemented in the sample Host layer:** durable policy/audit/lease storage is connected through `FldBinSyncAsyncHostComposition`; startup restores the persisted policy before provider recovery. This is not yet the relocated production Host adapter. Receipt/ChangeId/Tombstone physical-GC flags remain false by default.
+- **ChangeId GC default page limit remains 4096.** The 50k-candidate run at 4096 used 13 pages and about 36.6 MB cumulative allocations; retained managed heap fell by about 5.1 MB. Smaller page sizes multiply page count and cumulative allocations. Do not change the 4096 default from a single timing sample.
+- **Sorted B+ tree mutation grouping:** batches up to 512 retain direct cached leaf descent; larger sorted batches use the existing search path's next separator boundary to group mutations by leaf. Same-runner BenchmarkDotNet comparison against pre-grouping FLD commit `ba002427...` (run `44307636276`) showed unchanged allocations; 1024-entry batches improved by about 6.3% at 10k entries and 1.5% at 50k, while 64/256-entry results were effectively neutral. This is a modest throughput optimization, not a memory-reduction claim.
+- **Remaining work:** eliminate full Run byte-array materialization and legacy `.fld1` mirrors only through a streaming/range reader plus migration/recovery/rollback tests; complete Node/Metadata/Provider authority and residency audit; move the production Host adapter out of `samples/`; retain Windows NTFS power-loss testing as a separate release gate.
+
 # Sync Storage Compaction Roadmap — FLD-DB + BIN-SYNC
 
 ## 2026-11-16 — measured Storage index baseline and migration gate
@@ -31,21 +43,21 @@ Freeze new protocol features and prioritize the physical storage foundation. The
 
 ### Confirmed implementation gaps
 
-- Fld1.Storage.Engine.StorageDatabase currently retains the complete key/value set in _values: Dictionary<StorageKey, byte[]> and uses a monolithic snapshot/index path. It is not yet a disk-paged/out-of-core engine with a bounded block cache.
+- The old dictionary-only Storage Core gap is closed: StorageDatabase now uses the authoritative copy-on-write B+ tree and bounded shared cache. Continue to validate large-cardinality peak working set and cache behavior; do not reintroduce a full managed mirror of the key/value set.
 - FldDatabase.EnsureRunCached currently materializes a complete Run file into a byte[] and caches it in _runs; large Run access is not bounded or streaming.
 - FLD Database currently uses StorageBlobStore while retaining legacy .fld1 Run mirrors for compatibility. Option B is therefore an incomplete migration, not yet a single physical write/read/recovery path.
-- BIN-SYNC's external/Fld1.Storage is a divergent vendored copy: the FLD-DB authoritative tree contains StorageBlobStore and Ipc sources absent from the vendored tree, and StorageDatabase source hashes differ. BIN-SYNC's storage-integration.yml currently builds/tests the vendored copy. A green result there cannot be treated as validation of the current FLD-DB Storage source.
+- The previous divergent-vendor gap is closed for the current integration branch: BIN-SYNC uses an exact FLD Storage gitlink and cross-repository workflows build/test against the pinned FLD-DB revision. Every FLD Storage source change must still be followed by an explicit gitlink update and BIN-SYNC CI; a green FLD-only run does not validate the Host integration.
 - Provider-authoritative mode still needs a measured authority/residency audit of Node._storage and NodePersistence against IMetadataStore/IDataProvider; do not remove Node persistence for standalone modes without a replacement recovery contract.
-- The durable GC operator policy is still a contract/test-double boundary, not a concrete production durable policy/audit/lease store.
+- The durable GC operator policy/audit/lease store now has a concrete durable implementation and startup restore tests in samples/FldBinSyncHost. Remaining gap: relocate/integrate this composition into the production Host adapter and keep all physical GC flags default-off until the independent signed-proof, reference-scan, crash-recovery and staged-canary gates are accepted.
 
 ### Required order
 
-1. Restore deterministic exact-head CI.
-2. Establish one reproducible Storage source revision for both repositories (prefer a pinned package/source revision; if vendoring is retained temporarily, add a CI provenance and byte-for-byte drift gate).
-3. Complete Option B: eliminate legacy Run mirrors only with migration/recovery/rollback and old-format compatibility tests.
-4. Implement disk-backed ordered pages/indexes and a bounded block cache in Storage; implement streaming/range Run readers and explicit cache budgets.
+1. Keep exact-head CI and the cross-repository gitlink provenance gate green on every source change.
+2. Keep one reproducible Storage source revision pinned in BIN-SYNC; update the gitlink only after FLD tests and then rerun Host integration/GC checks.
+3. Complete Option B: eliminate legacy Run mirrors only with a streaming/range Run reader, migration/recovery/rollback and old-format compatibility tests.
+4. Finish bounded-memory validation of the paged B+ tree at 100k, 250k and 1M+ records; keep cache budgets explicit and measure peak working set separately from cumulative allocations.
 5. Audit Node/Metadata/Provider authority and remove only proven duplicate live-data residency.
-6. Implement the concrete durable GC policy store over the existing durable authority, without a second GC journal; maintain physical GC default-off until every safety gate passes.
+6. Relocate the durable GC policy/audit/lease implementation into the production Host composition; maintain physical GC default-off until signed-proof, reference-scan, crash recovery and staged-canary gates pass.
 7. Move the production Host adapter out of samples/ and decompose large classes in small independently tested steps.
 
 ### Acceptance evidence
