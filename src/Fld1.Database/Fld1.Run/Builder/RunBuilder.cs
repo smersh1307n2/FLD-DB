@@ -754,3 +754,5 @@ public sealed class RunBuilder
         public int GetHashCode(IdKey obj) => obj.GetHashCode();
     }
 }
+
+// Benchmark baseline trigger: source behavior is unchanged from d576a8e.
