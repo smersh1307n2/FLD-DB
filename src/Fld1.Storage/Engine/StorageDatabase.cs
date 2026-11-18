@@ -940,7 +940,10 @@ public sealed class StorageSnapshot : IDisposable
 
             bool Add(in StorageEntryView entry)
             {
-                result.Add(new StorageEntry(entry.Key.ToArray(), entry.Value.ToArray()));
+                // TryReadNext already materializes one owned key/value pair and keeps
+                // those arrays alive in the cursor fields. Transfer those arrays to the
+                // returned page instead of copying both spans a second time.
+                result.Add(new StorageEntry(_currentKey!, _currentValue!));
                 return true;
             }
         }
