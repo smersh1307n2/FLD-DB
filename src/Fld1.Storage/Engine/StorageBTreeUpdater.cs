@@ -84,12 +84,10 @@ internal static class StorageBTreeUpdater
                     findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
                 phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
-                StorageTreeLeafEntry[] existing = leafId == 0
-                    ? Array.Empty<StorageTreeLeafEntry>()
-                    : StorageBTreePageCodec.DecodeLeaf(
-                        pageReadCache.Read(files, leafId, files.PageFileLength), files.Generation, leafId).Entries;
-                ValidateLeafEntries(existing, files, pageReadCache);
-
+                StorageBTreeLeafPageView existing = leafId == 0
+                    ? default
+                    : StorageBTreePageCodec.DecodeLeafView(
+                        pageReadCache.Read(files, leafId, files.PageFileLength), files.Generation, leafId);
                 List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files, pageReadCache);
                 if (allocationObserver is not null)
                     leafMergeAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
@@ -175,38 +173,55 @@ internal static class StorageBTreeUpdater
     }
 
     private static List<StorageTreeLeafEntry> MergeLeaf(
-        StorageTreeLeafEntry[] existing,
+        StorageBTreeLeafPageView existing,
         IReadOnlyList<StorageTreeMutation> mutations,
         int mutationStart,
         int mutationEnd,
         StorageBTreeGenerationFiles files,
         BatchPageReadCache pageReadCache)
     {
-        var merged = new List<StorageTreeLeafEntry>(existing.Length + mutationEnd - mutationStart);
+        var merged = new List<StorageTreeLeafEntry>(existing.Count + mutationEnd - mutationStart);
         int e = 0;
         int m = mutationStart;
+        bool currentLoaded = false;
+        StorageTreeLeafEntry current = default;
+        ReadOnlyMemory<byte> existingKey = default;
+        ReadOnlyMemory<byte> previousExistingKey = default;
 
-        while (e < existing.Length || m < mutationEnd)
+        while (e < existing.Count || m < mutationEnd)
         {
-            if (e >= existing.Length)
+            if (e >= existing.Count)
             {
                 merged.Add(CreateNewEntry(mutations[m++], files));
                 continue;
             }
+
+            if (!currentLoaded)
+            {
+                current = existing.GetEntry(e);
+                existingKey = pageReadCache.ReadKey(files, current.Key);
+                if (e > 0 && previousExistingKey.Span.SequenceCompareTo(existingKey.Span) >= 0)
+                    throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
+                currentLoaded = true;
+            }
+
             if (m >= mutationEnd)
             {
-                merged.Add(existing[e++]);
+                merged.Add(current);
+                previousExistingKey = existingKey;
+                e++;
+                currentLoaded = false;
                 continue;
             }
 
-            StorageTreeLeafEntry current = existing[e];
             StorageTreeMutation mutation = mutations[m];
-            ReadOnlyMemory<byte> existingKey = pageReadCache.ReadKey(files, current.Key);
             int comparison = existingKey.Span.SequenceCompareTo(mutation.Key.Span);
             if (comparison < 0)
             {
                 merged.Add(current);
+                previousExistingKey = existingKey;
                 e++;
+                currentLoaded = false;
             }
             else if (comparison > 0)
             {
@@ -216,8 +231,10 @@ internal static class StorageBTreeUpdater
             else
             {
                 merged.Add(new StorageTreeLeafEntry(current.Key, CreateValueReference(mutation, files)));
+                previousExistingKey = existingKey;
                 e++;
                 m++;
+                currentLoaded = false;
             }
         }
 
@@ -433,19 +450,6 @@ internal static class StorageBTreeUpdater
             if (!children.Add(separator.PageId))
                 throw new InvalidDataException("B+ tree internal page contains a duplicate child reference.");
             previous = separator.FirstKey;
-        }
-    }
-
-    private static void ValidateLeafEntries(
-        StorageTreeLeafEntry[] entries,
-        StorageBTreeGenerationFiles files,
-        BatchPageReadCache pageReadCache)
-    {
-        for (int i = 1; i < entries.Length; i++)
-        {
-            if (pageReadCache.ReadKey(files, entries[i - 1].Key).Span.SequenceCompareTo(
-                    pageReadCache.ReadKey(files, entries[i].Key).Span) >= 0)
-                throw new InvalidDataException("B+ tree leaf keys are not strictly ordered.");
         }
     }
 
