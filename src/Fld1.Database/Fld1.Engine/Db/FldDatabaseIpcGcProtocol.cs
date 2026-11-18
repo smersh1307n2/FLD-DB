@@ -152,6 +152,46 @@ public static class FldDatabaseIpcGcProtocol
 
     public const int MaxChangeIdBatchCount = 256;
 
+    /// <summary>Encodes a packed sequence of 16-byte ChangeIds without per-id arrays.</summary>
+    public static byte[] EncodeChangeIdBatchQuery(
+        Guid token, ReadOnlyMemory<byte> packedChangeIds, int count)
+    {
+        if (token == Guid.Empty || count is < 1 or > MaxChangeIdBatchCount ||
+            packedChangeIds.Length != checked(count * 16))
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        byte[] payload = new byte[checked(18 + packedChangeIds.Length)];
+        token.TryWriteBytes(payload.AsSpan(0, 16), bigEndian: true, out _);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(16), checked((ushort)count));
+        ReadOnlySpan<byte> source = packedChangeIds.Span;
+        for (int offset = 0; offset < source.Length; offset += 16)
+        {
+            ReadOnlySpan<byte> id = source.Slice(offset, 16);
+            if (id.IndexOfAnyExcept((byte)0) < 0)
+                throw new ArgumentException("GC ChangeId batch identities must be nonzero 16-byte values.", nameof(packedChangeIds));
+        }
+        source.CopyTo(payload.AsSpan(18));
+        return payload;
+    }
+
+    /// <summary>Validates a batch and returns a zero-copy view over its packed identities.</summary>
+    public static (Guid Token, ReadOnlyMemory<byte> PackedChangeIds, int Count)
+        DecodeChangeIdBatchQueryView(ReadOnlyMemory<byte> payload)
+    {
+        if (payload.Length < 34)
+            throw new InvalidDataException("FLD GC ChangeId batch query is truncated.");
+        Guid token = new(payload.Span[..16], bigEndian: true);
+        ushort count = BinaryPrimitives.ReadUInt16LittleEndian(payload.Span[16..]);
+        if (token == Guid.Empty || count is < 1 or > MaxChangeIdBatchCount ||
+            payload.Length != 18 + count * 16)
+            throw new InvalidDataException("FLD GC ChangeId batch query header or length is invalid.");
+        ReadOnlyMemory<byte> packed = payload.Slice(18);
+        for (int offset = 0; offset < packed.Length; offset += 16)
+            if (packed.Span.Slice(offset, 16).IndexOfAnyExcept((byte)0) < 0)
+                throw new InvalidDataException("FLD GC ChangeId batch contains a zero identity.");
+        return (token, packed, count);
+    }
+
     public static byte[] EncodeChangeIdBatchQuery(Guid token, IReadOnlyList<byte[]> changeIds)
     {
         ArgumentNullException.ThrowIfNull(changeIds);
