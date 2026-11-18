@@ -63,6 +63,9 @@ internal static class StorageBTreeUpdater
         // of leaves; allocating a fresh List and backing array for every leaf creates
         // avoidable short-lived garbage. Entries contain only value-type offsets.
         var mergedLeafEntries = new List<StorageTreeLeafEntry>();
+        // AppendPage consumes the encoded bytes synchronously, so one page-sized
+        // buffer can be reused for every newly written leaf in this batch.
+        byte[] leafPageBuffer = new byte[StoragePageCodec.PageSize];
 
         // Reuse the root-to-leaf path buffer across groups. A sorted delete
         // batch may touch thousands of leaves; each path is consumed by RewritePath
@@ -105,7 +108,8 @@ internal static class StorageBTreeUpdater
                     leafMergeAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
                 phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
-                List<StorageTreeChild> replacements = WriteLeafLevel(mergedLeafEntries, files, ref nextPageId);
+                List<StorageTreeChild> replacements = WriteLeafLevel(
+                    mergedLeafEntries, files, ref nextPageId, leafPageBuffer);
                 if (allocationObserver is not null)
                     leafWriteAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
@@ -281,7 +285,8 @@ internal static class StorageBTreeUpdater
     private static List<StorageTreeChild> WriteLeafLevel(
         IReadOnlyList<StorageTreeLeafEntry> entries,
         StorageBTreeGenerationFiles files,
-        ref ulong nextPageId)
+        ref ulong nextPageId,
+        byte[] pageBuffer)
     {
         if (entries.Count == 0)
             throw new InvalidDataException("A non-empty COW batch cannot produce an empty leaf.");
@@ -297,8 +302,9 @@ internal static class StorageBTreeUpdater
         {
             int count = baseSize + (group < extra ? 1 : 0);
             ulong pageId = Allocate(ref nextPageId);
-            files.AppendPage(pageId,
-                StorageBTreePageCodec.EncodeLeaf(files.Generation, pageId, 0, entries, start, count));
+            StorageBTreePageCodec.EncodeLeafInto(
+                pageBuffer, files.Generation, pageId, 0, entries, start, count);
+            files.AppendPage(pageId, pageBuffer);
             result.Add(new StorageTreeChild(pageId, entries[start].Key));
             start += count;
         }
