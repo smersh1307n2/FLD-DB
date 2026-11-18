@@ -121,29 +121,36 @@ internal sealed class WalWriter : IDisposable
             uint len = (uint)payload.Length;
             int recordSize = WalEnvelope.AlignedRecordSize(len);
 
-            // Build: Envelope | Payload | RecordCrc | Padding
-            var record = new byte[recordSize];
-            WalEnvelope.Write(record.AsSpan(0, WalEnvelope.Size), commitSeq, len, kind, flags);
-            payload.CopyTo(record.AsSpan(WalEnvelope.Size, payload.Length));
-
-            // CRC32C(Envelope[0..16) ‖ Payload), incrementally and without a second payload-sized copy.
-            uint recordCrc = StorageChecksums.Crc32C(record.AsSpan(0, 16), payload);
-            int crcOff = WalEnvelope.Size + payload.Length;
-            BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(crcOff, 4), recordCrc);
-            // padding already zero
+            // Frame the record as separate spans. The encoded batch payload is already
+            // an owned contiguous buffer; building a second payload-sized record array
+            // here needlessly doubles the largest live buffer (up to MaxPayloadLen).
+            Span<byte> envelope = stackalloc byte[WalEnvelope.Size];
+            WalEnvelope.Write(envelope, commitSeq, len, kind, flags);
+            uint recordCrc = StorageChecksums.Crc32C(envelope[..16], payload);
+            Span<byte> crc = stackalloc byte[WalConstants.RecordCrcSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(crc, recordCrc);
+            Span<byte> padding = stackalloc byte[7];
+            padding.Clear();
+            int paddingLength = recordSize - WalEnvelope.Size - payload.Length - crc.Length;
+            ReadOnlySpan<byte> recordPadding = padding[..paddingLength];
 
             try
             {
                 if (_faultInjector is not null)
                 {
-                    int partialLength = Math.Max(1, record.Length / 2);
-                    _fs.Write(record.AsSpan(0, partialLength));
+                    int partialLength = Math.Max(1, recordSize / 2);
+                    WriteRecordRange(envelope, payload, crc, recordPadding, 0, partialLength);
                     _faultInjector(StorageFaultPoint.AfterWalPartialWrite);
-                    _fs.Write(record.AsSpan(partialLength));
+                    WriteRecordRange(envelope, payload, crc, recordPadding,
+                        partialLength, recordSize - partialLength);
                 }
                 else
                 {
-                    _fs.Write(record);
+                    _fs.Write(envelope);
+                    _fs.Write(payload);
+                    _fs.Write(crc);
+                    if (!recordPadding.IsEmpty)
+                        _fs.Write(recordPadding);
                 }
             }
             catch
@@ -163,6 +170,40 @@ internal sealed class WalWriter : IDisposable
             _writeOffset = newEnd;
             return commitSeq;
         }
+    }
+
+    private void WriteRecordRange(
+        ReadOnlySpan<byte> envelope,
+        ReadOnlySpan<byte> payload,
+        ReadOnlySpan<byte> crc,
+        ReadOnlySpan<byte> padding,
+        int offset,
+        int count)
+    {
+        WriteRecordSegment(envelope, ref offset, ref count);
+        WriteRecordSegment(payload, ref offset, ref count);
+        WriteRecordSegment(crc, ref offset, ref count);
+        WriteRecordSegment(padding, ref offset, ref count);
+        if (count != 0)
+            throw new InvalidOperationException("WAL partial-write range exceeds the encoded record.");
+    }
+
+    private void WriteRecordSegment(ReadOnlySpan<byte> segment, ref int offset, ref int count)
+    {
+        if (count == 0) return;
+        if (offset >= segment.Length)
+        {
+            offset -= segment.Length;
+            return;
+        }
+
+        int length = Math.Min(count, segment.Length - offset);
+        if (length > 0)
+        {
+            _fs.Write(segment.Slice(offset, length));
+            count -= length;
+        }
+        offset = 0;
     }
 
     /// <summary>
