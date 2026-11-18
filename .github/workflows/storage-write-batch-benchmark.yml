@@ -7,6 +7,7 @@ on:
     paths:
       - 'bench/Fld1.Engine.Bench/StorageBTreeUpdateBench.cs'
       - 'bench/Fld1.Engine.Bench/Program.cs'
+      - 'src/Fld1.Storage/Engine/StorageBTreeUpdater.cs'
       - '.github/workflows/storage-write-batch-benchmark.yml'
 
 permissions:
