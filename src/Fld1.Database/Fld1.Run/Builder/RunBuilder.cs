@@ -335,9 +335,10 @@ public sealed class RunBuilder
         }
 
         // Second pass writes each cluster directly into the final Run buffer.
-        bool measureClusterWrite = !string.IsNullOrWhiteSpace(diagnosticsPath);
-        long clusterWriteAllocated = measureClusterWrite ? GC.GetTotalAllocatedBytes(precise: true) : 0;
-        long clusterWriteStarted = measureClusterWrite ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        long clusterWriteAllocated = string.IsNullOrWhiteSpace(diagnosticsPath)
+            ? 0 : GC.GetTotalAllocatedBytes(precise: true);
+        long clusterWriteStarted = string.IsNullOrWhiteSpace(diagnosticsPath)
+            ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
         int clusterWriteCursor = (int)dataOff;
         for (int clusterIndex = 0; clusterIndex < clusterPlans.Count; clusterIndex++)
         {
@@ -428,7 +429,7 @@ public sealed class RunBuilder
         }
         if (clusterWriteCursor != (int)dataOff + dataBytes)
             throw new InvalidOperationException("Cluster data size does not match first-pass plan.");
-        WriteCheckpointDiagnostic("cluster-write", measureClusterWrite, clusterWriteAllocated, clusterWriteStarted,
+        MarkBuildDiagnostic("cluster-write", diagnosticsPath, ref clusterWriteAllocated, ref clusterWriteStarted,
             $"Clusters={clusterPlans.Count} DataBytes={dataBytes}");
 
         // Values section: ValueRef catalog then blob pool
