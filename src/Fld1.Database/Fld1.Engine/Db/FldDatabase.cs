@@ -1870,12 +1870,23 @@ public sealed partial class FldDatabase : IDisposable
         return compare != 0 ? compare : left.FieldId.CompareTo(right.FieldId);
     }
 
+    private static void WriteGcCompactionDiagnostic(string detail)
+    {
+        string? path = Environment.GetEnvironmentVariable("FLD_TEST_GC_DIAGNOSTICS_FILE");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try { File.AppendAllText(path, $"FLD_HOST_GC_COMPACTION {detail}{Environment.NewLine}"); }
+        catch { /* Test diagnostics must never change GC behavior. */ }
+    }
+
     private static (ulong High, ulong Low) GetCompactionRecordPriority(ReadOnlySpan<byte> recordId)
         => (System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(recordId),
             System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(recordId[8..]));
 
     private ulong CompactUnderLock(TombstoneGcFilter? tombstoneGc = null)
     {
+        long gcDiagnosticStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+        long gcQueueTicks = 0, gcLoopTicks = 0, gcResolveTicks = 0, gcOutputTicks = 0, gcFlushTicks = 0;
+        int gcRecords = 0, gcResolveCalls = 0, gcOutputFields = 0, gcOutputRuns = 0;
         EnsureHealthy();
         if (_dirty.Count != 0)
             throw new InvalidOperationException("Compact requires all overlay writes to be committed first.");
@@ -1896,6 +1907,7 @@ public sealed partial class FldDatabase : IDisposable
         List<KeyValuePair<MemFieldKey, MemFieldValue>> overlay = _overlay.Snapshot();
         overlay.Sort(static (left, right) =>
             CompareMemFieldKeysForCompaction(left.Key, right.Key));
+        if (tombstoneGc is not null) gcQueueTicks = System.Diagnostics.Stopwatch.GetTimestamp() - gcDiagnosticStarted;
         int overlayIndex = 0;
 
         const int MaxOutputFields = 4096;
@@ -1911,6 +1923,7 @@ public sealed partial class FldDatabase : IDisposable
         {
             if (outputFieldCount == 0)
                 return;
+            long gcFlushStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
             byte[] bytes = builder.Build();
             var reader = new RunReader(bytes);
             if (!reader.TryValidate(out var verify) || reader.NamespaceId != _namespaceId)
@@ -1922,6 +1935,7 @@ public sealed partial class FldDatabase : IDisposable
             _runBlobStore.PutImmutableBlob(RunBlobId(runId), bytes);
             InjectCompactionFault(FldCompactionFaultPoint.AfterReplacementRunDurable);
             outputRuns.Add((runId, runPath, outputMinRecord!, outputMaxRecord!));
+            if (tombstoneGc is not null) { gcFlushTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcFlushStarted; gcOutputRuns++; }
 
             builder = new RunBuilder(_namespaceId);
             outputFieldCount = 0;
@@ -1932,6 +1946,7 @@ public sealed partial class FldDatabase : IDisposable
 
         void AddOutputField(ReadOnlySpan<byte> recordId, ushort fieldId, CompactionResolved resolved)
         {
+            long gcAddStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
             long estimatedBytes = 128L + (resolved.IsTombstone ? 0 : resolved.Value.Length);
             if (outputFieldCount != 0 &&
                 (outputFieldCount >= MaxOutputFields ||
@@ -1951,6 +1966,7 @@ public sealed partial class FldDatabase : IDisposable
             if (outputMaxRecord is null ||
                 !outputMaxRecord.AsSpan().SequenceEqual(recordId))
                 outputMaxRecord = recordId.ToArray();
+            if (tombstoneGc is not null) { gcOutputTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcAddStarted; gcOutputFields++; }
         }
 
         Span<byte> recordIdBuffer = stackalloc byte[16];
@@ -1958,6 +1974,8 @@ public sealed partial class FldDatabase : IDisposable
         Span<byte> currentOverlayIdBuffer = stackalloc byte[16];
         while (runQueue.Count != 0 || overlayIndex < overlay.Count)
         {
+            long gcIterationStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+            gcRecords++;
             bool hasRun = runQueue.TryPeek(out _, out (ulong High, ulong Low) runPriority);
             bool hasOverlay = overlayIndex < overlay.Count;
             (ulong High, ulong Low) overlayPriority = default;
@@ -2026,8 +2044,10 @@ public sealed partial class FldDatabase : IDisposable
             for (int fieldIndex = 0; fieldIndex < fieldIds.Count; fieldIndex++)
             {
                 ushort fieldId = fieldIds[fieldIndex];
-                if (!TryResolveForCompactionUnlocked(recordIdBuffer, fieldId, out CompactionResolved resolved) ||
-                    !resolved.Found)
+                long gcResolveStarted = tombstoneGc is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+                bool gcResolved = TryResolveForCompactionUnlocked(recordIdBuffer, fieldId, out CompactionResolved resolved);
+                if (tombstoneGc is not null) { gcResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcResolveStarted; gcResolveCalls++; }
+                if (!gcResolved || !resolved.Found)
                     continue;
 
                 if (tombstoneGc is not null && hasRecordTombstone)
@@ -2060,6 +2080,7 @@ public sealed partial class FldDatabase : IDisposable
 
                 AddOutputField(recordIdBuffer, fieldId, resolved);
             }
+            if (tombstoneGc is not null) gcLoopTicks += System.Diagnostics.Stopwatch.GetTimestamp() - gcIterationStarted;
         }
 
         FlushOutputRun();
@@ -2145,6 +2166,15 @@ public sealed partial class FldDatabase : IDisposable
         if (_truncateSealedWal)
             _wal.TruncateSealedSegments(seqHi);
 
+        if (tombstoneGc is not null)
+            WriteGcCompactionDiagnostic(
+                $"Runs={oldRuns.Count} OverlayEntries={overlay.Count} Records={gcRecords} " +
+                $"ResolveCalls={gcResolveCalls} OutputFields={gcOutputFields} OutputRuns={gcOutputRuns} " +
+                $"QueueMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcQueueTicks).TotalMilliseconds:F3} " +
+                $"LoopMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcLoopTicks).TotalMilliseconds:F3} " +
+                $"ResolveMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcResolveTicks).TotalMilliseconds:F3} " +
+                $"OutputMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcOutputTicks).TotalMilliseconds:F3} " +
+                $"FlushMs={System.Diagnostics.Stopwatch.GetElapsedTime(0, gcFlushTicks).TotalMilliseconds:F3}");
         return outputRuns.Count == 0 ? 0 : outputRuns[^1].RunId;
     }
 
