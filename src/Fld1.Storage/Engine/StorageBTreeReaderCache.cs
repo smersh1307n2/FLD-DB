@@ -7,7 +7,7 @@ namespace Fld1.Storage.Engine;
 /// </summary>
 internal sealed class StorageBTreeReaderCache
 {
-    private const int HotLookupCapacity = 16_384;
+    private const int HotLookupCapacity = 4_096;
     private const int ValidationCacheCapacity = 4_096;
     private const int TreeKeyCacheCapacity = 4_096;
     private const int MaxCachedKeyLength = 256;

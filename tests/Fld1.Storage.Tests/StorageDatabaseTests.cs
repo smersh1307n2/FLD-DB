@@ -565,4 +565,18 @@ public sealed class StorageDatabaseTests : IDisposable
         Assert.Equal(BitConverter.GetBytes(10_000), middle);
     }
 
+    [Fact]
+    public void Page_cache_has_a_small_default_and_an_explicit_memory_budget()
+    {
+        using var defaultDatabase = StorageDatabase.Open(
+            Path.Combine(_dir, "page-cache-default"), 119);
+        Assert.Equal(2L * 1024 * 1024, defaultDatabase.PageCacheCapacityBytes);
+
+        const long customBudget = 8L * 1024;
+        using var customDatabase = StorageDatabase.Open(
+            Path.Combine(_dir, "page-cache-custom"), 120,
+            pageCacheCapacityBytes: customBudget);
+        Assert.Equal(customBudget, customDatabase.PageCacheCapacityBytes);
+    }
+
 }

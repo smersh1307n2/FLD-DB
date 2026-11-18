@@ -13,8 +13,9 @@ public sealed class StorageDatabase : IDisposable
     private const byte BatchCommitKind = 0x01;
     private const int MaxBatchOperations = 100_000;
     private const int MaxKeyLength = 1024 * 1024;
+    private const long DefaultPageCacheCapacityBytes = 2L * 1024 * 1024;
     private readonly object _gate = new();
-    private readonly StoragePageCache _pageCache = new(16L * 1024 * 1024);
+    private readonly StoragePageCache _pageCache;
     private readonly StorageBTreeReaderCache _readerCache = new();
     private readonly StorageGenerationPins _generationPins = new();
     private readonly Dictionary<ulong, StorageBTreeGenerationFiles> _generationFiles = new();
@@ -37,16 +38,22 @@ public sealed class StorageDatabase : IDisposable
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
     internal int ActiveWalSegment => _wal.ActiveSegment;
     public int Count { get { lock (_gate) { EnsureUsable(); if (_liveCount < 0) _liveCount = CountBTreeValues(); return _liveCount; } } }
+    public long PageCacheCapacityBytes => _pageCache.CapacityBytes;
 
-    private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector)
+    private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector, long pageCacheCapacityBytes)
     {
         _directory = directory;
         _wal = wal;
         _faultInjector = faultInjector;
+        _pageCache = new StoragePageCache(pageCacheCapacityBytes);
     }
 
-    public static StorageDatabase Open(string directory, ulong partitionId, long walRotateAfterBytes = 64L * 1024 * 1024)
-        => OpenCore(directory, partitionId, walRotateAfterBytes, faultInjector: null);
+    public static StorageDatabase Open(
+        string directory,
+        ulong partitionId,
+        long walRotateAfterBytes = 64L * 1024 * 1024,
+        long pageCacheCapacityBytes = DefaultPageCacheCapacityBytes)
+        => OpenCore(directory, partitionId, walRotateAfterBytes, pageCacheCapacityBytes, faultInjector: null);
 
     /// <summary>
     /// Acquire the same cross-process single-writer fence used by StorageDatabase.Open
@@ -66,20 +73,24 @@ public sealed class StorageDatabase : IDisposable
         string directory,
         ulong partitionId,
         Action<StorageFaultPoint> faultInjector,
-        long walRotateAfterBytes = 64L * 1024 * 1024)
+        long walRotateAfterBytes = 64L * 1024 * 1024,
+        long pageCacheCapacityBytes = DefaultPageCacheCapacityBytes)
     {
         ArgumentNullException.ThrowIfNull(faultInjector);
-        return OpenCore(directory, partitionId, walRotateAfterBytes, faultInjector);
+        return OpenCore(directory, partitionId, walRotateAfterBytes, pageCacheCapacityBytes, faultInjector);
     }
 
     private static StorageDatabase OpenCore(
         string directory,
         ulong partitionId,
         long walRotateAfterBytes,
+        long pageCacheCapacityBytes,
         Action<StorageFaultPoint>? faultInjector)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (walRotateAfterBytes < 0) throw new ArgumentOutOfRangeException(nameof(walRotateAfterBytes));
+        if (pageCacheCapacityBytes < StoragePageCodec.PageSize)
+            throw new ArgumentOutOfRangeException(nameof(pageCacheCapacityBytes));
         directory = Path.GetFullPath(directory);
         StorageDirectorySync.CreateDirectoryDurable(directory);
         string walDirectory = Path.Combine(directory, "wal");
@@ -88,7 +99,7 @@ public sealed class StorageDatabase : IDisposable
         var (wal, recovery) = faultInjector is null
             ? WalManager.OpenStreaming(walDirectory, partitionId, walRotateAfterBytes)
             : WalManager.OpenStreamingForTesting(walDirectory, partitionId, walRotateAfterBytes, faultInjector);
-        var database = new StorageDatabase(directory, wal, faultInjector);
+        var database = new StorageDatabase(directory, wal, faultInjector, pageCacheCapacityBytes);
         try
         {
             // Always validate the legacy checkpoint manifest while it exists. It is

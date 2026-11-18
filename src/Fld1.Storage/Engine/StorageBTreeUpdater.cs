@@ -429,7 +429,7 @@ internal static class StorageBTreeUpdater
     /// </summary>
     private sealed class BatchPageReadCache
     {
-        private const int Capacity = 4096;
+        private const int Capacity = 512;
         private readonly Dictionary<ulong, PageEntry> _pages = new();
         private readonly Queue<ulong> _order = new();
         private const int KeyCapacity = 4_096;
