@@ -48,6 +48,8 @@ internal static class StorageBTreeUpdater
         // uncommitted page IDs after truncation, so no stale page can survive a retry.
         long allocationStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
         long findAndGroupAllocated = 0;
+        long findLeafAllocated = 0;
+        long findMutationGroupEndAllocated = 0;
         long leafMergeAllocated = 0;
         long leafWriteAllocated = 0;
         long pathRewriteAllocated = 0;
@@ -77,11 +79,13 @@ internal static class StorageBTreeUpdater
             int start = 0;
             while (start < mutations.Count)
             {
-                long phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
+                long findAndGroupPhaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 path.Clear();
                 ulong leafId = rootPageId == 0
                     ? 0
                     : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache, readKey);
+                if (allocationObserver is not null)
+                    findLeafAllocated += GC.GetTotalAllocatedBytes(precise: true) - findAndGroupPhaseStart;
 
                 int end;
                 if (rootPageId == 0)
@@ -93,6 +97,7 @@ internal static class StorageBTreeUpdater
                     // For small batches the cached per-key descent is cheaper than
                     // setting up a separator-boundary binary search. Large GC pages
                     // benefit from grouping the sorted mutations by leaf.
+                    long findLeafGroupPhaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                     end = start + 1;
                     while (end < mutations.Count)
                     {
@@ -103,13 +108,18 @@ internal static class StorageBTreeUpdater
                             break;
                         end++;
                     }
+                    if (allocationObserver is not null)
+                        findLeafAllocated += GC.GetTotalAllocatedBytes(precise: true) - findLeafGroupPhaseStart;
                 }
                 else
                 {
+                    long groupEndPhaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                     end = FindMutationGroupEnd(mutations, start, path, files, pageReadCache);
+                    if (allocationObserver is not null)
+                        findMutationGroupEndAllocated += GC.GetTotalAllocatedBytes(precise: true) - groupEndPhaseStart;
                 }
                 if (allocationObserver is not null)
-                    findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
+                    findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - findAndGroupPhaseStart;
 
                 phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 StorageBTreeLeafPageView existing = leafId == 0
@@ -138,6 +148,8 @@ internal static class StorageBTreeUpdater
 
             if (allocationObserver is not null)
             {
+                allocationObserver("storage-btree-find-leaf", findLeafAllocated);
+                allocationObserver("storage-btree-find-mutation-group-end", findMutationGroupEndAllocated);
                 allocationObserver("storage-btree-find-and-group", findAndGroupAllocated);
                 allocationObserver("storage-btree-leaf-merge", leafMergeAllocated);
                 allocationObserver("storage-btree-leaf-write", leafWriteAllocated);
