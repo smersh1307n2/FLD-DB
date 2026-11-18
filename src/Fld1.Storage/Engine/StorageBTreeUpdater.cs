@@ -16,7 +16,8 @@ internal static class StorageBTreeUpdater
     public static StorageBTreeManifestV2 ApplyBatch(
         in StorageBTreeManifestV2 current,
         StorageBTreeGenerationFiles files,
-        IReadOnlyList<StorageTreeMutation> mutations)
+        IReadOnlyList<StorageTreeMutation> mutations,
+        Action<string, long>? allocationObserver = null)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(mutations);
@@ -45,6 +46,11 @@ internal static class StorageBTreeUpdater
         // immutable internal/leaf pages for every sorted mutation in a delete batch.
         // It is deliberately scoped to this ApplyBatch call: failed batches may reuse
         // uncommitted page IDs after truncation, so no stale page can survive a retry.
+        long allocationStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
+        long findAndGroupAllocated = 0;
+        long leafMergeAllocated = 0;
+        long leafWriteAllocated = 0;
+        long pathRewriteAllocated = 0;
         var pageReadCache = new BatchPageReadCache();
 
         ulong nextCommitSeq = checked(current.CommitSeq + 1);
@@ -56,6 +62,7 @@ internal static class StorageBTreeUpdater
             int start = 0;
             while (start < mutations.Count)
             {
+                long phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 var path = new List<StorageTreePathFrame>();
                 ulong leafId = rootPageId == 0
                     ? 0
@@ -73,7 +80,10 @@ internal static class StorageBTreeUpdater
                         break;
                     end++;
                 }
+                if (allocationObserver is not null)
+                    findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
+                phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 StorageTreeLeafEntry[] existing = leafId == 0
                     ? Array.Empty<StorageTreeLeafEntry>()
                     : StorageBTreePageCodec.DecodeLeaf(
@@ -81,9 +91,29 @@ internal static class StorageBTreeUpdater
                 ValidateLeafEntries(existing, files, pageReadCache);
 
                 List<StorageTreeLeafEntry> merged = MergeLeaf(existing, mutations, start, end, files, pageReadCache);
+                if (allocationObserver is not null)
+                    leafMergeAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
+
+                phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 List<StorageTreeChild> replacements = WriteLeafLevel(merged, files, ref nextPageId);
+                if (allocationObserver is not null)
+                    leafWriteAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
+
+                phaseStart = allocationObserver is null ? 0 : GC.GetTotalAllocatedBytes(precise: true);
                 rootPageId = RewritePath(path, leafId, replacements, files, ref nextPageId, pageReadCache);
+                if (allocationObserver is not null)
+                    pathRewriteAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
                 start = end;
+            }
+
+            if (allocationObserver is not null)
+            {
+                allocationObserver("storage-btree-find-and-group", findAndGroupAllocated);
+                allocationObserver("storage-btree-leaf-merge", leafMergeAllocated);
+                allocationObserver("storage-btree-leaf-write", leafWriteAllocated);
+                allocationObserver("storage-btree-path-rewrite", pathRewriteAllocated);
+                allocationObserver("storage-btree-apply-total",
+                    GC.GetTotalAllocatedBytes(precise: true) - allocationStart);
             }
 
             return new StorageBTreeManifestV2(
@@ -126,7 +156,8 @@ internal static class StorageBTreeUpdater
         StorageBTreeGenerationFiles files,
         IReadOnlyList<StorageTreeMutation> mutations,
         Func<ulong> appendAndFlushWal,
-        Action<StorageFaultPoint>? faultInjector = null)
+        Action<StorageFaultPoint>? faultInjector = null,
+        Action<string, long>? allocationObserver = null)
     {
         ArgumentNullException.ThrowIfNull(appendAndFlushWal);
         ulong expectedCommitSeq = checked(current.CommitSeq + 1);
@@ -138,7 +169,7 @@ internal static class StorageBTreeUpdater
         // WAL is the recovery authority. If page writing or root publication fails
         // after this point, reopen/recovery must replay the durable batch or publish
         // a root at this CommitSeq; never truncate the WAL entry as an ordinary retry.
-        StorageBTreeManifestV2 next = ApplyBatch(current, files, mutations);
+        StorageBTreeManifestV2 next = ApplyBatch(current, files, mutations, allocationObserver);
         StorageBTreeRootPublisher.Publish(databaseDirectory, next, files, faultInjector);
         return next;
     }
