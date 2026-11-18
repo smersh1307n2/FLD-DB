@@ -23,6 +23,12 @@ if (args.Contains("--run-mapping-only", StringComparer.Ordinal))
     return;
 }
 
+if (args.Contains("--storage-write-batch-only", StringComparer.Ordinal))
+{
+    BenchmarkRunner.Run<StorageBTreeUpdateBench>();
+    return;
+}
+
 if (args.Contains("--storage-index-only", StringComparer.Ordinal))
 {
     BenchmarkRunner.Run<StorageIndexBench>();
