@@ -83,9 +83,31 @@ internal static class StorageBTreeUpdater
                     ? 0
                     : FindLeaf(rootPageId, mutations[start].Key.Span, files, path, pageReadCache, readKey);
 
-                int end = rootPageId == 0
-                    ? mutations.Count
-                    : FindMutationGroupEnd(mutations, start, path, files, pageReadCache);
+                int end;
+                if (rootPageId == 0)
+                {
+                    end = mutations.Count;
+                }
+                else if (mutations.Count <= 512)
+                {
+                    // For small batches the cached per-key descent is cheaper than
+                    // setting up a separator-boundary binary search. Large GC pages
+                    // benefit from grouping the sorted mutations by leaf.
+                    end = start + 1;
+                    while (end < mutations.Count)
+                    {
+                        ulong candidate = FindLeaf(
+                            rootPageId, mutations[end].Key.Span, files,
+                            path: null, pageReadCache, readKey);
+                        if (candidate != leafId)
+                            break;
+                        end++;
+                    }
+                }
+                else
+                {
+                    end = FindMutationGroupEnd(mutations, start, path, files, pageReadCache);
+                }
                 if (allocationObserver is not null)
                     findAndGroupAllocated += GC.GetTotalAllocatedBytes(precise: true) - phaseStart;
 
