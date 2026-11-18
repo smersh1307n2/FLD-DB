@@ -200,16 +200,29 @@ public readonly struct RunReader
 
         ulong slotOff = RunHeader.ReadSlotOff(file);
         uint shortKey = Uuid7.ShortKey(recordId);
-
-        // PGM window when available, else full scan
-        int lo = 0, hi = (int)n - 1;
         uint segs = RunHeader.ReadPgmSegments(file);
-        if (segs > 0)
+        if (segs == 0)
+            return FindClusterByRecordId(file, recordId, 0, (int)n);
+
+        ulong k = Uuid7.ProjectK(recordId);
+        var (lo, hi, segmentIndex) = PgmWindow(file, k, (int)n);
+        ulong pgmOff = RunHeader.ReadPgmOff(file);
+        int segmentPos = (int)pgmOff + segmentIndex * RunConstants.PgmSegmentSize;
+        ulong segmentStartKey = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(segmentPos, 8));
+        ushort segmentEpsilon = BinaryPrimitives.ReadUInt16LittleEndian(file.Slice(segmentPos + 12, 2));
+
+        // BuildPgm emits an oversized equal-key group as its own segment and
+        // records its raised epsilon. The ordinary PGM window is centered at
+        // StartIdx, so it cannot cover a group larger than 2*epsilon+1. Search
+        // the exact sorted RecordId range instead of falling back to O(N) scan.
+        if (segmentEpsilon != 0 && k == segmentStartKey)
         {
-            ulong k = Uuid7.ProjectK(recordId);
-            var (wLo, wHi) = PgmWindow(file, k, (int)n);
-            lo = wLo;
-            hi = wHi;
+            int groupStart = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(segmentPos + 8, 4)));
+            int groupEnd = segmentIndex + 1 < (int)segs
+                ? checked((int)BinaryPrimitives.ReadUInt32LittleEndian(
+                    file.Slice(segmentPos + RunConstants.PgmSegmentSize + 8, 4)))
+                : (int)n;
+            return FindClusterByRecordId(file, recordId, groupStart, groupEnd);
         }
 
         for (int i = lo; i <= hi; i++)
@@ -223,24 +236,36 @@ public readonly struct RunReader
                 return i;
         }
 
-        // Fallback full scan if PGM miss (spec [A9-PGM-TRUTH])
-        if (segs > 0)
-        {
-            for (int i = 0; i < (int)n; i++)
-            {
-                if (i >= lo && i <= hi) continue;
-                int slotPos = (int)slotOff + i * RunConstants.CompactSlotSize;
-                uint sk = BinaryPrimitives.ReadUInt32BigEndian(file.Slice(slotPos + 8, 4));
-                if (sk != shortKey) continue;
-                ulong off = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
-                if (ByteUtil.Equals16(file.Slice((int)off, 16), recordId))
-                    return i;
-            }
-        }
-        return -1;
+        // PGM is only a narrowing hint. Preserve exact lookup semantics on a
+        // miss, but use the sorted RecordId slot table rather than scanning it.
+        return FindClusterByRecordId(file, recordId, 0, (int)n);
     }
 
-    private static (int lo, int hi) PgmWindow(ReadOnlySpan<byte> file, ulong k, int n)
+    private static int FindClusterByRecordId(
+        ReadOnlySpan<byte> file, ReadOnlySpan<byte> recordId, int low, int highExclusive)
+    {
+        ulong slotOff = RunHeader.ReadSlotOff(file);
+        int high = highExclusive;
+        while (low < high)
+        {
+            int mid = low + ((high - low) >> 1);
+            int slotPos = (int)slotOff + mid * RunConstants.CompactSlotSize;
+            ulong off = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(slotPos, 8));
+            int compare = file.Slice((int)off, 16).SequenceCompareTo(recordId);
+            if (compare < 0)
+                low = mid + 1;
+            else
+                high = mid;
+        }
+
+        if (low >= highExclusive)
+            return -1;
+        int candidateSlot = (int)slotOff + low * RunConstants.CompactSlotSize;
+        ulong candidateOff = BinaryPrimitives.ReadUInt64LittleEndian(file.Slice(candidateSlot, 8));
+        return ByteUtil.Equals16(file.Slice((int)candidateOff, 16), recordId) ? low : -1;
+    }
+
+    private static (int lo, int hi, int segmentIndex) PgmWindow(ReadOnlySpan<byte> file, ulong k, int n)
     {
         uint segs = RunHeader.ReadPgmSegments(file);
         uint defaultEps = RunHeader.ReadPgmEpsilon(file);
@@ -285,7 +310,7 @@ public readonly struct RunReader
         long hi = (long)pred + (long)eps;
         if (lo < 0) lo = 0;
         if (hi >= n) hi = n - 1;
-        return ((int)lo, (int)hi);
+        return ((int)lo, (int)hi, segIdx);
     }
 
     private static bool TryGetFromCluster(
