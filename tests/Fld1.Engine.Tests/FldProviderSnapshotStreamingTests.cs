@@ -63,6 +63,45 @@ public sealed class FldProviderSnapshotStreamingTests
         }
     }
 
+
+    [Fact]
+    public void Provider_snapshot_merges_sorted_unique_fields_from_runs_and_overlay()
+    {
+        const uint namespaceId = 0x783;
+        string root = Path.Combine(
+            Path.GetTempPath(), "fld-provider-snapshot-fields-" + Guid.NewGuid().ToString("N"));
+        byte[] recordId = Id(0x31);
+
+        try
+        {
+            using (var database = FldDatabase.Open(root, namespaceId, Id(0x72)))
+            {
+                database.Put(recordId, 7, [0x17]);
+                database.Put(recordId, 3, [0x13]);
+                Assert.NotEqual(0UL, database.Commit());
+                Assert.NotEqual(0UL, database.Checkpoint());
+
+                // Field 7 now exists in both the immutable Run and the current overlay;
+                // field 5 exists only in the overlay. Snapshot enumeration must return
+                // one sorted copy of each current field.
+                database.Put(recordId, 7, [0x27]);
+                database.Put(recordId, 5, [0x15]);
+                Assert.NotEqual(0UL, database.Commit());
+
+                using FldProviderSnapshot snapshot = database.OpenProviderSnapshot();
+                FldProviderSnapshotMetadataPage page = snapshot.ReadMetadataPage(0, 8);
+                Assert.False(page.HasMore);
+                Assert.Equal(new ushort[] { 3, 5, 7 },
+                    page.Entries.Select(entry => entry.FieldId).ToArray());
+                Assert.Equal(3, page.Entries.Count);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     private static byte[] Id(byte value)
     {
         byte[] id = new byte[16];

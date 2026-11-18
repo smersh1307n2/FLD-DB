@@ -200,7 +200,7 @@ public sealed class FldProviderSnapshot : IDisposable
                    TryReadNextEntry(includeValues: false, out _, out FldProviderSnapshotEntryMetadata? metadata, out _))
                 entries.Add(metadata!);
 
-            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Length)
+            bool hasMore = (_currentFieldIds is not null && _fieldIndex < _currentFieldIds.Count)
                 || _recordIdQueue.Count != 0;
             var page = new FldProviderSnapshotMetadataPage(_nextIndex, hasMore, entries);
             _lastPageStart = start;
@@ -250,7 +250,7 @@ public sealed class FldProviderSnapshot : IDisposable
         EnsureOpen();
         while (true)
         {
-            if (_currentFieldIds is null || _fieldIndex >= _currentFieldIds.Length)
+            if (_currentFieldIds is null || _fieldIndex >= _currentFieldIds.Count)
             {
                 if (!TryLoadNextRecord())
                 {
