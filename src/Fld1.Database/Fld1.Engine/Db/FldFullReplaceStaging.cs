@@ -261,7 +261,11 @@ public sealed partial class FldDatabase
                 throw new InvalidOperationException("FULL_REPLACE snapshot is incomplete.");
             if (_dirty.Count != 0 || _overlay.Count != 0 || _manifestDirty ||
                 _pendingFlushedCommitSeq != _lastSealedCommitSeq)
-                throw new InvalidOperationException("FLD local writes must be committed and checkpointed before FULL_REPLACE generation switch.");
+                throw new InvalidOperationException(
+                    $"FLD local writes must be committed and checkpointed before FULL_REPLACE generation switch " +
+                    $"(dirty={_dirty.Count}, overlay={_overlay.Count}, manifestDirty={_manifestDirty}, " +
+                    $"pendingFlushed={_pendingFlushedCommitSeq}, lastSealed={_lastSealedCommitSeq}, " +
+                    $"stageBaseSealed={state.BaseLastSealedCommitSeq}).");
             if (_databaseHasUnpublishedLocalChanges())
                 throw new InvalidOperationException("FLD unpublished Outbox entries block FULL_REPLACE generation switch.");
 
