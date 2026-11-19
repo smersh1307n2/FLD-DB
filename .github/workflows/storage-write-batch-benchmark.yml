@@ -1,0 +1,53 @@
+name: Storage B+ tree update performance
+
+on:
+  push:
+    branches:
+      - fix/crash-consistency-outbox
+    paths:
+      - 'bench/Fld1.Engine.Bench/StorageBTreeUpdateBench.cs'
+      - 'bench/Fld1.Engine.Bench/Program.cs'
+      - 'src/Fld1.Storage/Engine/StorageBTreeUpdater.cs'
+      - 'src/Fld1.Storage/Engine/StorageDatabase.cs'
+      - '.github/workflows/storage-write-batch-benchmark.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-write-batch-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  storage-write-batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Prepare same-runner pre-change baseline worktree
+        run: git worktree add --detach "$RUNNER_TEMP/fld-baseline" fba747473a79f720e0642a6ce23dcb576d4169de
+      - name: Restore baseline and candidate
+        run: |
+          dotnet restore "$RUNNER_TEMP/fld-baseline/bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj"
+          dotnet restore bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj
+      - name: Benchmark baseline on the same runner
+        working-directory: ${{ runner.temp }}/fld-baseline
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only
+      - name: Benchmark candidate on the same runner
+        working-directory: ${{ github.workspace }}
+        run: dotnet run --project bench/Fld1.Engine.Bench/Fld1.Engine.Bench.csproj --configuration Release --no-restore -- --storage-write-batch-only
+      - name: Upload BenchmarkDotNet reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-write-batch-benchmark-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/fld-baseline/BenchmarkDotNet.Artifacts/**
+            BenchmarkDotNet.Artifacts/**
+          if-no-files-found: warn
+          retention-days: 30

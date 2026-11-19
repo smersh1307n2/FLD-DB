@@ -109,8 +109,11 @@ public class LwwAndCompactTests : IDisposable
         Assert.Equal(0, db.OverlayCount);
         Assert.True(db.TryGetBytes(r1, 1, out var a) && a!.SequenceEqual("a2"u8.ToArray()));
         Assert.True(db.TryGetBytes(r2, 1, out var b) && b!.SequenceEqual("b"u8.ToArray()));
-        // single run file preferred
-        var runs = Directory.GetFiles(Path.Combine(_dir, "runs"), "*.fld1");
-        Assert.Single(runs);
+        // The compacted namespace is represented by Storage-owned blobs, not
+        // persistent legacy .fld1 mirrors.
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "runs"), "*.fld1"));
+        Assert.NotEmpty(Directory.EnumerateFiles(
+            Path.Combine(_dir, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8)),
+            "content.blob", SearchOption.AllDirectories));
     }
 }

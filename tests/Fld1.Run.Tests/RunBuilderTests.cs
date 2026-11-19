@@ -47,6 +47,28 @@ public class RunBuilderTests
     }
 
     [Fact]
+    public void Unpublished_identity_draft_with_epoch_and_zero_sequence_is_valid_provenance()
+    {
+        byte[] record = Rec(0xA6);
+        byte[] author = Author(0xA6);
+        byte[] changeId = new byte[16];
+        changeId[0] = 0xA7;
+
+        byte[] run = new RunBuilder(1)
+            .Add(record, 7, "draft"u8, wall: 124, logical: 0, author,
+                changeId: changeId, originAuthorEpoch: 6, originSequence: 0)
+            .Build();
+
+        RunVerifyResult verify = RunVerify.Verify(run);
+        Assert.True(verify.IsOk, verify.Detail);
+        var reader = new RunReader(run);
+        Assert.True(reader.TryGetField(record, 7, out RunFieldState state));
+        Assert.Equal(changeId, state.ChangeId.ToArray());
+        Assert.Equal(6U, state.OriginAuthorEpoch);
+        Assert.Equal(0UL, state.OriginSequence);
+    }
+
+    [Fact]
     public void Two_records_sorted_and_get()
     {
         // Ensure record order independent of insert order
@@ -129,6 +151,37 @@ public class RunBuilderTests
         Assert.True(reader.TryGet(rec, 1, out var v1) && v1.SequenceEqual("a"u8));
         Assert.True(reader.TryGet(rec, 2, out var v2) && v2.SequenceEqual("b"u8));
         Assert.True(reader.TryGet(rec, 3, out var v3) && v3.SequenceEqual("c"u8));
+    }
+
+    [Fact]
+    public void Many_records_and_fields_are_canonical_independent_of_insert_order()
+    {
+        var author = Author(0x35);
+        var writes = new List<FieldWrite>();
+        for (byte record = 1; record <= 48; record++)
+        {
+            byte[] recordId = Rec(record);
+            for (ushort field = 1; field <= 4; field++)
+            {
+                byte[] value = { record, (byte)field, (byte)(record ^ field) };
+                writes.Add(new FieldWrite(
+                    recordId, field, value,
+                    wall: (ulong)(100 + record), logical: field, authorNodeId: author));
+            }
+        }
+
+        var forward = new RunBuilder(0);
+        foreach (FieldWrite write in writes)
+            forward.Add(write);
+
+        var reverse = new RunBuilder(0);
+        for (int i = writes.Count - 1; i >= 0; i--)
+            reverse.Add(writes[i]);
+
+        byte[] first = forward.Build();
+        byte[] second = reverse.Build();
+        Assert.True(first.AsSpan().SequenceEqual(second));
+        Assert.True(RunVerify.Verify(first).IsOk);
     }
 
     [Fact]

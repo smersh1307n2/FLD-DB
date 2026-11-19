@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.15.2" />
-    <ProjectReference Include="..\..\src\Fld1.Engine\Fld1.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Fld1.Database\Fld1.Database.csproj" />
+    <ProjectReference Include="..\..\src\Fld1.Storage\Fld1.Storage.csproj" />
   </ItemGroup>
 </Project>

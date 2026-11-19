@@ -66,8 +66,14 @@ public class RecoveryTests : IDisposable
             runId = db.Checkpoint();
         }
 
-        string runPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
-        Assert.True(File.Exists(runPath));
+        Span<byte> blobIdBytes = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(blobIdBytes, runId);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(blobIdBytes.Slice(8), 0x314E5552);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(blobIdBytes.Slice(12), 0x31444C46);
+        Guid blobId = new(blobIdBytes);
+        string runBlobPath = Path.Combine(_dir, "storage-core", "blobs",
+            Convert.ToHexString("FLDRUNB1"u8), blobId.ToString("N"), "content.blob");
+        Assert.True(File.Exists(runBlobPath));
 
         string manifestPath = Path.Combine(_dir, "manifest.fldm");
         byte[] manifest = File.ReadAllBytes(manifestPath);
@@ -75,7 +81,7 @@ public class RecoveryTests : IDisposable
         File.WriteAllBytes(manifestPath, manifest);
 
         Assert.Throws<InvalidDataException>(() => FldDatabase.Open(_dir, 0));
-        Assert.True(File.Exists(runPath));
+        Assert.True(File.Exists(runBlobPath));
     }
 
     [Fact]

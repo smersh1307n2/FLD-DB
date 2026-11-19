@@ -1,0 +1,313 @@
+using Fld1.Engine.Db;
+using Fld1.Storage.Ipc;
+using Xunit;
+
+namespace Fld1.Engine.Db.Tests;
+
+public sealed class FldDatabaseIpcTests
+{
+    [Fact]
+    public async Task Ipc_client_commits_retries_reads_acknowledges_and_reopens_without_reapplying()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-database-ipc-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x321;
+        byte[] localAuthor = Id(0x41);
+        Guid ownerId = Guid.NewGuid();
+        Guid clientGuid = Guid.NewGuid();
+        byte[] clientId = new byte[16];
+        clientGuid.TryWriteBytes(clientId, bigEndian: true, out _);
+
+        using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+        using var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+        Task serverTask = server.RunAsync(shutdown.Token);
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+
+            byte[] recordId = FldDatabase.NewRecordId();
+            byte[] firstValue = "ipc-write-one"u8.ToArray();
+            byte[] secondValue = "ipc-write-two"u8.ToArray();
+            Guid firstOperation = Guid.NewGuid();
+            Guid secondOperation = Guid.NewGuid();
+
+            await using (var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientGuid, TimeSpan.FromSeconds(10)))
+            {
+                var firstMutation = new FldDatabaseIpcMutation(
+                    recordId, 1, 7, false, firstValue);
+                FldDatabaseIpcWriteResult first = await client.WriteBatchAsync(
+                    firstOperation, 1, [firstMutation]);
+                Assert.Equal(1ul, first.CommitSeq);
+                Assert.False(first.IsDuplicate);
+                Assert.Equal(1, first.MutationCount);
+
+                var secondMutation = new FldDatabaseIpcMutation(
+                    recordId, 2, 7, false, secondValue);
+                FldDatabaseIpcWriteResult second = await client.WriteBatchAsync(
+                    secondOperation, 2, [secondMutation]);
+                Assert.Equal(2ul, second.CommitSeq);
+                Assert.False(second.IsDuplicate);
+
+                FldDatabaseIpcWriteResult retry = await client.WriteBatchAsync(
+                    firstOperation, 1, [firstMutation]);
+                Assert.Equal(first.CommitSeq, retry.CommitSeq);
+                Assert.True(retry.IsDuplicate);
+
+                FldDatabaseIpcReadResult read = await client.ReadFieldAsync(
+                    Guid.NewGuid(), 3, recordId, 1);
+                Assert.Equal(3ul, read.CommitSeq);
+                Assert.True(read.Found);
+                Assert.Equal(firstValue, read.Value);
+
+                Assert.True(await client.AcknowledgeThroughAsync(3));
+                Assert.False(await client.AcknowledgeThroughAsync(3));
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(() =>
+                    client.WriteBatchAsync(firstOperation, 1, [firstMutation]));
+            }
+
+            shutdown.Cancel();
+            await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+
+            dispatcher.Dispose();
+            database.Dispose();
+            using var reopened = FldDatabase.Open(root, namespaceId, localAuthor);
+            byte[] firstFingerprint = FldDatabaseIpcProtocol.ComputeFingerprint(
+                FldDatabaseIpcOperationCodes.WriteBatch,
+                FldDatabaseIpcProtocol.EncodeWriteBatchPayload(1,
+                [
+                    new FldDatabaseIpcMutation(recordId, 1, 7, false, firstValue)
+                ]));
+            Assert.Throws<InvalidOperationException>(() => reopened.TryGetLocalOperationReceipt(
+                clientId, ToNetworkBytes(firstOperation), 1, firstFingerprint, out _));
+            Assert.True(reopened.TryGetBytes(recordId, 1, out byte[]? persistedFirst));
+            Assert.Equal(firstValue, persistedFirst);
+            Assert.True(reopened.TryGetBytes(recordId, 2, out byte[]? persistedSecond));
+            Assert.Equal(secondValue, persistedSecond);
+            Assert.Equal(2, reopened.ReadOutboxBatch(0, 10).Count);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Provider_snapshot_metadata_pages_and_value_chunks_remain_stable_across_checkpoint_and_compaction()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-provider-snapshot-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x322;
+        Guid ownerId = Guid.NewGuid();
+        Guid clientId = Guid.NewGuid();
+        byte[] localAuthor = Id(0x61);
+        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] firstValue = Enumerable.Range(0, 257).Select(value => (byte)value).ToArray();
+        byte[] secondValue = "snapshot-second-field"u8.ToArray();
+        byte[] laterValue = "after-snapshot"u8.ToArray();
+
+        using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+        var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+        Task serverTask = server.RunAsync(shutdown.Token);
+        FldProviderSnapshot? snapshot = null;
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+
+            await using var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10));
+            FldDatabaseIpcWriteResult initial = await client.WriteBatchAsync(
+                Guid.NewGuid(), 1,
+                [
+                    new FldDatabaseIpcMutation(recordId, 1, 4, false, firstValue),
+                    new FldDatabaseIpcMutation(recordId, 2, 4, false, secondValue)
+                ]);
+            Assert.Equal(1ul, initial.CommitSeq);
+
+            snapshot = database.OpenProviderSnapshot();
+            FldProviderSnapshotMetadataPage oneEntry = snapshot.ReadMetadataPage(0, 1);
+            Assert.Single(oneEntry.Entries);
+            Assert.Equal((uint)firstValue.Length, oneEntry.Entries[0].ValueLength);
+            Assert.Equal((ushort)1, oneEntry.Entries[0].FieldId);
+
+            // Same cursor with a different limit must not return the cached one-entry page.
+            FldProviderSnapshotMetadataPage twoEntries = snapshot.ReadMetadataPage(0, 2);
+            Assert.Equal(2, twoEntries.Entries.Count);
+            Assert.Equal(2, twoEntries.NextIndex);
+
+            FldProviderSnapshotValueChunk? firstChunk =
+                snapshot.ReadValueChunk(recordId, 1, valueOffset: 0, maxChunkBytes: 4);
+            Assert.NotNull(firstChunk);
+            Assert.Equal((uint)firstValue.Length, firstChunk.ValueLength);
+            Assert.Equal(firstValue[..4], firstChunk.ValueChunk);
+
+            FldProviderSnapshotValueChunk? secondChunk =
+                snapshot.ReadValueChunk(recordId, 1, valueOffset: 4, maxChunkBytes: 4);
+            Assert.NotNull(secondChunk);
+            Assert.Equal(firstValue[4..8], secondChunk.ValueChunk);
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                snapshot.ReadValueChunk(recordId, 1, (uint)firstValue.Length + 1, 4));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                snapshot.ReadValueChunk(recordId, 1, 0, 0));
+
+            FldDatabaseIpcWriteResult later = await client.WriteBatchAsync(
+                Guid.NewGuid(), 2,
+                [new FldDatabaseIpcMutation(recordId, 3, 4, false, laterValue)]);
+            Assert.Equal(2ul, later.CommitSeq);
+            database.Checkpoint();
+            database.Compact();
+
+            FldProviderSnapshotMetadataPage stable = snapshot.ReadMetadataPage(0, 10);
+            Assert.Equal(2, stable.Entries.Count);
+            Assert.DoesNotContain(stable.Entries, entry => entry.FieldId == 3);
+            FldProviderSnapshotValueChunk? complete =
+                snapshot.ReadValueChunk(recordId, 1, 0, (uint)firstValue.Length);
+            Assert.NotNull(complete);
+            Assert.Equal(firstValue, complete.ValueChunk);
+            Assert.True(complete.IsComplete);
+        }
+        finally
+        {
+            if (snapshot is not null)
+                database.ReleaseProviderSnapshot(snapshot.Generation);
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Snapshot_handles_are_client_bound_idempotent_and_survive_reconnect_within_host_generation()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fld-snapshot-ipc-" + Guid.NewGuid().ToString("N"));
+        const uint namespaceId = 0x323;
+        byte[] localAuthor = Id(0x62);
+        Guid ownerId = Guid.NewGuid();
+        Guid clientId = Guid.NewGuid();
+        Guid otherClientId = Guid.NewGuid();
+        byte[] recordId = FldDatabase.NewRecordId();
+        byte[] value = "snapshot-ipc-value"u8.ToArray();
+        Guid openOperationId = Guid.NewGuid();
+
+        using var database = FldDatabase.Open(root, namespaceId, localAuthor);
+        using var dispatcher = new FldDatabaseIpcDispatcher(database);
+        using var shutdown = new CancellationTokenSource();
+        var server = new StorageIpcServer(
+            StorageIpcEndpoint.ComputePipeName(root, 0), dispatcher.HandleAsync);
+        Task serverTask = server.RunAsync(shutdown.Token);
+        FldDatabaseIpcSnapshotHandle handle;
+
+        try
+        {
+            await server.Ready.WaitAsync(TimeSpan.FromSeconds(10));
+            StorageIpcEndpoint.Publish(root, StorageIpcEndpoint.Create(
+                root, 0, ownerId, Environment.ProcessId));
+
+            await using (var client = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10)))
+            {
+                FldDatabaseIpcWriteResult write = await client.WriteBatchAsync(
+                    Guid.NewGuid(), 1,
+                    [new FldDatabaseIpcMutation(recordId, 1, 4, false, value)]);
+                Assert.Equal(1ul, write.CommitSeq);
+
+                handle = await client.OpenSnapshotAsync(openOperationId);
+                Assert.Equal(dispatcher.HostGeneration, handle.HostGeneration);
+                FldDatabaseIpcSnapshotHandle duplicate = await client.OpenSnapshotAsync(openOperationId);
+                Assert.Equal(handle.SnapshotToken, duplicate.SnapshotToken);
+                Assert.Equal(handle.SourceFeedWatermark, duplicate.SourceFeedWatermark);
+
+                FldProviderSnapshotMetadataPage page = await client.ReadSnapshotPageAsync(handle, 0, 16);
+                Assert.Single(page.Entries);
+                Assert.Equal((ushort)1, page.Entries[0].FieldId);
+                Assert.Equal((uint)value.Length, page.Entries[0].ValueLength);
+
+                FldProviderSnapshotValueChunk? chunk = await client.ReadSnapshotValueChunkAsync(
+                    handle, recordId, 1, valueOffset: 0, maxChunkBytes: 5);
+                Assert.NotNull(chunk);
+                Assert.Equal((uint)value.Length, chunk.ValueLength);
+                Assert.Equal(value[..5], chunk.ValueChunk);
+
+                await using var otherClient = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                    root, otherClientId, TimeSpan.FromSeconds(10));
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(
+                    async () => await otherClient.ReadSnapshotPageAsync(handle, 0, 16));
+            }
+
+            // ClientId and the Database host generation remain stable across a reconnect.
+            await using (var reconnected = await FldDatabaseIpcClient.ConnectToDatabaseAsync(
+                root, clientId, TimeSpan.FromSeconds(10)))
+            {
+                FldProviderSnapshotMetadataPage page = await reconnected.ReadSnapshotPageAsync(handle, 0, 16);
+                Assert.Single(page.Entries);
+                Assert.True(await reconnected.ReleaseSnapshotAsync(handle));
+                Assert.True(await reconnected.ReleaseSnapshotAsync(handle));
+                await Assert.ThrowsAsync<StorageIpcRemoteException>(
+                    async () => await reconnected.ReadSnapshotPageAsync(handle, 0, 16));
+            }
+
+            Assert.False(database.HasProviderSnapshot(handle.SnapshotToken));
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+            StorageIpcEndpoint.DeleteIfOwned(root, 0, ownerId);
+            dispatcher.Dispose();
+            database.Dispose();
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Write_batch_protocol_rejects_trailing_bytes_and_invalid_delete_values()
+    {
+        byte[] recordId = Id(0x51);
+        byte[] payload = FldDatabaseIpcProtocol.EncodeWriteBatchPayload(1,
+        [
+            new FldDatabaseIpcMutation(recordId, 1, 2, false, "v"u8.ToArray())
+        ]);
+        byte[] trailing = [.. payload, 0];
+        Assert.Throws<InvalidDataException>(() =>
+            FldDatabaseIpcProtocol.DecodeWriteBatchPayload(trailing));
+
+        Assert.Throws<ArgumentException>(() =>
+            FldDatabaseIpcProtocol.EncodeWriteBatchPayload(1,
+            [
+                new FldDatabaseIpcMutation(recordId, 1, 2, true, "not-empty"u8.ToArray())
+            ]));
+    }
+
+    private static byte[] Id(byte value)
+    {
+        byte[] id = new byte[16];
+        id[0] = value;
+        return id;
+    }
+
+    private static byte[] ToNetworkBytes(Guid value)
+    {
+        byte[] bytes = new byte[16];
+        value.TryWriteBytes(bytes, bigEndian: true, out _);
+        return bytes;
+    }
+}

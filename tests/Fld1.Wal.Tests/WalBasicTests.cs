@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Fld1.Wal.Codec;
 using Fld1.Wal.Format;
 using Fld1.Wal.IO;
@@ -131,6 +132,181 @@ public class WalBasicTests : IDisposable
     }
 
     [Fact]
+    public void Apply_commit_codec_reads_legacy_v2_payload()
+    {
+        var field = new WalFieldMutation
+        {
+            RecordId = Id(6), FieldId = 7, OpKind = 1, KeyEpoch = 2,
+            Wall = 123, Logical = 4, AuthorNodeId = Id(8),
+            ChangeId = Id(9), Value = "legacy"u8.ToArray()
+        };
+        byte[] legacy = EncodeApplyV2(
+            sender: Id(1), issuer: Id(2), batch: Id(3), field: field,
+            protocolDelta: [0xA1, 0xB2]);
+
+        var decoded = ApplyCommitCodec.Decode(legacy);
+        Assert.Single(decoded.Fields);
+        Assert.Single(decoded.RelayFields);
+        Assert.Equal(field.ChangeId, decoded.RelayFields[0].ChangeId);
+        Assert.False(decoded.RelayOnly);
+    }
+
+    private static byte[] EncodeApplyV2(
+        byte[] sender, byte[] issuer, byte[] batch,
+        WalFieldMutation field, byte[] protocolDelta)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write(2u);
+        writer.Write(sender);
+        writer.Write(3u);
+        writer.Write((ushort)7);
+        writer.Write(issuer);
+        writer.Write(4u);
+        writer.Write(batch);
+        writer.Write(10ul);
+        writer.Write(11ul);
+        writer.Write(new byte[16]);
+        writer.Write(Id(4));
+        writer.Write(Id(5));
+        writer.Write((uint)protocolDelta.Length);
+        writer.Write(protocolDelta);
+        writer.Write(1u);
+        WriteLegacyFields(writer, [field]);
+        WriteLegacyFields(writer, [field]);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    private static void WriteLegacyFields(BinaryWriter writer, List<WalFieldMutation> fields)
+    {
+        writer.Write((uint)fields.Count);
+        foreach (var field in fields)
+        {
+            writer.Write(field.RecordId);
+            writer.Write(field.FieldId);
+            writer.Write(field.OpKind);
+            writer.Write(field.KeyEpoch);
+            writer.Write(field.Wall);
+            writer.Write(field.Logical);
+            writer.Write(field.AuthorNodeId);
+            writer.Write(field.ChangeId);
+            writer.Write((uint)field.Value.Length);
+            writer.Write(field.Value);
+        }
+    }
+
+    [Fact]
+    public void Apply_commit_codec_roundtrip_and_wal_recovery()
+    {
+        var apply = new WalApplyCommit
+        {
+            SenderPeer = Id(1),
+            SenderEpoch = 3,
+            NamespaceId = 7,
+            IssuerNodeId = Id(2),
+            IssuerEpoch = 4,
+            BatchId = Id(3),
+            CursorStart = 10,
+            CursorEnd = 11,
+            PreviousBatchDigest = new byte[16],
+            BatchDigest = Id(4),
+            RecordsRoot = Id(5),
+            ProtocolStateDelta = [0xA1, 0xB2],
+            AppliedCount = 1,
+            Fields =
+            [
+                new WalFieldMutation
+                {
+                    RecordId = Id(6), FieldId = 7, OpKind = 1, KeyEpoch = 2,
+                    Wall = 123, Logical = 4, AuthorNodeId = Id(8),
+                    ChangeId = Id(9), Value = "value"u8.ToArray()
+                }
+            ],
+            RelayFields =
+            [
+                new WalFieldMutation
+                {
+                    RecordId = Id(6), FieldId = 7, OpKind = 1, KeyEpoch = 2,
+                    Wall = 123, Logical = 4, AuthorNodeId = Id(8),
+                    ChangeId = Id(9), Value = "value"u8.ToArray()
+                }
+            ]
+        };
+        byte[] payload = ApplyCommitCodec.Encode(apply);
+        var decoded = ApplyCommitCodec.Decode(payload);
+        Assert.Equal(apply.BatchId, decoded.BatchId);
+        Assert.Equal(apply.ProtocolStateDelta, decoded.ProtocolStateDelta);
+        Assert.Single(decoded.Fields);
+        Assert.Single(decoded.RelayFields);
+
+        var path = PathOf("apply.log");
+        using (var writer = WalWriter.Create(path, 7, 1))
+        {
+            Assert.Equal(1UL, writer.Append(WalConstants.KindApplyCommit, payload));
+            writer.Flush();
+        }
+        var recovered = WalRecovery.Recover(path);
+        Assert.Equal(WalRecoveryStatus.Ok, recovered.Status);
+        Assert.Single(recovered.Records);
+        Assert.Equal(WalConstants.KindApplyCommit, recovered.Records[0].Kind);
+        Assert.Single(ApplyCommitCodec.Decode(recovered.Records[0].Payload).RelayFields);
+    }
+
+    [Fact]
+    public void Apply_commit_codec_stores_fields_once_and_reconstructs_relay_subset()
+    {
+        var first = new WalFieldMutation
+        {
+            RecordId = Id(10), FieldId = 1, OpKind = 1, KeyEpoch = 0,
+            Wall = 10, Logical = 0, AuthorNodeId = Id(11),
+            ChangeId = Id(12), Value = new byte[1024]
+        };
+        var second = new WalFieldMutation
+        {
+            RecordId = Id(13), FieldId = 2, OpKind = 1, KeyEpoch = 1,
+            Wall = 20, Logical = 1, AuthorNodeId = Id(14),
+            ChangeId = Id(15), Value = Enumerable.Repeat((byte)0xA5, 1024).ToArray()
+        };
+        var commit = new WalApplyCommit
+        {
+            SenderPeer = Id(1), SenderEpoch = 1, NamespaceId = 0,
+            IssuerNodeId = Id(2), IssuerEpoch = 2, BatchId = Id(3),
+            CursorStart = 1, CursorEnd = 2,
+            PreviousBatchDigest = new byte[16], BatchDigest = Id(4), RecordsRoot = Id(5),
+            ProtocolStateDelta = Array.Empty<byte>(), AppliedCount = 2,
+            Fields = [first, second],
+            RelayFields = [second]
+        };
+
+        byte[] payload = ApplyCommitCodec.Encode(commit);
+        Assert.Equal(4u, BinaryPrimitives.ReadUInt32LittleEndian(payload));
+        var decoded = ApplyCommitCodec.Decode(payload);
+
+        Assert.Equal(2, decoded.Fields.Count);
+        Assert.Single(decoded.RelayFields);
+        Assert.Same(decoded.Fields[1], decoded.RelayFields[0]);
+        Assert.Equal(second.ChangeId, decoded.RelayFields[0].ChangeId);
+
+        var relayOnly = new WalApplyCommit
+        {
+            SenderPeer = commit.SenderPeer, SenderEpoch = commit.SenderEpoch,
+            NamespaceId = commit.NamespaceId, IssuerNodeId = commit.IssuerNodeId,
+            IssuerEpoch = commit.IssuerEpoch, BatchId = commit.BatchId,
+            CursorStart = commit.CursorStart, CursorEnd = commit.CursorEnd,
+            PreviousBatchDigest = commit.PreviousBatchDigest, BatchDigest = commit.BatchDigest,
+            RecordsRoot = commit.RecordsRoot, ProtocolStateDelta = commit.ProtocolStateDelta,
+            AppliedCount = commit.AppliedCount,
+            Fields = [second], RelayFields = [second], RelayOnly = true
+        };
+        var journalDecoded = ApplyCommitCodec.Decode(ApplyCommitCodec.Encode(relayOnly));
+        Assert.True(journalDecoded.RelayOnly);
+        Assert.Single(journalDecoded.Fields);
+        Assert.Single(journalDecoded.RelayFields);
+        Assert.Same(journalDecoded.Fields[0], journalDecoded.RelayFields[0]);
+    }
+
+    [Fact]
     public void Codec_roundtrip_empty_group()
     {
         var p = EmptyPayload();
@@ -139,6 +315,95 @@ public class WalBasicTests : IDisposable
         Assert.Empty(d.Mutations);
         Assert.Empty(d.Results);
         Assert.Empty(d.Provenance);
+    }
+
+    [Fact]
+    public void Group_commit_v4_roundtrips_stable_local_operation_receipt()
+    {
+        var receipt = new WalLocalOperationReceipt
+        {
+            NamespaceId = 0,
+            ClientSequence = 1,
+            ClientId = Id(0x31),
+            OperationId = Id(0x32),
+            Fingerprint = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray(),
+            Result = "committed-result"u8.ToArray()
+        };
+        var payload = new GroupCommitPayload
+        {
+            Mutations = [],
+            Results = [],
+            Provenance = [],
+            LocalOperationReceipts = [receipt]
+        };
+
+        byte[] encoded = GroupCommitCodec.Encode(payload);
+        Assert.Equal(4u, BinaryPrimitives.ReadUInt32LittleEndian(encoded.AsSpan(12, 4)));
+        var decoded = GroupCommitCodec.Decode(encoded);
+        var recovered = Assert.Single(decoded.LocalOperationReceipts);
+        Assert.Equal(receipt.ClientId, recovered.ClientId);
+        Assert.Equal(receipt.OperationId, recovered.OperationId);
+        Assert.Equal(receipt.ClientSequence, recovered.ClientSequence);
+        Assert.Equal(receipt.Fingerprint, recovered.Fingerprint);
+        Assert.Equal(receipt.Result, recovered.Result);
+    }
+
+    [Fact]
+    public void Group_commit_v4_decoder_keeps_legacy_v3_compatible()
+    {
+        byte[] encoded = GroupCommitCodec.Encode(EmptyPayload());
+        byte[] legacyV3 = encoded.AsSpan(0, encoded.Length - sizeof(uint)).ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(legacyV3.AsSpan(12, 4), 3);
+
+        var decoded = GroupCommitCodec.Decode(legacyV3);
+        Assert.Empty(decoded.LocalOperationReceipts);
+        Assert.Empty(decoded.Mutations);
+    }
+
+    [Fact]
+    public void Group_commit_rejects_invalid_local_operation_receipt()
+    {
+        var payload = new GroupCommitPayload
+        {
+            Mutations = [],
+            Results = [],
+            Provenance = [],
+            LocalOperationReceipts =
+            [
+                new WalLocalOperationReceipt
+                {
+                    NamespaceId = 0,
+                    ClientSequence = 1,
+                    ClientId = new byte[16],
+                    OperationId = Id(0x33),
+                    Fingerprint = new byte[32],
+                    Result = []
+                }
+            ]
+        };
+
+        Assert.Throws<ArgumentException>(() => GroupCommitCodec.Encode(payload));
+    }
+
+    [Fact]
+    public void Local_operation_ack_codec_roundtrips_and_rejects_invalid_watermarks()
+    {
+        var acknowledgement = new WalLocalOperationAck
+        {
+            NamespaceId = 0x1234,
+            ClientId = Id(0x45),
+            AcknowledgedThroughSequence = 99
+        };
+
+        byte[] encoded = WalLocalOperationAckCodec.Encode(acknowledgement);
+        WalLocalOperationAck decoded = WalLocalOperationAckCodec.Decode(encoded);
+        Assert.Equal(acknowledgement.NamespaceId, decoded.NamespaceId);
+        Assert.Equal(acknowledgement.ClientId, decoded.ClientId);
+        Assert.Equal(acknowledgement.AcknowledgedThroughSequence, decoded.AcknowledgedThroughSequence);
+
+        byte[] invalid = encoded.ToArray();
+        BinaryPrimitives.WriteUInt64LittleEndian(invalid.AsSpan(22), 0);
+        Assert.Throws<InvalidDataException>(() => WalLocalOperationAckCodec.Decode(invalid));
     }
 
     [Fact]
