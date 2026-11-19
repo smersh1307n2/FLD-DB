@@ -259,13 +259,12 @@ public sealed partial class FldDatabase
                 throw new InvalidDataException("FULL_REPLACE commit proof does not match the staged manifest digest.");
             if (state.NextIndex != state.ExpectedEntryCount)
                 throw new InvalidOperationException("FULL_REPLACE snapshot is incomplete.");
+            // After reopening a database, _pendingFlushedCommitSeq starts at zero:
+            // the durable manifest's _lastSealedCommitSeq is the recovered WAL
+            // boundary. Only a pending sequence beyond that boundary is unsealed.
             if (_dirty.Count != 0 || _overlay.Count != 0 || _manifestDirty ||
-                _pendingFlushedCommitSeq != _lastSealedCommitSeq)
-                throw new InvalidOperationException(
-                    $"FLD local writes must be committed and checkpointed before FULL_REPLACE generation switch " +
-                    $"(dirty={_dirty.Count}, overlay={_overlay.Count}, manifestDirty={_manifestDirty}, " +
-                    $"pendingFlushed={_pendingFlushedCommitSeq}, lastSealed={_lastSealedCommitSeq}, " +
-                    $"stageBaseSealed={state.BaseLastSealedCommitSeq}).");
+                _pendingFlushedCommitSeq > _lastSealedCommitSeq)
+                throw new InvalidOperationException("FLD local writes must be committed and checkpointed before FULL_REPLACE generation switch.");
             if (_databaseHasUnpublishedLocalChanges())
                 throw new InvalidOperationException("FLD unpublished Outbox entries block FULL_REPLACE generation switch.");
 
