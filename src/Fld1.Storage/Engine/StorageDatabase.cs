@@ -556,12 +556,18 @@ public sealed class StorageDatabase : IDisposable
         var mutations = DecodeBatch(payload);
         StorageBTreeReader currentReader = _btreeReader
             ?? throw new InvalidOperationException("B+ tree reader is not initialized.");
+        // A B+ tree root reopen deliberately starts with an unknown live count.
+        // Keep that sentinel through WAL replay; applying deltas to -1 would turn
+        // an unknown count into a plausible but incorrect positive value.
         int nextLiveCount = _liveCount;
-        foreach (StorageMutation mutation in mutations)
+        if (nextLiveCount >= 0)
         {
-            bool existed = currentReader.TryGet(mutation.Key.Span, out _);
-            if (mutation.IsDelete && existed) nextLiveCount--;
-            else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
+            foreach (StorageMutation mutation in mutations)
+            {
+                bool existed = currentReader.TryGet(mutation.Key.Span, out _);
+                if (mutation.IsDelete && existed) nextLiveCount--;
+                else if (!mutation.IsDelete && !existed) nextLiveCount = checked(nextLiveCount + 1);
+            }
         }
 
         StorageBTreeGenerationFiles files = _btreeFiles
