@@ -566,6 +566,47 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Small_commit_keeps_unknown_live_count_lazy_until_count_is_requested()
+    {
+        const ulong partition = 121;
+        string directory = Path.Combine(_dir, "lazy-live-count-after-large-batch");
+        using var database = StorageDatabase.Open(directory, partition);
+        int recounts = 0;
+        database.AllocationObserver = (phase, _) =>
+        {
+            if (phase == "storage-live-count-recount")
+                recounts++;
+        };
+
+        using (var seed = database.BeginWriteBatch())
+        {
+            for (int i = 0; i < 512; i++)
+                seed.Put(System.Text.Encoding.ASCII.GetBytes($"key-{i:D4}"), BitConverter.GetBytes(i));
+            seed.Commit();
+        }
+
+        using (var update = database.BeginWriteBatch())
+        {
+            update.Delete("key-0000"u8);
+            update.Put("key-0512"u8, "new"u8);
+            update.Commit();
+        }
+
+        Assert.Equal(0, recounts);
+        Assert.Equal(512, database.Count);
+        Assert.Equal(1, recounts);
+        Assert.Equal(512, database.Count);
+        Assert.Equal(1, recounts);
+
+        database.AllocationObserver = null;
+        using var reopened = StorageDatabase.Open(directory, partition);
+        Assert.Equal(512, reopened.Count);
+        Assert.False(reopened.TryGet("key-0000"u8, out _));
+        Assert.True(reopened.TryGet("key-0512"u8, out byte[]? value));
+        Assert.Equal("new"u8.ToArray(), value);
+    }
+
+    [Fact]
     public void Page_cache_has_a_small_default_and_an_explicit_memory_budget()
     {
         using var defaultDatabase = StorageDatabase.Open(
