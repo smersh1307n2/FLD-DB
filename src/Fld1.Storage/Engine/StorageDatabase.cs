@@ -40,7 +40,7 @@ public sealed class StorageDatabase : IDisposable
     public string DirectoryPath => _directory;
     public ulong LastCommitSeq { get { lock (_gate) { EnsureUsable(); return _lastCommitSeq; } } }
     internal int ActiveWalSegment => _wal.ActiveSegment;
-    public int Count { get { lock (_gate) { EnsureUsable(); if (_liveCount < 0) _liveCount = CountBTreeValues(); return _liveCount; } } }
+    public int Count { get { lock (_gate) { EnsureUsable(); if (_liveCount < 0) { AllocationObserver?.Invoke("storage-live-count-recount", 0); _liveCount = CountBTreeValues(); } return _liveCount; } } }
     public long PageCacheCapacityBytes => _pageCache.CapacityBytes;
 
     private StorageDatabase(string directory, WalManager wal, Action<StorageFaultPoint>? faultInjector, long pageCacheCapacityBytes)
@@ -480,10 +480,12 @@ public sealed class StorageDatabase : IDisposable
             // Count already supports the -1 lazy-recount state. Small batches retain
             // the incremental fast path.
             bool deferLiveCount = orderedMutations.Length > 256;
-            int nextLiveCount = deferLiveCount
-                ? -1
-                : _liveCount < 0 ? CountBTreeValues() : _liveCount;
-            if (!deferLiveCount)
+            // Once the exact count is unknown, keep it lazy across small commits too.
+            // Recounting the complete tree here turns a one-row metadata write into
+            // an O(total rows) scan immediately after every large batch.
+            bool liveCountKnown = _liveCount >= 0;
+            int nextLiveCount = deferLiveCount || !liveCountKnown ? -1 : _liveCount;
+            if (!deferLiveCount && liveCountKnown)
             {
                 foreach (StorageMutation mutation in orderedMutations)
                 {
