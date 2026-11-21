@@ -566,6 +566,35 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Recovery_keeps_live_count_unknown_until_exact_recount()
+    {
+        const ulong partition = 122;
+        string directory = Path.Combine(_dir, "recovery-lazy-live-count");
+        bool armed = false;
+
+        using (var database = StorageDatabase.OpenForTesting(directory, partition, point =>
+        {
+            if (armed && point == StorageFaultPoint.AfterWalFlushBeforePublish)
+                throw new IOException("Injected failure after durable WAL flush.");
+        }))
+        {
+            using var batch = database.BeginWriteBatch();
+            for (int i = 0; i < 512; i++)
+                batch.Put(System.Text.Encoding.ASCII.GetBytes($"recovered-{i:D4}"), BitConverter.GetBytes(i));
+
+            armed = true;
+            Assert.Throws<IOException>(() => batch.Commit());
+        }
+
+        using var recovered = StorageDatabase.Open(directory, partition);
+        Assert.Equal(512, recovered.Count);
+        Assert.True(recovered.TryGet("recovered-0000"u8, out byte[]? first));
+        Assert.Equal(BitConverter.GetBytes(0), first);
+        Assert.True(recovered.TryGet("recovered-0511"u8, out byte[]? last));
+        Assert.Equal(BitConverter.GetBytes(511), last);
+    }
+
+    [Fact]
     public void Small_commit_keeps_unknown_live_count_lazy_until_count_is_requested()
     {
         const ulong partition = 121;
