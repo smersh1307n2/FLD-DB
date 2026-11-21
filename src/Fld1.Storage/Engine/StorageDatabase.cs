@@ -475,10 +475,10 @@ public sealed class StorageDatabase : IDisposable
             StorageMutation[] orderedMutations = mutations as StorageMutation[] ?? mutations.ToArray();
             Array.Sort(orderedMutations, StorageMutationComparer.Instance);
 
-            // For large batches, defer the exact live-count refresh. Looking up every
-            // mutation individually walks the B+ tree and allocates page/key buffers;
-            // Count already supports the -1 lazy-recount state. Small batches retain
-            // the incremental fast path.
+            // For large batches, defer the exact live-count refresh. When the count
+            // is unknown, preserve the -1 sentinel across small commits too; only small
+            // batches with a known count use incremental existence checks. Count lazily
+            // rebuilds the exact value on demand.
             bool deferLiveCount = orderedMutations.Length > 256;
             // Once the exact count is unknown, keep it lazy across small commits too.
             // Recounting the complete tree here turns a one-row metadata write into
