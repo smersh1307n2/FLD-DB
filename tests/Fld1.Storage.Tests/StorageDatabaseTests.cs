@@ -599,35 +599,37 @@ public sealed class StorageDatabaseTests : IDisposable
     {
         const ulong partition = 121;
         string directory = Path.Combine(_dir, "lazy-live-count-after-large-batch");
-        using var database = StorageDatabase.Open(directory, partition);
         int recounts = 0;
-        database.AllocationObserver = (phase, _) =>
+        using (var database = StorageDatabase.Open(directory, partition))
         {
-            if (phase == "storage-live-count-recount")
-                recounts++;
-        };
+            database.AllocationObserver = (phase, _) =>
+            {
+                if (phase == "storage-live-count-recount")
+                    recounts++;
+            };
 
-        using (var seed = database.BeginWriteBatch())
-        {
-            for (int i = 0; i < 512; i++)
-                seed.Put(System.Text.Encoding.ASCII.GetBytes($"key-{i:D4}"), BitConverter.GetBytes(i));
-            seed.Commit();
+            using (var seed = database.BeginWriteBatch())
+            {
+                for (int i = 0; i < 512; i++)
+                    seed.Put(System.Text.Encoding.ASCII.GetBytes($"key-{i:D4}"), BitConverter.GetBytes(i));
+                seed.Commit();
+            }
+
+            using (var update = database.BeginWriteBatch())
+            {
+                update.Delete("key-0000"u8);
+                update.Put("key-0512"u8, "new"u8);
+                update.Commit();
+            }
+
+            Assert.Equal(0, recounts);
+            Assert.Equal(512, database.Count);
+            Assert.Equal(1, recounts);
+            Assert.Equal(512, database.Count);
+            Assert.Equal(1, recounts);
+            database.AllocationObserver = null;
         }
 
-        using (var update = database.BeginWriteBatch())
-        {
-            update.Delete("key-0000"u8);
-            update.Put("key-0512"u8, "new"u8);
-            update.Commit();
-        }
-
-        Assert.Equal(0, recounts);
-        Assert.Equal(512, database.Count);
-        Assert.Equal(1, recounts);
-        Assert.Equal(512, database.Count);
-        Assert.Equal(1, recounts);
-
-        database.AllocationObserver = null;
         using var reopened = StorageDatabase.Open(directory, partition);
         Assert.Equal(512, reopened.Count);
         Assert.False(reopened.TryGet("key-0000"u8, out _));
