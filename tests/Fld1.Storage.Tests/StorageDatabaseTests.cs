@@ -193,6 +193,64 @@ public sealed class StorageDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void Prefix_cursor_reuses_borrowed_buffers_and_read_pages_remain_owned()
+    {
+        using var db = StorageDatabase.Open(_dir, 130);
+        using (var batch = db.BeginWriteBatch())
+        {
+            batch.Put([0x10, 0x01], new byte[96].Select((_, i) => (byte)i).ToArray());
+            batch.Put([0x10, 0x02], new byte[96].Select((_, i) => (byte)(255 - i)).ToArray());
+            batch.Put([0x10, 0x03], "third"u8);
+            batch.Commit();
+        }
+
+        using var snapshot = db.OpenSnapshot();
+        using var cursor = snapshot.OpenPrefixCursor([0x10]);
+
+        IReadOnlyList<StorageEntry> firstPage = cursor.ReadPage(1);
+        byte[] firstKey = firstPage[0].Key.ToArray();
+        byte[] firstValue = firstPage[0].Value.ToArray();
+        IReadOnlyList<StorageEntry> secondPage = cursor.ReadPage(1);
+        Assert.Equal(new byte[] { 0x10, 0x01 }, firstPage[0].Key);
+        Assert.Equal(firstValue, firstPage[0].Value);
+        Assert.Equal(new byte[] { 0x10, 0x02 }, secondPage[0].Key);
+
+        var visitedKeys = new List<byte[]>();
+        int visited = cursor.VisitPage(8, (in StorageEntryView entry) =>
+        {
+            visitedKeys.Add(entry.Key.ToArray());
+            return true;
+        });
+        Assert.Equal(1, visited);
+        Assert.Equal(new byte[] { 0x10, 0x03 }, Assert.Single(visitedKeys));
+        Assert.Equal(new byte[] { 0x10, 0x01 }, firstKey);
+    }
+
+    [Fact]
+    public void Prefix_cursor_stops_after_visitor_rejects_current_entry()
+    {
+        using var db = StorageDatabase.Open(_dir, 131);
+        using (var batch = db.BeginWriteBatch())
+        {
+            batch.Put([0x20, 0x01], "one"u8);
+            batch.Put([0x20, 0x02], "two"u8);
+            batch.Commit();
+        }
+
+        using var snapshot = db.OpenSnapshot();
+        using var cursor = snapshot.OpenPrefixCursor([0x20]);
+        int calls = 0;
+        int visited = cursor.VisitPage(10, (in StorageEntryView _) =>
+        {
+            calls++;
+            return false;
+        });
+        Assert.Equal(1, visited);
+        Assert.Equal(1, calls);
+        Assert.Equal(new byte[] { 0x20, 0x02 }, Assert.Single(cursor.ReadPage(1)).Key);
+    }
+
+    [Fact]
     public void Snapshot_pins_old_BTree_generation_until_disposed_after_checkpoint()
     {
         const ulong partition = 118;
