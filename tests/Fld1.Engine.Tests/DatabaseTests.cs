@@ -19,6 +19,19 @@ public class DatabaseTests : IDisposable
         return id;
     }
 
+    private static Guid RunBlobId(ulong runId)
+    {
+        Span<byte> id = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(id, runId);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(id.Slice(8), 0x314E5552);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(id.Slice(12), 0x31444C46);
+        return new Guid(id);
+    }
+
+    private string RunBlobPath(ulong runId)
+        => Path.Combine(_dir, "storage-core", "blobs", Convert.ToHexString("FLDRUNB1"u8),
+            RunBlobId(runId).ToString("N"), "content.blob");
+
     [Fact]
     public void Put_get_from_overlay()
     {
@@ -51,7 +64,8 @@ public class DatabaseTests : IDisposable
         Assert.Equal(0, db.OverlayCount);
         Assert.True(db.TryGetBytes(rec, 5, out var v));
         Assert.Equal("sealed"u8.ToArray(), v);
-        Assert.True(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
+        Assert.False(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
+        Assert.True(File.Exists(RunBlobPath(runId)));
     }
 
     [Fact]
@@ -65,11 +79,134 @@ public class DatabaseTests : IDisposable
             db.Commit();
             runId = db.Checkpoint();
         }
+        Assert.False(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
+        Assert.True(File.Exists(RunBlobPath(runId)));
         using (var db2 = FldDatabase.Open(_dir, 0))
         {
             Assert.True(db2.TryGetBytes(rec, 1, out var v));
             Assert.Equal("persist"u8.ToArray(), v);
+            Assert.False(File.Exists(Path.Combine(_dir, "runs", $"{runId}.fld1")));
         }
+    }
+
+    [Fact]
+    public void Run_span_remains_valid_after_compaction_retires_its_mapping()
+    {
+        var rec = Rec(0x31);
+        using var db = FldDatabase.Open(_dir, 0);
+
+        db.Put(rec, 7, "first-generation"u8);
+        db.Commit();
+        ulong firstRun = db.Checkpoint();
+        Assert.True(firstRun > 0);
+        Assert.True(db.TryGet(rec, 7, out ReadOnlySpan<byte> retainedValue));
+
+        db.Put(rec, 7, "second-generation"u8);
+        db.Commit();
+        db.Checkpoint();
+        db.Compact();
+
+        // A RunReader slice can escape TryGet. Compaction must retire the old
+        // mapping instead of unmapping memory that a caller may still reference.
+        Assert.Equal("first-generation"u8.ToArray(), retainedValue.ToArray());
+        Assert.True(db.TryGetBytes(rec, 7, out byte[]? current));
+        Assert.Equal("second-generation"u8.ToArray(), current);
+    }
+
+    [Fact]
+    public void Reopen_uses_authoritative_blob_and_removes_stale_legacy_mirror()
+    {
+        var rec = Rec(0x32);
+        ulong runId;
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(rec, 8, "authoritative"u8);
+            db.Commit();
+            runId = db.Checkpoint();
+        }
+
+        byte[] author = new byte[16];
+        author[15] = 0x22;
+        byte[] staleMirror = new Fld1.Run.Builder.RunBuilder(0)
+            .Add(rec, 8, "stale-but-valid"u8, wall: 9999, logical: 0, author)
+            .Build();
+        string mirrorPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
+        File.WriteAllBytes(mirrorPath, staleMirror);
+
+        using (var reopened = FldDatabase.Open(_dir, 0))
+        {
+            Assert.True(reopened.TryGetBytes(rec, 8, out byte[]? value));
+            Assert.Equal("authoritative"u8.ToArray(), value);
+        }
+
+        Assert.False(File.Exists(mirrorPath),
+            "The redundant legacy mirror must be removed after the authoritative Storage blob is verified.");
+        Assert.True(File.Exists(RunBlobPath(runId)));
+    }
+
+    [Fact]
+    public void Reopen_keeps_legacy_mirror_when_contiguous_blob_digest_is_invalid()
+    {
+        var rec = Rec(0x38);
+        ulong runId;
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(rec, 1, "authoritative"u8);
+            db.Commit();
+            runId = db.Checkpoint();
+        }
+
+        byte[] author = new byte[16];
+        author[15] = 0x38;
+        byte[] legacyRun = new Fld1.Run.Builder.RunBuilder(0)
+            .Add(rec, 1, "authoritative"u8, wall: 1, logical: 0, author)
+            .Build();
+        string mirrorPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
+        File.WriteAllBytes(mirrorPath, legacyRun);
+
+        string blobPath = RunBlobPath(runId);
+        byte[] corruptBlob = File.ReadAllBytes(blobPath);
+        corruptBlob[^1] ^= 0x01;
+        File.WriteAllBytes(blobPath, corruptBlob);
+
+        using var reopened = FldDatabase.Open(_dir, 0);
+        Assert.Throws<InvalidDataException>(() => reopened.TryGetBytes(rec, 1, out _));
+        Assert.True(File.Exists(mirrorPath),
+            "A legacy mirror must not be deleted before the contiguous blob digest and Run header are verified.");
+    }
+
+    [Fact]
+    public void Reopen_keeps_legacy_run_fallback_when_storage_blob_is_absent()
+    {
+        var rec = Rec(0x37);
+        ulong runId;
+        using (var db = FldDatabase.Open(_dir, 0))
+        {
+            db.Put(rec, 1, "legacy"u8);
+            db.Commit();
+            runId = db.Checkpoint();
+        }
+
+        using (var storage = Fld1.Storage.Engine.StorageDatabase.Open(
+            Path.Combine(_dir, "storage-core"), partitionId: 0))
+        {
+            var blobs = new Fld1.Storage.Engine.StorageBlobStore(storage, "FLDRUNB1"u8);
+            Assert.True(blobs.DeleteBlob(RunBlobId(runId)));
+        }
+
+        byte[] author = new byte[16];
+        author[15] = 0x37;
+        byte[] legacyRun = new Fld1.Run.Builder.RunBuilder(0)
+            .Add(rec, 1, "legacy"u8, wall: 1, logical: 0, author)
+            .Build();
+        string legacyPath = Path.Combine(_dir, "runs", $"{runId}.fld1");
+        File.WriteAllBytes(legacyPath, legacyRun);
+
+        using var reopened = FldDatabase.Open(_dir, 0);
+        Assert.True(reopened.TryGetBytes(rec, 1, out byte[]? value));
+        Assert.Equal("legacy"u8.ToArray(), value);
+        Assert.True(File.Exists(legacyPath),
+            "A pre-Storage legacy Run must remain available when no authoritative blob exists.");
     }
 
     [Fact]

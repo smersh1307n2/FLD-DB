@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Fld1.Manifest.Format;
 using Fld1.Manifest.IO;
 using Fld1.Manifest.Query;
@@ -63,6 +64,71 @@ public class ManifestTests : IDisposable
         Assert.Equal(99ul, d2.Runs[0].RunId);
         Assert.Equal(5ul, d2.CoordinatorLeaseEpoch);
         Assert.Equal(Id(7), d2.CoordinatorSessionId);
+    }
+
+    [Fact]
+    public void Local_operation_receipts_roundtrip_in_manifest_extension()
+    {
+        var receipt = new LocalOperationReceiptEntry
+        {
+            NamespaceId = 1,
+            ClientId = Id(0x41),
+            OperationId = Id(0x42),
+            ClientSequence = 1,
+            Fingerprint = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray(),
+            CommitSeq = 17,
+            Result = "original-response"u8.ToArray()
+        };
+        var document = ManifestDocument.Empty(2);
+        var populated = new ManifestDocument
+        {
+            Generation = document.Generation,
+            LastFlushedCommitSeq = 17,
+            CertifiedWatermark = document.CertifiedWatermark,
+            Namespaces = [1],
+            Runs = [],
+            Retains = [],
+            ResultClients = [],
+            ProvenanceIndex = [],
+            LocalOperationReceipts = [receipt],
+            LocalOperationClients =
+            [
+                new LocalOperationClientEntry
+                {
+                    NamespaceId = 1,
+                    ClientId = receipt.ClientId,
+                    LastCommittedSequence = 1,
+                    AcknowledgedThroughSequence = 0
+                }
+            ],
+            CoordinatorLeaseEpoch = document.CoordinatorLeaseEpoch,
+            CoordinatorSessionId = document.CoordinatorSessionId
+        };
+
+        var decoded = ManifestCodec.Decode(ManifestCodec.Encode(populated));
+        var recovered = Assert.Single(decoded.LocalOperationReceipts);
+        Assert.Equal(1u, recovered.NamespaceId);
+        Assert.Equal(receipt.ClientId, recovered.ClientId);
+        Assert.Equal(receipt.OperationId, recovered.OperationId);
+        Assert.Equal(receipt.ClientSequence, recovered.ClientSequence);
+        Assert.Equal(receipt.Fingerprint, recovered.Fingerprint);
+        Assert.Single(decoded.LocalOperationClients);
+        Assert.Equal(1ul, decoded.LocalOperationClients[0].LastCommittedSequence);
+        Assert.Equal(receipt.CommitSeq, recovered.CommitSeq);
+        Assert.Equal(receipt.Result, recovered.Result);
+    }
+
+    [Fact]
+    public void Manifest_decoder_accepts_legacy_document_without_receipt_extension()
+    {
+        byte[] encoded = ManifestCodec.Encode(ManifestDocument.Empty(4));
+        byte[] legacy = encoded.AsSpan(0, encoded.Length - 24).ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            legacy.AsSpan(8, 4), Fld1.Core.Hash.Hashes.Crc32C(legacy.AsSpan(12)));
+
+        var decoded = ManifestCodec.Decode(legacy);
+        Assert.Empty(decoded.LocalOperationReceipts);
+        Assert.Equal(4ul, decoded.Generation);
     }
 
     [Fact]

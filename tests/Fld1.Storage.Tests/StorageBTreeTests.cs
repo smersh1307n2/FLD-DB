@@ -1,0 +1,330 @@
+using Fld1.Storage.Engine;
+using Xunit;
+namespace Fld1.Storage.Tests;
+public sealed class StorageBTreeTests
+{
+    [Fact]
+    public void Shared_reader_hot_cache_isolated_by_immutable_root()
+    {
+        byte[] key = { 0x2A };
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong nextPage = 1;
+        ulong root = StorageBTreeBuilder.Build(51,
+            new[] { new StorageTreeBuildEntry(key, 1, 2, 4, false) },
+            () => nextPage++, (id, page) => pages.Add(id, page));
+        var shared = new StorageBTreeReaderCache();
+        var empty = new StorageBTreeReader(51, 0, _ => Array.Empty<byte>(),
+            _ => new ReadOnlyMemory<byte>(key), shared);
+        var populated = new StorageBTreeReader(51, root, id => pages[id],
+            _ => new ReadOnlyMemory<byte>(key), shared);
+
+        Assert.False(empty.TryGet(key, out _));
+        Assert.True(populated.TryGet(key, out StorageTreeValueReference value));
+        Assert.Equal(4, value.Length);
+    }
+
+    [Fact]
+    public void Reader_validation_cache_has_one_aggregate_budget_and_reclaims_retired_generations()
+    {
+        var shared = new StorageBTreeReaderCache();
+        for (ulong page = 1; page <= 2_048; page++)
+        {
+            shared.MarkValidated(41, page);
+            shared.MarkValidated(42, page);
+        }
+
+        Assert.Equal(4_096, shared.ValidatedPageCount);
+        shared.EvictGeneration(41);
+        Assert.Equal(2_048, shared.ValidatedPageCount);
+        Assert.False(shared.IsValidated(41, 1));
+        Assert.True(shared.IsValidated(42, 1));
+
+        for (ulong page = 2_049; page <= 6_144; page++)
+            shared.MarkValidated(42, page);
+
+        Assert.Equal(4_096, shared.ValidatedPageCount);
+    }
+
+    [Fact]
+    public void Reader_hot_lookup_cache_has_one_aggregate_budget_across_snapshot_readers()
+    {
+        var shared = new StorageBTreeReaderCache();
+        var first = new StorageBTreeReader(31, 0, _ => Array.Empty<byte>(),
+            _ => ReadOnlyMemory<byte>.Empty, shared);
+        var second = new StorageBTreeReader(32, 0, _ => Array.Empty<byte>(),
+            _ => ReadOnlyMemory<byte>.Empty, shared);
+
+        for (int i = 0; i < 8_192; i++)
+        {
+            byte[] key = BitConverter.GetBytes(i);
+            Assert.False(first.TryGet(key, out _));
+            Assert.False(second.TryGet(key, out _));
+        }
+
+        Assert.Equal(4_096, shared.HotLookupCount);
+        Assert.Equal(2_048, first.HotLookupCount);
+        Assert.Equal(2_048, second.HotLookupCount);
+        shared.EvictGeneration(31);
+        Assert.Equal(2_048, shared.HotLookupCount);
+        Assert.Equal(0, first.HotLookupCount);
+        Assert.Equal(2_048, second.HotLookupCount);
+    }
+
+    [Fact]
+    public void Randomized_builder_reader_prefix_and_tombstones_match_reference()
+    {
+        var random=new Random(731991);var reference=new SortedDictionary<string,(int Value,bool Deleted)>(StringComparer.Ordinal);
+        for(int i=0;i<15_000;i++){string k=$"{random.Next(0,9000):D5}-{random.Next(0,100):D2}";reference[k]=(i,i%13==0);}
+        var pages=new Dictionary<ulong,byte[]>();var keys=new Dictionary<ulong,byte[]>();ulong np=1,nk=1,nv=1;
+        var input=new List<StorageTreeBuildEntry>(reference.Count);
+        foreach(var pair in reference){byte[] k=System.Text.Encoding.UTF8.GetBytes(pair.Key);ulong off=nk++;keys.Add(off,k);input.Add(new(k,off,nv++,pair.Value.Deleted?0:4,pair.Value.Deleted));}
+        ulong root=StorageBTreeBuilder.Build(7,input,()=>np++,(id,p)=>Assert.True(pages.TryAdd(id,p)));
+        Assert.NotEqual(0UL,root);Assert.True(pages.Count>20);
+        var reader=new StorageBTreeReader(7,root,id=>pages[id],r=>keys[r.Offset]);
+        int sampled=0;foreach(var pair in reference){if((sampled++%17)!=0)continue;byte[] k=System.Text.Encoding.UTF8.GetBytes(pair.Key);bool found=reader.TryGet(k,out var v);Assert.Equal(!pair.Value.Deleted,found);if(found)Assert.Equal(4,v.Length);}
+        const string prefix="00042-";using var cursor=reader.OpenPrefixCursor(System.Text.Encoding.UTF8.GetBytes(prefix));var actual=new List<string>();
+        while(cursor.TryReadNext(out var e))actual.Add(System.Text.Encoding.UTF8.GetString(keys[e.Key.Offset]));
+        string[] expected=reference.Where(x=>x.Key.StartsWith(prefix,StringComparison.Ordinal)&&!x.Value.Deleted).Select(x=>x.Key).ToArray();
+        Assert.Equal(expected,actual);
+    }
+    [Fact]
+    public void Prefix_cursor_reads_each_leaf_once_with_bounded_path_state()
+    {
+        var entries=new List<StorageTreeBuildEntry>();var keys=new Dictionary<ulong,byte[]>();ulong offset=1;
+        for(int i=0;i<1400;i++)
+        {
+            byte[] key=new byte[4];System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(key,i);
+            keys.Add(offset,key);entries.Add(new(key,offset,offset,1,false));offset++;
+        }
+        var pages=new Dictionary<ulong,byte[]>();ulong next=1;
+        ulong root=StorageBTreeBuilder.Build(4,entries,()=>next++,(id,page)=>pages.Add(id,page));
+        int reads=0;var reader=new StorageBTreeReader(4,root,id=>{reads++;return pages[id];},r=>keys[r.Offset]);
+        using var cursor=reader.OpenPrefixCursor(new byte[]{0,0});
+        Assert.True(cursor.TryReadNext(out _));int afterFirst=reads;
+        Assert.True(cursor.TryReadNext(out _));Assert.Equal(afterFirst,reads);
+        int total=2;while(cursor.TryReadNext(out _))total++;
+        Assert.Equal(1400,total);Assert.True(reads>=3);
+    }
+
+    [Fact]
+    public void Prefix_cursor_ignores_legacy_leaf_cycle_and_uses_tree_order()
+    {
+        byte[] k1={0,1},k2={0,2};var keys=new Dictionary<ulong,byte[]>{{1,k1},{2,k2}};
+        var entries=new[]{new StorageTreeBuildEntry(k1,1,1,1,false),new StorageTreeBuildEntry(k2,2,2,1,false)};
+        var pages=new Dictionary<ulong,byte[]>();ulong next=1;
+        ulong root=StorageBTreeBuilder.Build(5,entries,()=>next++,(id,page)=>pages.Add(id,page));
+        pages[1]=StorageBTreePageCodec.EncodeLeaf(5,1,1,new[]{
+            new StorageTreeLeafEntry(new(1,2),new(1,1,false)),
+            new StorageTreeLeafEntry(new(2,2),new(2,1,false))});
+        var reader=new StorageBTreeReader(5,root,id=>pages[id],r=>keys[r.Offset]);
+        using var cursor=reader.OpenPrefixCursor(new byte[]{0});
+        Assert.True(cursor.TryReadNext(out _));Assert.True(cursor.TryReadNext(out _));
+        Assert.False(cursor.TryReadNext(out _));
+    }
+
+
+
+    [Fact]
+    public void Prefix_cursor_holds_cache_lease_until_disposed()
+    {
+        byte[] key={0x01};
+        var pages=new Dictionary<ulong,byte[]>();
+        ulong next=1;
+        ulong root=StorageBTreeBuilder.Build(11,new[]
+        {
+            new StorageTreeBuildEntry(key,1,1,1,false)
+        },()=>next++,(id,page)=>pages.Add(id,page));
+        var cache=new StoragePageCache(StoragePageCodec.PageSize);
+        var reader=new StorageBTreeReader(11,root,
+            id=>cache.Acquire(new StoragePageKey(11,id),()=>pages[id]),
+            _=>key);
+        var cursor=reader.OpenPrefixCursor(key);
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.Equal(StoragePageCodec.PageSize,cache.ResidentBytes);
+        Assert.Throws<InvalidOperationException>(()=>
+        {
+            using var other=cache.Acquire(new StoragePageKey(11,root+100),()=>new byte[StoragePageCodec.PageSize]);
+        });
+        cursor.Dispose();
+        using var replacement=cache.Acquire(new StoragePageKey(11,root+100),()=>new byte[StoragePageCodec.PageSize]);
+        Assert.Equal(StoragePageCodec.PageSize,cache.ResidentBytes);
+    }
+
+    [Fact]
+    public void Reader_rejects_crc_valid_leaf_with_unsorted_keys()
+    {
+        byte[] first={0x01},second={0x02};
+        var pages=new Dictionary<ulong,byte[]>
+        {
+            [1]=StorageBTreePageCodec.EncodeLeaf(9,1,0,new[]
+            {
+                new StorageTreeLeafEntry(new(2,1),new(2,1,false)),
+                new StorageTreeLeafEntry(new(1,1),new(1,1,false))
+            })
+        };
+        var keys=new Dictionary<ulong,byte[]>{{1,first},{2,second}};
+        var reader=new StorageBTreeReader(9,1,id=>pages[id],r=>keys[r.Offset]);
+        Assert.Throws<InvalidDataException>(()=>reader.TryGet(first,out _));
+        Assert.Throws<InvalidDataException>(()=>
+        {
+            using var cursor=reader.OpenPrefixCursor(first);
+            cursor.TryReadNext(out _);
+        });
+    }
+
+    [Fact]
+    public void Reader_rejects_crc_valid_internal_page_with_unsorted_separators()
+    {
+        byte[] one={0x01},two={0x02},three={0x03};
+        var pages=new Dictionary<ulong,byte[]>
+        {
+            [1]=StorageBTreePageCodec.EncodeLeaf(10,1,0,new[]
+                {new StorageTreeLeafEntry(new(1,1),new(1,1,false))}),
+            [2]=StorageBTreePageCodec.EncodeLeaf(10,2,0,new[]
+                {new StorageTreeLeafEntry(new(2,1),new(2,1,false))}),
+            [3]=StorageBTreePageCodec.EncodeInternal(10,3,1,new[]
+            {
+                new StorageTreeChild(2,new(2,1)),
+                new StorageTreeChild(4,new(3,1))
+            })
+        };
+        var keys=new Dictionary<ulong,byte[]>{{1,one},{2,two},{3,one}};
+        var reader=new StorageBTreeReader(10,3,id=>pages[id],r=>keys[r.Offset]);
+        Assert.Throws<InvalidDataException>(()=>reader.TryGet(one,out _));
+    }
+
+
+
+
+    [Fact]
+    public void Prefix_cursor_rejects_out_of_order_internal_tree_leaf_boundary()
+    {
+        byte[][] keys =
+        {
+            new byte[] { 0xAA, 0x00 },
+            new byte[] { 0xAA, 0x01 },
+            new byte[] { 0xAA, 0x02 },
+            new byte[] { 0xAA, 0x03 }
+        };
+        var pages = new Dictionary<ulong, byte[]>
+        {
+            [1] = StorageBTreePageCodec.EncodeLeaf(21, 1, 2, new[]
+            {
+                new StorageTreeLeafEntry(new(1, 2), new(0, 1, false)),
+                new StorageTreeLeafEntry(new(2, 2), new(1, 1, false))
+            }),
+            [2] = StorageBTreePageCodec.EncodeLeaf(21, 2, 0, new[]
+            {
+                new StorageTreeLeafEntry(new(0, 2), new(2, 1, false)),
+                new StorageTreeLeafEntry(new(3, 2), new(3, 1, false))
+            }),
+            [3] = StorageBTreePageCodec.EncodeInternal(21, 3, 1, new[]
+            {
+                new StorageTreeChild(2, new(0, 2))
+            })
+        };
+        var reader = new StorageBTreeReader(21, 3, id => pages[id],
+            reference => new ReadOnlyMemory<byte>(keys[checked((int)reference.Offset)]));
+
+        using var cursor = reader.OpenPrefixCursor(new byte[] { 0xAA });
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.Throws<InvalidDataException>(() => cursor.TryReadNext(out _));
+    }
+
+    [Fact]
+    public void Reader_hot_key_cache_serves_repeat_lookup_without_page_reads()
+    {
+        byte[] key = { 0x00, 0x2A };
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong next = 1;
+        ulong root = StorageBTreeBuilder.Build(13,
+            new[] { new StorageTreeBuildEntry(key, 1, 2, 8, false) },
+            () => next++, (id, page) => pages.Add(id, page));
+        int pageReads = 0;
+        var reader = new StorageBTreeReader(13, root, id =>
+        {
+            pageReads++;
+            return pages[id];
+        }, _ => new ReadOnlyMemory<byte>(key));
+
+        Assert.True(reader.TryGet(key, out var first));
+        int readsAfterFirstLookup = pageReads;
+        Assert.True(reader.TryGet(key, out var second));
+
+        Assert.Equal(first, second);
+        Assert.Equal(readsAfterFirstLookup, pageReads);
+        Assert.Equal(1, reader.HotLookupCount);
+    }
+
+    [Fact]
+    public void Reader_accepts_borrowed_key_memory_without_materializing_key_arrays()
+    {
+        byte[] keyBytes = { 0x00, 0x01, 0x00, 0x02 };
+        var pages = new Dictionary<ulong, byte[]>();
+        ulong next = 1;
+        var entries = new[]
+        {
+            new StorageTreeBuildEntry(new byte[] { 0x00, 0x01 }, 0, 1, 4, false),
+            new StorageTreeBuildEntry(new byte[] { 0x00, 0x02 }, 2, 2, 4, false)
+        };
+        ulong root = StorageBTreeBuilder.Build(12, entries, () => next++,
+            (id, page) => pages.Add(id, page));
+        var reader = new StorageBTreeReader(12, root, id => pages[id],
+            reference => new ReadOnlyMemory<byte>(keyBytes, checked((int)reference.Offset), reference.Length));
+
+        Assert.True(reader.TryGet(new byte[] { 0x00, 0x02 }, out var value));
+        Assert.Equal(4, value.Length);
+        using var cursor = reader.OpenPrefixCursor(new byte[] { 0x00 });
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.True(cursor.TryReadNext(out _));
+        Assert.False(cursor.TryReadNext(out _));
+    }
+
+    [Fact] public void Builder_rejects_duplicate_and_unsorted_keys()
+    {
+        var duplicate=new[]{new StorageTreeBuildEntry(new byte[]{1},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};
+        var unsorted=new[]{new StorageTreeBuildEntry(new byte[]{2},1,1,1,false),new StorageTreeBuildEntry(new byte[]{1},2,2,1,false)};
+        ulong id=1;
+        Assert.Throws<InvalidDataException>(()=>StorageBTreeBuilder.Build(1,duplicate,()=>id++,(_,_)=>{}));
+        Assert.Throws<InvalidDataException>(()=>StorageBTreeBuilder.Build(1,unsorted,()=>id++,(_,_)=>{}));
+    }
+    [Fact] public void Empty_tree_and_one_megabyte_external_key_work(){ulong id=1;Assert.Equal(0UL,StorageBTreeBuilder.Build(1,Array.Empty<StorageTreeBuildEntry>(),()=>id++,(_,_)=>{}));byte[] k=new byte[1024*1024];k[^1]=1;var pages=new Dictionary<ulong,byte[]>();ulong p=1;ulong root=StorageBTreeBuilder.Build(2,new[]{new StorageTreeBuildEntry(k,99,100,3,false)},()=>p++,(n,b)=>pages.Add(n,b));var reader=new StorageBTreeReader(2,root,n=>pages[n],_=>k);Assert.True(reader.TryGet(k,out var v));Assert.Equal(3,v.Length);}
+    [Fact] public void Page_codec_rejects_identity_and_crc_corruption(){byte[] p=StorageBTreePageCodec.EncodeLeaf(3,4,0,new[]{new StorageTreeLeafEntry(new(1,2),new(10,5,false))});Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,5));p[^1]=0x7f;Assert.Throws<InvalidDataException>(()=>StorageBTreePageCodec.DecodeLeaf(p,3,4));}
+    [Fact]
+    public void Reader_tree_key_cache_is_bounded_and_evicted_with_generation()
+    {
+        var shared = new StorageBTreeReaderCache();
+        const ulong generation = 73;
+        const int capacity = 4_096;
+
+        for (int i = 0; i < capacity; i++)
+        {
+            var reference = new StorageTreeKeyReference(checked((ulong)i * 32), 16);
+            shared.RememberTreeKey(generation, reference, new byte[16]);
+        }
+
+        Assert.Equal(capacity, shared.TreeKeyCount);
+        Assert.True(shared.TryGetTreeKey(
+            generation, new StorageTreeKeyReference(0, 16), out _));
+
+        var newest = new StorageTreeKeyReference(checked((ulong)capacity * 32), 16);
+        shared.RememberTreeKey(generation, newest, new byte[16]);
+
+        Assert.Equal(capacity, shared.TreeKeyCount);
+        Assert.False(shared.TryGetTreeKey(
+            generation, new StorageTreeKeyReference(0, 16), out _));
+        Assert.True(shared.TryGetTreeKey(generation, newest, out _));
+        Assert.False(shared.TryGetTreeKey(
+            generation + 1, newest, out _));
+
+        var oversized = new StorageTreeKeyReference(checked((ulong)(capacity + 1) * 32), 257);
+        shared.RememberTreeKey(generation, oversized, new byte[257]);
+        Assert.Equal(capacity, shared.TreeKeyCount);
+        Assert.False(shared.TryGetTreeKey(generation, oversized, out _));
+
+        shared.EvictGeneration(generation);
+        Assert.Equal(0, shared.TreeKeyCount);
+    }
+
+}

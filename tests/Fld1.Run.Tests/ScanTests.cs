@@ -50,4 +50,32 @@ public class ScanTests
         Assert.Contains((byte)1, ids);
         Assert.Contains((byte)2, ids);
     }
+    [Fact]
+    public void ScanAllFieldIds_lists_every_record_and_includes_tombstone_descriptors()
+    {
+        var first = Rec(1);
+        var second = Rec(2);
+        var author = Author(1);
+        var run = new RunBuilder(0)
+            .Add(first, 1, "live"u8, 1, 0, author)
+            .Add(first, 2, "deleted"u8, 2, 0, author, isTombstone: true)
+            .Add(second, 7, "other"u8, 3, 0, author)
+            .Build();
+
+        var found = new Dictionary<byte, List<ushort>>();
+        new RunReader(run).ScanAllFieldIds((recordId, fieldId) =>
+        {
+            byte record = recordId.Span[0];
+            if (!found.TryGetValue(record, out List<ushort>? fields))
+            {
+                fields = new List<ushort>();
+                found.Add(record, fields);
+            }
+            fields.Add(fieldId);
+        });
+
+        Assert.Equal(2, found.Count);
+        Assert.Equal(new ushort[] { 1, 2 }, found[1]);
+        Assert.Equal(new ushort[] { 7 }, found[2]);
+    }
 }
