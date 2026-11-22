@@ -989,6 +989,7 @@ public sealed class StorageSnapshot : IDisposable
         private StorageBTreePrefixCursor? _cursor;
         private byte[]? _currentKey;
         private byte[]? _currentValue;
+        private const int MaxReusableEntryBufferLength = 4096;
         private bool _finished;
         private bool _disposed;
 
@@ -1011,10 +1012,9 @@ public sealed class StorageSnapshot : IDisposable
 
             bool Add(in StorageEntryView entry)
             {
-                // TryReadNext already materializes one owned key/value pair and keeps
-                // those arrays alive in the cursor fields. Transfer those arrays to the
-                // returned page instead of copying both spans a second time.
-                result.Add(new StorageEntry(_currentKey!, _currentValue!));
+                // VisitPage reuses cursor scratch buffers. A returned page owns its
+                // arrays, so copy the borrowed spans before the next row is visited.
+                result.Add(new StorageEntry(entry.Key.ToArray(), entry.Value.ToArray()));
                 return true;
             }
         }
@@ -1056,31 +1056,51 @@ public sealed class StorageSnapshot : IDisposable
             StorageBTreeManifestV2 manifest = _owner._manifest;
             while (cursor.TryReadNext(out StorageTreeEntry treeEntry))
             {
-                byte[] key = files.ReadData(
+                byte[] key = GetEntryBuffer(ref _currentKey, treeEntry.Key.Length);
+                files.ReadDataInto(
                     treeEntry.Key.Offset,
                     treeEntry.Key.Length,
-                    manifest.CommittedDataFileLength);
-                if (_afterKey.Length != 0 && key.AsSpan().SequenceCompareTo(_afterKey) <= 0)
+                    manifest.CommittedDataFileLength,
+                    key.AsSpan(0, treeEntry.Key.Length));
+                ReadOnlySpan<byte> keySpan = key.AsSpan(0, treeEntry.Key.Length);
+                if (_afterKey.Length != 0 && keySpan.SequenceCompareTo(_afterKey) <= 0)
                     continue;
-                if (_prefix.Length != 0 && !key.AsSpan().StartsWith(_prefix))
+                if (_prefix.Length != 0 && !keySpan.StartsWith(_prefix))
                 {
                     _finished = true;
                     break;
                 }
 
-                byte[] value = files.ReadData(
+                byte[] value = GetEntryBuffer(ref _currentValue, treeEntry.Value.Length);
+                files.ReadDataInto(
                     treeEntry.Value.Offset,
                     treeEntry.Value.Length,
-                    manifest.CommittedDataFileLength);
-                _currentKey = key;
-                _currentValue = value;
-                entry = new StorageEntryView(_currentKey, _currentValue);
+                    manifest.CommittedDataFileLength,
+                    value.AsSpan(0, treeEntry.Value.Length));
+                entry = new StorageEntryView(keySpan, value.AsSpan(0, treeEntry.Value.Length));
                 return true;
             }
 
             _finished = true;
             entry = default;
             return false;
+        }
+
+        private static byte[] GetEntryBuffer(ref byte[]? buffer, int length)
+        {
+            if (length < 0)
+                throw new InvalidDataException("B+ tree entry length is negative.");
+            if (length > MaxReusableEntryBufferLength)
+                return new byte[length];
+
+            if (buffer is null || buffer.Length < length)
+            {
+                int capacity = buffer is null
+                    ? Math.Max(128, length)
+                    : Math.Min(MaxReusableEntryBufferLength, Math.Max(length, buffer.Length * 2));
+                buffer = new byte[capacity];
+            }
+            return buffer;
         }
 
         public void Dispose()
